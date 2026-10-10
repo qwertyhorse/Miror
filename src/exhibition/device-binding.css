@@ -1,0 +1,25 @@
+.ex-device-binding{margin-top:16px;padding:16px;border:1px solid #e2d8f3;border-radius:9px;background:#faf7ff}
+.ex-binding-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:13px}
+.ex-binding-heading h3{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#665778}
+.ex-binding-status{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:4px 8px;font-size:10px;background:#ede8f2;color:#9888a6;white-space:nowrap}
+.ex-binding-status.is-online{background:#e5f4ec;color:#3f8b6c}
+.ex-binding-summary{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.ex-binding-summary>div{min-width:0}
+.ex-binding-summary strong{font-size:14px;line-height:1.5;overflow-wrap:anywhere;color:#4f3f63}
+.ex-binding-summary p,.ex-binding-last-seen{font-size:10px;color:#9687a5;line-height:1.7;margin-top:5px!important}
+.ex-device-binding .ex-button{min-height:38px;font-size:11px;flex-shrink:0}
+.ex-binding-unbind{border-color:#e7c8d1!important;background:#fff7fa!important;color:#a25e74!important}
+.ex-binding-empty>p{font-size:12px;line-height:1.8;color:#89759b;margin:0 0 10px!important}
+.ex-binding-empty>p.ex-binding-instructions{font-size:10px;color:#a08caf;margin:10px 0 0!important}
+.ex-binding-notice{display:flex;align-items:flex-start;gap:6px;font-size:11px;line-height:1.7;color:#5f8770;margin-top:10px!important}
+.ex-binding-notice>svg{flex-shrink:0;margin-top:2px}
+.ex-binding-guide{font-size:13px;line-height:1.9;color:#8c789c;margin:0 0 20px!important}
+.ex-mirror-field input.ex-binding-code{font-size:28px;letter-spacing:.38em;font-variant-numeric:tabular-nums;min-height:60px;text-align:center;padding-left:20px}
+.ex-binding-target{display:flex;align-items:center;gap:14px;padding:16px;border-radius:8px;background:#f6f2fc;color:#86729d}
+.ex-binding-target>svg{flex-shrink:0}
+.ex-binding-target>div{min-width:0}
+.ex-binding-target strong{display:block;font-size:15px;line-height:1.6;overflow-wrap:anywhere}
+.ex-binding-target span{display:block;font-size:10px;line-height:1.7;color:#a08dac;overflow-wrap:anywhere;margin-top:3px}
+.ex-mirror-list small.ex-terminal-nav-status{font-size:10px;color:#9c8dab}
+.ex-mirror-list small.ex-terminal-nav-status.is-online{color:#5a987c}
+@media(max-width:620px){.ex-device-binding{padding:14px}.ex-device-binding .ex-button{min-height:42px}.ex-binding-summary{align-items:flex-start}.ex-binding-dialog footer .ex-button{flex:1}.ex-mirror-field input.ex-binding-code{font-size:26px}}

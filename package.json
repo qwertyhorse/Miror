@@ -1,0 +1,46 @@
+{
+  "name": "exhibition-smart-mirror",
+  "private": true,
+  "version": "1.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n web,api \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:api": "tsx server/index.ts",
+    "build": "npm run typecheck && vite build",
+    "typecheck": "tsc -p tsconfig.json && tsc -p server/tsconfig.json",
+    "test": "vitest run",
+    "lan:serve": "node scripts/lan-preview.mjs serve",
+    "lan:start": "node scripts/lan-managed.mjs start",
+    "lan:stop": "node scripts/lan-managed.mjs stop",
+    "lan:status": "node scripts/lan-managed.mjs status",
+    "camera:check": "node scripts/camera-https.mjs check",
+    "camera:serve": "node scripts/camera-https.mjs serve",
+    "camera:certificate": "bash scripts/lan-certificate.sh"
+  },
+  "dependencies": {
+    "@xmaxai/sdk": "1.1.13",
+    "@xmaxai/sdk-global": "^1.1.13",
+    "lucide-react": "^1.49.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.3"
+  },
+  "overrides": {
+    "fast-xml-parser": "5.7.0"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

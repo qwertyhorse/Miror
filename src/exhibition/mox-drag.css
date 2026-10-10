@@ -1,0 +1,72 @@
+.mox-drag-surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.mox-drag-media,
+.mox-drag-image,
+.mox-drag-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mox-drag-media > .ex-stream-video {
+  width: 100%;
+  height: 100%;
+}
+
+.mox-drag-media .ex-video-play {
+  z-index: 3;
+}
+
+.mox-drag-media video,
+.mox-drag-surface > .mox-drag-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+}
+
+.mox-drag-image {
+  z-index: 1;
+  background: #0d0b18;
+  user-select: none;
+  pointer-events: none;
+}
+
+.mox-drag-input {
+  z-index: 2;
+  pointer-events: none;
+}
+
+.mox-drag-input[data-enabled] {
+  pointer-events: auto;
+  touch-action: none;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mox-drag-input[data-dragging] {
+  cursor: grabbing;
+}
+
+.mox-drag-marker {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #8060e8a6;
+  box-shadow: 0 0 0 5px #8060e84d, 0 2px 10px #0005;
+  pointer-events: none;
+}

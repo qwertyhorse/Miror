@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="data:,">
+  <title>OpenBuy · 摄像头检测</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f7f5fc;color:#30284a;font:16px/1.5 system-ui,-apple-system,sans-serif}main{max-width:760px;margin:32px auto;padding:24px;background:white;border:1px solid #e6def5;border-radius:18px}header,.actions{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{margin:0;font-size:24px}a{color:#7554cf}dl{display:grid;grid-template-columns:120px 1fr;margin:24px 0;gap:12px}dt{color:#81758f}dd{margin:0;overflow-wrap:anywhere}label{display:block;margin:16px 0 6px}select,button{font:inherit;border:1px solid #ddd3ee;border-radius:9px;padding:11px 14px;background:#fff;color:inherit}select{width:100%}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}#start{background:#7554cf;color:#fff;border-color:#7554cf}.actions{justify-content:flex-start;flex-wrap:wrap;margin:20px 0}.status{padding:12px 14px;border-radius:9px;background:#f1ecfa}.status[data-tone="error"]{background:#fff0f1;color:#a42a3c}.status[data-tone="ok"]{background:#eaf7f0;color:#286d4f}video{display:block;width:100%;height:320px;margin:18px 0;background:#eeebf4;object-fit:contain;border-radius:12px}details{margin:20px 0}summary{cursor:pointer}pre{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;background:#f8f6fb;padding:12px;border-radius:9px}#copy{font-size:14px}button:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #b6a0ee;outline-offset:3px}@media(max-width:600px){main{margin:12px;padding:18px}h1{font-size:21px}header a{font-size:14px}video{height:260px}dl{grid-template-columns:100px 1fr}}
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>摄像头检测</h1><a id="back" href="./exhibition/screen">返回大屏</a></header>
+  <dl>
+    <dt>安全上下文</dt><dd id="secure">检查中</dd>
+    <dt>摄像头接口</dt><dd id="api">检查中</dd>
+    <dt>可见摄像头</dt><dd id="devices">检查中</dd>
+    <dt>视频轨道</dt><dd id="tracks">尚未检测</dd>
+    <dt>实际画面</dt><dd id="frame">尚未检测</dd>
+  </dl>
+  <label for="profile">取景参数</label>
+  <select id="profile"><option value="default">浏览器默认</option><option value="screen">当前大屏参数</option></select>
+  <label for="camera">摄像头</label>
+  <select id="camera"><option value="">自动选择</option></select>
+  <div class="actions"><button id="start" type="button">开始检测</button><button id="stop" type="button" disabled>停止</button><button id="use-screen" type="button" disabled>用于大屏</button></div>
+  <div id="status" class="status" role="status" aria-live="polite">点击开始检测</div>
+  <video id="video" autoplay muted playsinline aria-label="摄像头本地画面"></video>
+  <details><summary>检测详情</summary><pre id="report"></pre><button id="copy" type="button">复制检测结果</button></details>
+</main>
+<script>
+(function () {
+  'use strict';
+  if (location.protocol === 'http:' && /^\/v1\.1\/camera-check\.html$/.test(location.pathname)) {
+    var destination = new URL(location.href);
+    destination.protocol = 'https:';
+    destination.port = '10202';
+    location.replace(destination.href);
+    return;
+  }
+  function el(id) { return document.getElementById(id); }
+  var media = navigator.mediaDevices;
+  var supported = !!(media && typeof media.getUserMedia === 'function');
+  var secure = window.isSecureContext === true;
+  var video = el('video');
+  var current = null;
+  var pending = null;
+  var serial = 0;
+  var enumerationSerial = 0;
+  var alive = true;
+  var navigating = false;
+  var navigationTimer = null;
+  var last = { origin: location.origin, browser: navigator.userAgent, secureContext: secure, cameraAPI: supported, cameras: [], result: '尚未检测' };
+  el('back').href = './exhibition/screen' + location.search;
+  el('secure').textContent = secure ? '浏览器认可安全上下文' : '未通过浏览器安全上下文检查';
+  el('api').textContent = supported ? '可用' : '不可用';
+  function report() { el('report').textContent = JSON.stringify(last, null, 2); }
+  function status(message, tone) { last.result = message; el('status').textContent = message; el('status').setAttribute('data-tone', tone || ''); report(); }
+  function buttons() {
+    el('start').disabled = navigating || !!current || !secure || !supported;
+    el('start').textContent = pending && !current ? '刷新重试' : '开始检测';
+    el('stop').disabled = navigating || !current;
+    el('stop').textContent = current && !current.stream ? '取消等待' : '停止';
+    el('camera').disabled = navigating || !!current || !!pending;
+    el('profile').disabled = navigating || !!current || !!pending;
+    el('use-screen').disabled = navigating || !usableTrack(current);
+    el('use-screen').textContent = navigating ? '返回大屏…' : '用于大屏';
+  }
+  function owns(run) { return alive && current === run && serial === run.id; }
+  function usableTrack(run) {
+    if (!run || !owns(run) || !run.stream || !run.hasFrame) return null;
+    return run.stream.getVideoTracks().filter(function (track) { return track.readyState === 'live' && !track.muted; })[0] || null;
+  }
+  function release(stream) { stream.getTracks().forEach(function (track) { track.onended = null; track.onmute = null; track.onunmute = null; track.stop(); }); }
+  function detach() { video.onloadeddata = null; video.onplaying = null; video.onresize = null; video.pause(); video.srcObject = null; }
+  function cancel(message) {
+    var run = current;
+    ++serial;
+    current = null;
+    if (run) { clearTimeout(run.waitTimer); clearTimeout(run.frameTimer); if (run.stream) release(run.stream); }
+    detach();
+    buttons();
+    if (message) {
+      if (run && run.stream) { last.tracks = trackData(run.stream); last.streamActive = run.stream.active; }
+      el('tracks').textContent = '已停止'; el('frame').textContent = '已停止'; status(message);
+    }
+  }
+  function trackData(stream) {
+    return stream.getTracks().map(function (track) {
+      var settings = {};
+      try { if (typeof track.getSettings === 'function') settings = track.getSettings() || {}; } catch (error) { settings = { error: error.message || '参数读取失败' }; }
+      return { kind: track.kind, label: track.label, readyState: track.readyState || '未提供', muted: track.muted, enabled: track.enabled,
+        settings: { width: settings.width, height: settings.height, frameRate: settings.frameRate, facingMode: settings.facingMode, error: settings.error } };
+    });
+  }
+  function updateTracks(run) {
+    if (!owns(run) || !run.stream) return;
+    last.streamActive = run.stream.active;
+    last.tracks = trackData(run.stream);
+    var tracks = run.stream.getVideoTracks();
+    el('tracks').textContent = tracks.length ? tracks.map(function (track) { return (track.label || '视频') + ' · ' + (track.readyState || '未提供状态') + (track.muted ? ' · 暂无输入' : ''); }).join('；') : '0 条视频轨道';
+    buttons();
+    report();
+  }
+  function enumerate(epoch) {
+    var enumeration = ++enumerationSerial;
+    if (!media || typeof media.enumerateDevices !== 'function') { el('devices').textContent = '浏览器不支持枚举'; return Promise.resolve(); }
+    return media.enumerateDevices().then(function (devices) {
+      if (!alive || epoch !== serial || enumeration !== enumerationSerial) return;
+      var cameras = devices.filter(function (device) { return device.kind === 'videoinput'; });
+      last.cameras = cameras.map(function (device) { return { label: device.label || '未提供名称', deviceId: device.deviceId ? device.deviceId.slice(0, 8) : '' }; });
+      el('devices').textContent = cameras.length + ' 台';
+      var selected = el('camera').value;
+      el('camera').textContent = '';
+      var option = document.createElement('option'); option.value = ''; option.textContent = '自动选择'; el('camera').appendChild(option);
+      cameras.forEach(function (camera, index) { var item = document.createElement('option'); item.value = camera.deviceId; item.textContent = camera.label || '摄像头 ' + (index + 1); el('camera').appendChild(item); });
+      if (cameras.some(function (camera) { return camera.deviceId === selected; })) el('camera').value = selected;
+      delete last.enumerationError; report();
+    }, function (error) { if (alive && epoch === serial && enumeration === enumerationSerial) { el('devices').textContent = '枚举失败'; last.enumerationError = { name: error.name, message: error.message }; report(); } });
+  }
+  function frame(run) {
+    if (!owns(run) || !run.stream) return;
+    last.video = { width: video.videoWidth, height: video.videoHeight, readyState: video.readyState };
+    if (run.stream.getVideoTracks().some(function (track) { return track.readyState === 'live' && !track.muted; }) && video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+      run.hasFrame = true;
+      last.hasFrame = true;
+      clearTimeout(run.frameTimer);
+      el('frame').textContent = video.videoWidth + ' × ' + video.videoHeight;
+      status('已取得摄像头画面', 'ok');
+    }
+    buttons();
+    report();
+  }
+  function errorMessage(error) {
+    if (error.name === 'NotAllowedError' || error.name === 'SecurityError') return '摄像头被拒绝，请检查 Chrome 应用和网站权限';
+    if (error.name === 'NotFoundError') return '浏览器未找到摄像头，请检查 USB 连接及系统识别';
+    if (error.name === 'OverconstrainedError') return '摄像头不支持本次参数，请改用浏览器默认参数';
+    if (error.name === 'NotReadableError' || error.name === 'AbortError') return '摄像头读取失败，请关闭占用摄像头的应用后重试';
+    return '摄像头检测失败：' + (error.message || error.name || '未知错误');
+  }
+  function start() {
+    if (navigating) return;
+    if (pending && !current) { location.reload(); return; }
+    if (current || pending || !secure || !supported) return;
+    var cameraId = el('camera').value;
+    var profile = el('profile').value;
+    var constraints = { audio: false, video: true };
+    if (profile === 'screen') constraints.video = { facingMode: 'user', width: { ideal: 1080 }, height: { ideal: 1920 }, frameRate: { ideal: 30, max: 30 } };
+    if (cameraId) { if (constraints.video === true) constraints.video = {}; delete constraints.video.facingMode; constraints.video.deviceId = { exact: cameraId }; }
+    var run = { id: ++serial, stream: null, hasFrame: false, cameraId: cameraId, profile: profile };
+    current = run; pending = run;
+    last = { origin: location.origin, browser: navigator.userAgent, secureContext: secure, cameraAPI: supported, cameras: last.cameras, profile: profile, constraints: constraints, tracks: [], hasFrame: false };
+    el('tracks').textContent = '等待浏览器返回'; el('frame').textContent = '等待视频轨道';
+    buttons(); status('等待摄像头授权或设备响应');
+    run.waitTimer = setTimeout(function () { if (owns(run) && !run.stream) status('仍在等待摄像头，可取消后刷新重试'); }, 15000);
+    Promise.resolve().then(function () { return owns(run) ? media.getUserMedia(constraints) : null; }).then(function (stream) {
+      if (pending === run) pending = null;
+      clearTimeout(run.waitTimer);
+      if (!stream) { if (alive) buttons(); return; }
+      if (!owns(run)) { release(stream); if (alive) buttons(); return; }
+      run.stream = stream;
+      updateTracks(run);
+      var tracks = stream.getVideoTracks();
+      if (!tracks.some(function (track) { return track.readyState === 'live'; })) {
+        var message = tracks.length ? '浏览器返回的视频轨道已结束或状态异常' : '浏览器返回了空视频流（0 条视频轨道）';
+        cancel(); void enumerate(serial); el('frame').textContent = '未取得画面'; status(message, 'error'); return;
+      }
+      void enumerate(run.id);
+      tracks.forEach(function (track) {
+        track.onended = function () { if (!owns(run)) return; updateTracks(run); if (!stream.getVideoTracks().some(function (item) { return item.readyState === 'live'; })) { cancel(); el('frame').textContent = '已中断'; status('摄像头视频轨道已结束', 'error'); } };
+        track.onmute = function () { if (!owns(run)) return; updateTracks(run); status('视频轨道暂无输入', 'error'); };
+        track.onunmute = function () { if (!owns(run)) return; updateTracks(run); frame(run); };
+      });
+      video.onloadeddata = function () { frame(run); }; video.onplaying = function () { frame(run); }; video.onresize = function () { frame(run); };
+      video.srcObject = stream;
+      el('frame').textContent = '等待首帧'; status('已取得视频轨道，等待画面'); buttons();
+      run.frameTimer = setTimeout(function () { if (owns(run) && !run.hasFrame) { last.video = { width: video.videoWidth, height: video.videoHeight, readyState: video.readyState }; status('视频轨道存在，但 8 秒内没有画面', 'error'); } }, 8000);
+      var playing = video.play();
+      if (playing && typeof playing.catch === 'function') playing.catch(function (error) { if (owns(run)) { clearTimeout(run.frameTimer); last.playbackError = { name: error.name, message: error.message }; el('frame').textContent = '播放失败'; status('视频播放失败，请复制检测结果', 'error'); } });
+    }).catch(function (error) {
+      if (pending === run) pending = null; clearTimeout(run.waitTimer);
+      if (!owns(run)) { if (alive) buttons(); return; }
+      last.error = { name: error.name, message: error.message, constraint: error.constraint };
+      cancel(); el('tracks').textContent = '未取得视频轨道'; el('frame').textContent = '未取得画面'; status(errorMessage(error), 'error');
+    });
+  }
+  el('start').onclick = start;
+  el('stop').onclick = function () { cancel(pending ? '已取消等待，可刷新后重试' : '已停止检测'); };
+  el('use-screen').onclick = function () {
+    if (navigating) return;
+    var run = current;
+    var track = usableTrack(run);
+    if (!track) { buttons(); return; }
+    var settings = {};
+    try { if (typeof track.getSettings === 'function') settings = track.getSettings() || {}; } catch (error) {}
+    var deviceId = typeof settings.deviceId === 'string' ? settings.deviceId.trim() : '';
+    if (!deviceId) deviceId = run.cameraId;
+    if (!deviceId) { status('无法确认相机，请从列表选择后重新检测', 'error'); return; }
+    var preference = { deviceId: deviceId, label: typeof track.label === 'string' ? track.label : '', profile: run.profile === 'screen' ? 'screen' : 'default' };
+    try { localStorage.setItem('openbuy:versions:v1.1:exhibition-camera-preference', JSON.stringify(preference)); }
+    catch (error) { status('相机设置保存失败，请允许浏览器保存网站数据', 'error'); return; }
+    navigating = true;
+    cancel('正在返回大屏');
+    // Android camera drivers can take a moment to release the stopped device.
+    navigationTimer = setTimeout(function () {
+      navigationTimer = null;
+      if (alive) location.assign('./exhibition/screen' + location.search);
+    }, 650);
+  };
+  el('copy').onclick = function () {
+    function fallback() { var field = document.createElement('textarea'); field.value = JSON.stringify(last, null, 2); field.style.position = 'fixed'; field.style.opacity = '0'; document.body.appendChild(field); field.select(); var copied = false; try { copied = document.execCommand('copy'); } catch (error) {} document.body.removeChild(field); el('copy').textContent = copied ? '已复制' : '请在检测详情中选择并复制'; }
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') navigator.clipboard.writeText(JSON.stringify(last, null, 2)).then(function () { el('copy').textContent = '已复制'; }, fallback); else fallback();
+  };
+  window.addEventListener('pagehide', function () { alive = false; clearTimeout(navigationTimer); navigationTimer = null; cancel(); });
+  if (media && typeof media.addEventListener === 'function') media.addEventListener('devicechange', function () { void enumerate(serial); });
+  buttons(); report();
+  if (!secure) status('连接未通过安全检查，请先处理 HTTPS 证书信任', 'error');
+  else if (!supported) status('当前浏览器未提供摄像头接口', 'error');
+  void enumerate(serial);
+}());
+</script>
+</body>
+</html>

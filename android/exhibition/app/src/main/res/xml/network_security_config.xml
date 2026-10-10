@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- LAN IP addresses are configurable at runtime and cannot be enumerated here.
+         UrlPolicy restricts HTTP configuration to local hostnames/private addresses;
+         MainActivity restricts navigation and fetched resources to that saved origin.
+         Use HTTPS plus a fixed domain-config for an Internet deployment. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <!-- A technician must install the existing local CA on each exhibition device.
+         This does not install a CA or ignore certificate/hostname validation. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">xuminghong.local</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

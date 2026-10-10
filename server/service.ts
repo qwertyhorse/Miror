@@ -1,0 +1,270 @@
+import { randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+import { ApiError, type Provider, type SessionRecord, type SessionRequest } from './types.ts';
+import type { XmaxRegion } from '../shared/xmax.ts';
+import { apiKeyBudgetScope, SecretBox, SessionStore } from './store.ts';
+import { MirrorCredentialStore } from './mirrorCredentials.ts';
+import { XmaxProvider } from './provider.ts';
+import { EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibitionPromptForLook, type ExhibitionExperienceMode, type ExhibitionReferenceKind, type ExhibitionCredentialsStatus } from '../shared/exhibition.ts';
+
+export interface ServiceOptions {
+  provider: Provider; store: SessionStore; secrets: SecretBox;
+  perSessionLimit?: number; expireSeconds?: number;
+  resolveHost?: (host: string) => Promise<string[]>;
+  mirrorCredentials?: MirrorCredentialStore;
+  providerForApiKey?: (apiKey: string, region?: XmaxRegion) => Provider;
+}
+export function publicAddress(address: string): boolean {
+  if (isIP(address) === 4) {
+    const [a, b] = address.split('.').map(Number);
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0)) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19)));
+  }
+  if (isIP(address) === 6) {
+    const lower = address.toLowerCase();
+    // IPv4-mapped, unspecified, loopback, local, documentation and multicast.
+    return !(/^(::|fc|fd|fe[89ab]|ff|2001:db8)/.test(lower));
+  }
+  return false;
+}
+function httpsUrl(value: string): URL {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new ApiError('INVALID_REMOTE_URL', '媒体链接无效。'); }
+  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443') || url.hash || isIP(url.hostname)) throw new ApiError('INVALID_REMOTE_URL', '仅允许已核验的 HTTPS 媒体链接。');
+  return url;
+}
+function boundedText(value: unknown, name: string, max = 150): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u001f]/.test(value)) throw new ApiError('INVALID_INPUT', `${name}无效。`);
+  return value.trim();
+}
+export class TryOnService {
+  readonly perSessionLimit: number; readonly expireSeconds: number;
+  private readonly stoppingSessions = new Map<string, Promise<Omit<SessionRecord, 'tokenCipher' | 'providerKeyCipher'>>>();
+  constructor(readonly options: ServiceOptions) {
+    this.perSessionLimit = Math.min(30, options.perSessionLimit ?? 30);
+    this.expireSeconds = Math.min(120, options.expireSeconds ?? 120);
+    if (![this.perSessionLimit, this.expireSeconds].every(n => Number.isInteger(n) && n > 0)) throw new Error('Invalid temporary credential configuration');
+  }
+  private token(record: SessionRecord): string {
+    if (!record.tokenCipher) throw new ApiError('SESSION_NOT_READY', '会话尚未签发临时凭证。', 409);
+    return this.options.secrets.decrypt(record.tokenCipher);
+  }
+  private providerForApiKey(apiKey: string, region: XmaxRegion = 'global'): Provider { return this.options.providerForApiKey?.(apiKey, region) ?? this.options.provider.forCredential?.(apiKey, region) ?? new XmaxProvider(apiKey, undefined, region); }
+  private credentialContext(mirrorId?: string): { provider: Provider; scope: string; region: XmaxRegion; key?: string } {
+    const override = mirrorId === undefined ? undefined : this.options.mirrorCredentials?.apiKey(mirrorId);
+    const config = mirrorId === undefined ? undefined : this.options.mirrorCredentials?.configuration(mirrorId);
+    const region = override === undefined ? this.options.provider.region ?? 'global' : config?.region ?? 'global';
+    const key = override ?? this.options.provider.credentialSnapshot?.();
+    if (key && /^uk-[A-Za-z0-9_-]+$/u.test(key)) return { provider: override === undefined ? this.options.provider : this.providerForApiKey(key, region), scope: apiKeyBudgetScope(key), region, key };
+    return { provider: this.options.provider, scope: this.options.store.currentBudgetScope(), region };
+  }
+  private sessionProvider(record: SessionRecord): Provider {
+    const region = record.providerRegion ?? 'global';
+    if (record.providerKeyCipher) {
+      try { return this.providerForApiKey(this.options.secrets.decrypt(record.providerKeyCipher), region); }
+      catch { throw new ApiError('SESSION_CREDENTIALS_UNAVAILABLE', '会话原始密钥无法读取，停止状态尚未确认。', 503); }
+    }
+    // Old records did not retain their signing key. Only use the current default
+    // when its persistent scope proves ownership; never try a different UK.
+    const context = this.credentialContext();
+    if (context.key && this.options.store.sessionBudgetScope(record.id) !== context.scope) throw new ApiError('SESSION_CREDENTIALS_UNAVAILABLE', '会话原始密钥不可用，请保留原始配置后重试。', 503);
+    if (context.region !== region) {
+      if (!context.key) throw new ApiError('SESSION_CREDENTIALS_UNAVAILABLE', '会话原始区域配置不可用，停止状态尚未确认。', 503);
+      return this.providerForApiKey(context.key, region);
+    }
+    return context.provider;
+  }
+  public(record: SessionRecord) {
+    const { tokenCipher: _secret, providerKeyCipher: _providerSecret, ...safe } = record;
+    return safe.exhibition ? { ...safe, exhibition: { ...safe.exhibition, mirrorId: safe.exhibition.mirrorId ?? 'default' } } : safe;
+  }
+  /** Check immutable session ownership before reading provider state or mutating a session. */
+  assertSessionMirror(id: string, mirrorId = 'default', requireExhibition = false): void {
+    const record = this.options.store.get(id);
+    if ((!record.exhibition && requireExhibition) || (record.exhibition && (record.exhibition.mirrorId ?? 'default') !== mirrorId)) {
+      throw new ApiError('EXHIBITION_MIRROR_MISMATCH', '这个会话不属于当前试衣镜。', 409);
+    }
+  }
+  isUnconfirmedExhibitionSession(id: string, mirrorId: string): boolean {
+    this.assertSessionMirror(id, mirrorId, true);
+    return this.isUnknownIssuance(this.options.store.get(id));
+  }
+  status(mirrorId?: string) {
+    const context = this.credentialContext(mirrorId);
+    return { configured: context.provider.configured, model: 'x2.0', providerRegion: context.region,
+      perSessionLimit: this.perSessionLimit,
+      activeSessions: this.options.store.list().filter(s => ['reserved', 'active', 'stopping', 'issuance_unknown'].includes(s.status) && (mirrorId === undefined || (s.exhibition && (s.exhibition.mirrorId ?? 'default') === mirrorId))).map(s => this.public(s)),
+    };
+  }
+  private canChangeMirrorCredentials(mirrorId: string): boolean {
+    return this.options.store.list().filter(row => ['reserved', 'active', 'stopping', 'issuance_unknown'].includes(row.status) && row.exhibition && (row.exhibition.mirrorId ?? 'default') === mirrorId).every(row => {
+      if (row.status !== 'issuance_unknown' || row.tokenCipher || !row.providerKeyCipher || (row.providerRegion !== undefined && !['cn', 'global'].includes(row.providerRegion))) return false;
+      try { return /^uk-[A-Za-z0-9_-]+$/u.test(this.options.secrets.decrypt(row.providerKeyCipher)); }
+      catch { return false; }
+    });
+  }
+  mirrorCredentialsStatus(mirrorId: string, editable = true): ExhibitionCredentialsStatus {
+    const config = this.options.mirrorCredentials?.configuration(mirrorId) ?? { revision: 0, hasOverride: false, region: 'global' as const };
+    const context = this.credentialContext(mirrorId);
+    return { configured: context.provider.configured, source: config.hasOverride ? 'mirror' : 'default', revision: config.revision, region: context.region,
+      hasUnconfirmedSession: this.options.store.list().some(row => row.exhibition && (row.exhibition.mirrorId ?? 'default') === mirrorId && (row.status === 'issuance_unknown' || this.isUnknownIssuance(row))),
+      editable: editable && !!this.options.mirrorCredentials && this.canChangeMirrorCredentials(mirrorId), perSessionLimit: this.perSessionLimit };
+  }
+  saveMirrorCredentials(mirrorId: string, input: { apiKey?: unknown; expectedRevision?: unknown; region?: unknown }, editable = true): ExhibitionCredentialsStatus {
+    if (!this.options.mirrorCredentials) throw new ApiError('SETTINGS_UNAVAILABLE', '当前服务暂不支持镜端密钥设置。', 503);
+    if (!editable || !this.canChangeMirrorCredentials(mirrorId)) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请先结束此镜的体验并等待会话停止，再更换密钥。', 409);
+    this.options.mirrorCredentials.save(mirrorId, input.apiKey, input.expectedRevision, input.region);
+    return this.mirrorCredentialsStatus(mirrorId);
+  }
+  /** Mirror-only session issuance; supplier quota is authoritative. */
+  async createExhibition(input: { mirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
+    const lookId = boundedText(input.lookId, '展会服装 ID');
+    const deviceId = boundedText(input.deviceId, '设备 ID');
+    const mirrorId = input.mirrorId ?? 'default';
+    const mode = input.mode ?? 'clothx';
+    if (!EXHIBITION_EXPERIENCE_MODES.includes(mode)) throw new ApiError('EXHIBITION_INVALID_MODE', '请选择有效的体验模式。');
+    const noReference = input.referenceKind === 'none';
+    if ((input.referenceKind !== undefined && input.referenceKind !== 'image' && !noReference) || (noReference && (mode !== 'free' || input.referenceAsset !== ''))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '仅 Free 模式可以不使用参考图，封面图不能作为参考图发送。');
+    if (mode === 'free' && (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.trim().length > EXHIBITION_FREE_PROMPT_MAX_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(input.prompt))) throw new ApiError('EXHIBITION_INVALID_PROMPT', 'Free 模式需要有效的提示词。');
+    const prompt = exhibitionPromptForLook({ mode, prompt: input.prompt });
+    if (typeof mirrorId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(mirrorId)) throw new ApiError('EXHIBITION_INVALID_MIRROR', '试衣镜编号无效。');
+    const sample = /^\/assets\/exhibition\/(?:commute|city|evening)-cutout\.png$/.test(input.referenceAsset);
+    const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/(upload-[a-f0-9-]{36})$/.exec(input.referenceAsset);
+    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
+    if (!Number.isSafeInteger(input.sessionNumber) || input.sessionNumber < 1 || !Number.isSafeInteger(input.generationNumber) || input.generationNumber < 1) throw new ApiError('EXHIBITION_INVALID_SESSION', '请先开始一轮展会体验。');
+    return this.reserveSession({ targetItemId: lookId, sourceId: `exhibition:${deviceId}`, sourceKind: mode === 'mox' ? 'photo' : 'camera', sourceName: boundedText(input.name, '展会服装名称') }, '', input.referenceAsset, hooks,
+      { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber } });
+  }
+  private async reserveSession(request: SessionRequest, reference: string, referenceAsset: string | undefined,
+    hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }, extra: Pick<SessionRecord, 'exhibition'> = {}) {
+    const context = this.credentialContext(extra.exhibition ? extra.exhibition.mirrorId ?? 'default' : undefined);
+    if (!context.provider.configured) throw new ApiError('MISSING_API_KEY', '尚未配置 XMax 服务端凭证。', 503);
+    const now = new Date().toISOString();
+    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: this.perSessionLimit,
+      refImageUrl: reference, referenceAsset, referenceVersion: 0, consumedCredits: 0, resultAvailable: false, verification: 'none', createdAt: now, updatedAt: now,
+      providerRegion: context.region, ...(context.key ? { providerKeyCipher: this.options.secrets.encrypt(context.key) } : {}) };
+    // Keep ambiguous issuance records for cancellation and revocation. No local cumulative budget.
+    this.options.store.reserve(record, undefined, context.scope); hooks?.onReserved?.(record.id);
+    try {
+      if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') { this.options.store.update(record.id, { status: 'stopped' }); throw new ApiError('SESSION_CANCELLED', '试穿已取消。', 409); }
+      const issued = await context.provider.issueKey(this.perSessionLimit, this.expireSeconds);
+      this.options.store.update(record.id, { tokenCipher: this.options.secrets.encrypt(issued.token), expiresAt: issued.expiresAt });
+      if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') {
+        await this.stop(record.id);
+        // A stop requested before issuance can still be settling without a token.
+        // Once it settles, retry with the late token and require confirmation.
+        if (this.options.store.get(record.id).status !== 'stopped') await this.stop(record.id);
+        if (this.options.store.get(record.id).status !== 'stopped') throw new ApiError('STOP_NOT_CONFIRMED', '临时凭证停止尚未确认，请重试停止。', 502);
+        throw new ApiError('SESSION_CANCELLED', '试穿已取消，临时凭证已停止。', 409);
+      }
+      const active = this.options.store.update(record.id, { status: 'active' });
+      return { ...this.public(active), token: issued.token, model: 'x2.0' };
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : 'PROVIDER_UNKNOWN_ERROR';
+      const current = this.options.store.get(record.id);
+      if (code !== 'SESSION_CANCELLED' && current.status !== 'stopped') this.options.store.update(record.id, { status: current.tokenCipher ? 'stopping' : 'issuance_unknown', errorCode: code });
+      this.options.store.error(record.id, code);
+      throw error instanceof ApiError ? error : new ApiError(code, 'XMax 会话签发状态未确认，请联系工作人员。', 502);
+    }
+  }
+  async get(id: string, sync = true) {
+    let record = this.options.store.get(id);
+    if (sync && record.tokenCipher) {
+      try {
+        const provider = this.sessionProvider(record);
+        if (!provider.configured) return this.public(record);
+        const current = await provider.keyStatus(this.token(record));
+        const latest = this.options.store.get(id);
+        const stopped = current.status !== 'active';
+        record = this.options.store.update(id, { consumedCredits: Math.max(latest.consumedCredits, current.consumedCredit), expiresAt: current.expireTimestamp,
+          status: stopped ? 'stopped' : latest.status, errorCode: stopped || latest.status === 'active' ? undefined : latest.errorCode });
+      } catch (error) { this.options.store.error(id, error instanceof ApiError ? error.code : 'USAGE_SYNC_FAILED'); }
+    }
+    return this.public(this.options.store.get(id));
+  }
+  async link(id: string, providerSessionId: string) {
+    const record = this.options.store.get(id); const uid = boundedText(providerSessionId, '供应商会话 ID');
+    if (record.exhibition && record.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能关联供应商会话。', 409);
+    const promptOnlyExhibition = record.exhibition?.mode === 'free' && record.referenceAsset === '' && record.refImageUrl === '';
+    if (!record.refImageUrl && !promptOnlyExhibition) throw new ApiError('REFERENCE_NOT_READY', '请先上传并绑定服装参考图。', 409);
+    if (!/^ums-[A-Za-z0-9_-]+$/.test(uid)) throw new ApiError('INVALID_PROVIDER_SESSION', '供应商会话 ID 格式无效。');
+    if (record.providerSessionId && record.providerSessionId !== uid) throw new ApiError('SESSION_LINK_IMMUTABLE', '同一会话不可更换供应商会话 ID。', 409);
+    if (this.options.store.list().some(s => s.id !== id && s.providerSessionId === uid)) throw new ApiError('SESSION_ALREADY_LINKED', '供应商会话已关联其他本地记录。', 409);
+    const info = await this.sessionProvider(record).sessionStatus(this.token(record), uid);
+    // Re-check after await; another request may have stopped the exhibition or won the same link.
+    const latest = this.options.store.get(id);
+    if (record.exhibition && latest.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能关联供应商会话。', 409);
+    if (this.options.store.list().some(s => s.id !== id && s.providerSessionId === uid)) throw new ApiError('SESSION_ALREADY_LINKED', '供应商会话已关联其他本地记录。', 409);
+    const updated = this.options.store.update(id, { providerSessionId: uid, consumedCredits: Math.max(latest.consumedCredits, info.consumedCredit) });
+    return this.public(updated);
+  }
+  async firstFrame(id: string, firstFrameMs: number) {
+    const record = this.options.store.get(id);
+    if (record.exhibition && record.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能报告首帧。', 409);
+    if (!record.providerSessionId) throw new ApiError('SESSION_NOT_LINKED', '请先关联供应商会话。', 409);
+    if (typeof firstFrameMs !== 'number' || !Number.isFinite(firstFrameMs) || firstFrameMs < 0 || firstFrameMs > 120_000) throw new ApiError('INVALID_INPUT', '首帧耗时无效。');
+    return this.public(this.options.store.update(id, { firstFrameMs: record.firstFrameMs ?? firstFrameMs }));
+  }
+  stop(id: string): Promise<Omit<SessionRecord, 'tokenCipher' | 'providerKeyCipher'>> {
+    const existing = this.stoppingSessions.get(id);
+    if (existing) return existing;
+    const pending = this.stopNow(id).finally(() => { if (this.stoppingSessions.get(id) === pending) this.stoppingSessions.delete(id); });
+    this.stoppingSessions.set(id, pending);
+    return pending;
+  }
+  /** Close the local session immediately; provider revocation is reconciled next. */
+  cancelExhibitionSession(id: string, mirrorId: string): void {
+    this.assertSessionMirror(id, mirrorId, true);
+    const record = this.options.store.get(id);
+    if (this.isUnknownIssuance(record)) {
+      if (record.status !== 'issuance_unknown') this.options.store.update(id, { status: 'issuance_unknown' });
+      return;
+    }
+    if (!['stopped', 'stopping'].includes(record.status)) this.options.store.update(id, { status: 'stopping' });
+  }
+  private isUnknownIssuance(record: SessionRecord): boolean {
+    return !record.tokenCipher && (record.status === 'issuance_unknown' || (record.status === 'stopping' && !!record.errorCode));
+  }
+  private async stopNow(id: string) {
+    const record = this.options.store.get(id);
+    if (record.status === 'stopped') return this.public(record);
+    if (this.isUnknownIssuance(record)) {
+      return this.public(record.status === 'issuance_unknown' ? record : this.options.store.update(id, { status: 'issuance_unknown' }));
+    }
+    this.options.store.update(id, { status: 'stopping' });
+    if (!record.tokenCipher) return this.public(this.options.store.get(id));
+    try {
+      const info = await this.sessionProvider(record).deactivate(this.token(record));
+      if (info.status === 'active') throw new ApiError('REVOCATION_NOT_CONFIRMED', 'XMax 未确认临时凭证停止。', 502);
+      const latest = this.options.store.get(id);
+      return this.public(this.options.store.update(id, { status: 'stopped', consumedCredits: Math.max(latest.consumedCredits, info.consumedCredit), expiresAt: info.expireTimestamp, errorCode: undefined }));
+    } catch (error) {
+      const latest = this.options.store.get(id);
+      if (latest.status === 'stopped') return this.public(latest);
+      const code = error instanceof ApiError ? error.code : 'REVOCATION_FAILED';
+      this.options.store.update(id, { status: 'stopping', errorCode: code }); this.options.store.error(id, code);
+      throw new ApiError('STOP_NOT_CONFIRMED', '临时凭证停止尚未确认，请重试停止。', 502);
+    }
+  }
+  async bindExhibitionReference(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; refImageUrl: string }) {
+    this.assertSessionMirror(id, input.mirrorId ?? 'default', true);
+    const record = this.options.store.get(id);
+    if (!record.exhibition || record.exhibition.deviceId !== input.deviceId || record.exhibition.lookId !== input.lookId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前设备或服装与会话不匹配。', 409);
+    if (record.exhibition.mode === 'free' && record.referenceAsset === '') throw new ApiError('EXHIBITION_REFERENCE_NOT_REQUIRED', '此 Free 素材仅使用提示词，不能绑定封面或参考图。', 409);
+    if (record.status !== 'active' || record.providerSessionId || record.refImageUrl) throw new ApiError('EXHIBITION_REFERENCE_LOCKED', '展会参考图已锁定或会话已结束。', 409);
+    const refImageUrl = boundedText(input.refImageUrl, '参考图链接', 4096); const url = httpsUrl(refImageUrl);
+    const addresses = await (this.options.resolveHost ? this.options.resolveHost(url.hostname) : lookup(url.hostname, { all: true }).then(rows => rows.map(row => row.address)));
+    if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ApiError('REFERENCE_ADDRESS_BLOCKED', '参考图必须是 SDK 上传后可访问的云端链接。');
+    const latest = this.options.store.get(id);
+    if (latest.status !== 'active' || latest.refImageUrl || latest.providerSessionId) throw new ApiError('EXHIBITION_REFERENCE_LOCKED', '会话已停止或参考已锁定。', 409);
+    return this.public(this.options.store.update(id, { refImageUrl, referenceVersion: 1 }));
+  }
+  async recover() {
+    for (const record of this.options.store.list()) {
+      if (['reserved', 'stopping'].includes(record.status) && !record.tokenCipher) this.options.store.update(record.id, { status: 'issuance_unknown', errorCode: record.errorCode ?? 'RESTART_DURING_ISSUANCE' });
+      if (record.tokenCipher && ['active', 'stopping', 'reserved'].includes(record.status)) {
+        try { await this.stop(record.id); } catch { /* persisted stopping state; never claim revocation succeeded */ }
+      }
+    }
+  }
+}

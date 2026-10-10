@@ -1,0 +1,10 @@
+.ex-material-actions-trigger{display:grid;place-items:center;flex-shrink:0;width:32px;height:32px;padding:0;border:0;border-radius:6px;background:transparent;color:#8c7aa8;cursor:pointer}
+.ex-material-actions-trigger:hover:not(:disabled),.ex-material-actions-trigger[aria-expanded=true]{background:#f0eafa;color:#7056a6}
+.ex-material-actions-trigger:focus-visible{outline:2px solid #9b88dc;outline-offset:2px}
+.ex-material-actions-trigger:disabled{opacity:.4;cursor:default}
+.ex-material-actions-menu{position:fixed;z-index:1200;box-sizing:border-box;min-width:0;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;padding:5px;border:1px solid #e5ddef;border-radius:9px;background:#fff;color:#66587d;box-shadow:0 7px 24px #4b32631a;font-family:inherit}
+.ex-material-actions-menu>button{display:flex;align-items:center;gap:9px;box-sizing:border-box;width:100%;min-height:38px;padding:9px 10px;border:0;border-radius:5px;background:transparent;color:#66587d;font:inherit;font-size:12px;line-height:1.4;text-align:left;cursor:pointer;white-space:nowrap}
+.ex-material-actions-menu>button:hover,.ex-material-actions-menu>button:focus{outline:0;background:#f2edf9}
+.ex-material-actions-menu>button.ex-material-actions-delete{color:#a95162}
+.ex-material-actions-menu>button.ex-material-actions-delete:hover,.ex-material-actions-menu>button.ex-material-actions-delete:focus{background:#fff0f3}
+@media(pointer:coarse){.ex-material-actions-trigger{width:44px;height:44px}.ex-material-actions-menu>button{min-height:44px}}

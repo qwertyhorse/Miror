@@ -1,0 +1,392 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import sharp from 'sharp';
+import { ExhibitionService } from '../server/exhibition.ts';
+import { TryOnService } from '../server/service.ts';
+import { SecretBox, SessionStore } from '../server/store.ts';
+import { createApiServer } from '../server/http.ts';
+import { ApiError, type Provider, type IssuedKey, type KeyStatus } from '../server/types.ts';
+
+const cleanup: (() => void)[] = [];
+afterEach(() => cleanup.splice(0).forEach(fn => fn()));
+function fixture() {
+  let time = Date.now();
+  const directory = mkdtempSync(join(tmpdir(), 'openbuy-exhibition-live-'));
+  const store = new SessionStore(':memory:'); const keys = new Map<string, KeyStatus>();
+  cleanup.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
+  const issue = vi.fn(async (_limit: number, _seconds: number): Promise<IssuedKey> => {
+    const token = `tk-exhibition-${keys.size + 1}`; const expiresAt = new Date(time + 120000).toISOString();
+    keys.set(token, { status: 'active', consumedCredit: 1, expireTimestamp: expiresAt }); return { token, expiresAt };
+  });
+  const deactivate = vi.fn(async (token: string) => { const value = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, value); return value; });
+  const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!, deactivate,
+    sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
+  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)),
+    resolveHost: async host => host === 'private.example' ? ['127.0.0.1'] : ['8.8.8.8'] });
+  const exhibition = new ExhibitionService(directory, { now: () => time }); exhibition.attachLiveService(service);
+  return { exhibition, service, provider, store, issue, deactivate, keys, directory, now: () => time, advance: (amount: number) => { time += amount; } };
+}
+const deviceId = 'screen-test-001';
+function start(exhibition: ExhibitionService) {
+  exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
+  exhibition.command({ action: 'begin' });
+}
+async function create(exhibition: ExhibitionService) { return exhibition.createLiveSession({ deviceId, lookId: exhibition.get().selectedLookId, generationNumber: exhibition.get().generationNumber }); }
+
+describe('explicit exhibition XMAX path', () => {
+  it('requires explicit XMAX mode and a started experience', async () => {
+    const { exhibition, issue, store } = fixture();
+    expect(exhibition.liveStatus()).toMatchObject({ mode: 'demo', configured: true, perSessionLimit: 30, live: null });
+    for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(exhibition.liveStatus()).not.toHaveProperty(field);
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_LIVE_DISABLED' });
+    exhibition.command({ action: 'configure', providerMode: 'xmax' });
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
+    expect(issue).not.toHaveBeenCalled(); expect(store.allocated()).toBe(0);
+  });
+
+  it('binds only the selected library asset, publishes no token in shared state and waits for a genuine first-frame event', async () => {
+    const { exhibition, service, store, issue, advance, directory } = fixture(); start(exhibition);
+    const started = exhibition.get();
+    expect(started).toMatchObject({ phase: 'generating', sessionNumber: 1, generationNumber: 1, generationReadyAt: null, displayedLookId: null });
+    expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
+    expect(exhibition.get()).toEqual(started); expect(issue).not.toHaveBeenCalled();
+    await expect(exhibition.createLiveSession({ deviceId, lookId: 'city', generationNumber: exhibition.get().generationNumber })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_LOOK' });
+    const session = await create(exhibition);
+    expect(session).toMatchObject({ model: 'x2.0', referenceAsset: '/assets/exhibition/commute-cutout.png', refImageUrl: '', sourceKind: 'camera', pointsLimit: 30, exhibition: { lookId: 'commute', deviceId, sessionNumber: 1 } });
+    expect(issue).toHaveBeenCalledWith(30, 120); expect(store.allocated()).toBe(30);
+    expect(JSON.stringify(exhibition.get())).not.toContain(session.token); expect(readFileSync(join(directory, 'exhibition.json'), 'utf8')).not.toContain(session.token);
+    advance(5000); expect(exhibition.get().phase).toBe('generating');
+    await expect(service.link(session.id, 'ums-test')).rejects.toMatchObject({ code: 'REFERENCE_NOT_READY' });
+    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/garment.webp' });
+    await service.link(session.id, 'ums-test'); await service.firstFrame(session.id, 750); exhibition.liveFirstFrame(session.id, 750);
+    expect(exhibition.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'commute', live: { status: 'running', firstFrameMs: 750 } });
+  });
+
+  it('serializes simultaneous owners before credential allocation, including duplicate requests by the same device', async () => {
+    const { exhibition, issue, store } = fixture(); start(exhibition);
+    const results = await Promise.allSettled([create(exhibition), exhibition.createLiveSession({ deviceId: 'screen-test-002', lookId: 'commute', generationNumber: exhibition.get().generationNumber }), create(exhibition)]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter(result => result.status === 'rejected').map(result => result.reason.code)).toEqual(['EXHIBITION_DEVICE_BUSY', 'EXHIBITION_DEVICE_BUSY']);
+    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+  });
+
+  it('appends during live first-frame and heartbeat updates without replacing or extending the active session', async () => {
+    const { exhibition, service, store, issue, deactivate, advance } = fixture();
+    const bytes = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#bfbcff88' } }).png().toBuffer();
+    const input = { name: '现场新增服装', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), expectedRevision: 0 };
+    start(exhibition); const session = await create(exhibition);
+    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/garment.webp' });
+    await service.link(session.id, 'ums-active-upload');
+    const pending = exhibition.upload(input);
+    advance(5000); exhibition.heartbeat({ deviceId, sessionId: session.id });
+    await service.firstFrame(session.id, 750); exhibition.liveFirstFrame(session.id, 750);
+    const latest = exhibition.get(); const activeRecord = store.get(session.id);
+    expect(latest).toMatchObject({ phase: 'showcase', live: { status: 'running', sessionId: session.id, firstFrameMs: 750 } });
+    const appended = await pending;
+    const { looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, ...visitor } = appended;
+    const { looks: _previousLooks, revision: _previousRevision, updatedAt: _previousUpdatedAt, logs: _previousLogs, ...expectedVisitor } = latest;
+    expect(visitor).toEqual(expectedVisitor); expect(appended.looks).toHaveLength(4);
+    expect(appended.enabledLookIds).not.toContain(appended.looks.at(-1)!.id);
+    expect(store.get(session.id)).toEqual(activeRecord); expect(store.list()).toHaveLength(1);
+    expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled(); expect(store.allocated()).toBe(30);
+    advance(14000); const another = await exhibition.upload({ ...input, name: '继续上传' });
+    expect(another.live).toEqual(latest.live); expect(store.get(session.id).expiresAt).toBe(session.expiresAt);
+    advance(1000); await exhibition.sweepLive();
+    expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
+    expect(deactivate).toHaveBeenCalledTimes(1); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+  });
+
+  it('checks reference and heartbeat ownership, rejects private reference addresses, and locks an accepted reference', async () => {
+    const { exhibition } = fixture(); start(exhibition); const session = await create(exhibition);
+    expect(() => exhibition.heartbeat({ deviceId: 'other-screen', sessionId: session.id })).toThrow(expect.objectContaining({ code: 'EXHIBITION_OWNER_MISMATCH' }));
+    await expect(exhibition.bindLiveReference(session.id, { deviceId: 'other-screen', lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'http://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'INVALID_REMOTE_URL' });
+    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://private.example/a.webp' })).rejects.toMatchObject({ code: 'REFERENCE_ADDRESS_BLOCKED' });
+    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
+    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/b.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
+  });
+
+  it('stops a disconnected camera after heartbeat expiry and requires manual resume before another allocation', async () => {
+    const { exhibition, deactivate, advance, store } = fixture(); start(exhibition); const session = await create(exhibition);
+    advance(14000); exhibition.heartbeat({ deviceId, sessionId: session.id }); await exhibition.sweepLive(); expect(deactivate).not.toHaveBeenCalled();
+    advance(15000); await exhibition.sweepLive();
+    expect(deactivate).toHaveBeenCalledWith(session.token); expect(store.get(session.id).status).toBe('stopped');
+    expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
+    exhibition.command({ action: 'resume' }); await create(exhibition); expect(store.allocated()).toBe(60);
+  });
+
+  it('stops paused/ended/idle/replaced sessions, and permits the new outfit only after the old key stops', async () => {
+    const { exhibition, deactivate, store } = fixture(); start(exhibition); let session = await create(exhibition);
+    exhibition.command({ action: 'pause' }); await exhibition.reconcileLive(); expect(store.get(session.id).status).toBe('stopped');
+    exhibition.command({ action: 'resume' }); session = await create(exhibition); exhibition.liveFirstFrame(session.id, 100);
+    exhibition.command({ action: 'next' }); await exhibition.reconcileLive();
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', selectedLookId: 'city', live: null });
+    session = await create(exhibition); expect(session.exhibition?.lookId).toBe('city');
+    exhibition.command({ action: 'end' }); await exhibition.reconcileLive(); expect(exhibition.get()).toMatchObject({ phase: 'select', live: null });
+    exhibition.command({ action: 'begin' }); session = await create(exhibition);
+    exhibition.command({ action: 'idle' }); await exhibition.reconcileLive(); expect(exhibition.get()).toMatchObject({ phase: 'idle', live: null });
+    expect(deactivate).toHaveBeenCalledTimes(4); expect(store.allocated()).toBe(120);
+  });
+
+  it('switches to a chosen outfit in the same experience and accepts only its new live first frame', async () => {
+    const { exhibition, service, store, issue, deactivate, advance } = fixture(); start(exhibition);
+    const previous = await create(exhibition);
+    await exhibition.bindLiveReference(previous.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/commute.webp' });
+    await service.link(previous.id, 'ums-direct-switch-old');
+    await service.firstFrame(previous.id, 100); exhibition.liveFirstFrame(previous.id, 100);
+    const showcased = exhibition.get();
+    expect(exhibition.command({ action: 'switch', lookId: 'commute' })).toEqual(showcased);
+    await exhibition.reconcileLive();
+    expect(deactivate).not.toHaveBeenCalled(); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+
+    const switching = exhibition.command({ action: 'switch', lookId: 'evening', expectedRevision: showcased.revision });
+    expect(switching).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute',
+      sessionNumber: showcased.sessionNumber, generationNumber: showcased.generationNumber + 1, generationReadyAt: null });
+    exhibition.liveFirstFrame(previous.id, 200);
+    await expect(exhibition.reportLiveError({ deviceId, sessionId: previous.id, lookId: 'commute', sessionNumber: showcased.sessionNumber,
+      generationNumber: showcased.generationNumber, message: '迟到的上一套错误' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+    expect(exhibition.get()).toEqual(switching);
+    // Creating the next round also reconciles and stops the previous credential first.
+    const next = await create(exhibition);
+    expect(deactivate).toHaveBeenCalledWith(previous.token); expect(store.get(previous.id).status).toBe('stopped');
+    expect(next.exhibition).toMatchObject({ lookId: 'evening', sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber });
+    expect(issue).toHaveBeenCalledTimes(2); expect(store.allocated()).toBe(60);
+    advance(5_000); exhibition.liveFirstFrame(previous.id, 300);
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute', live: { sessionId: next.id } });
+    await exhibition.bindLiveReference(next.id, { deviceId, lookId: 'evening', refImageUrl: 'https://uploads.example/evening.webp' });
+    await service.link(next.id, 'ums-direct-switch-new');
+    await service.firstFrame(next.id, 400); exhibition.liveFirstFrame(next.id, 400);
+    expect(exhibition.get()).toMatchObject({ phase: 'showcase', selectedLookId: 'evening', displayedLookId: 'evening',
+      sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber, live: { status: 'running', sessionId: next.id } });
+  });
+
+  it('does not allocate the chosen outfit until the previous live credential is confirmed stopped', async () => {
+    const { exhibition, provider, issue, store } = fixture(); start(exhibition);
+    const previous = await create(exhibition); exhibition.liveFirstFrame(previous.id, 100);
+    provider.deactivate = async () => { throw new Error('network failure'); };
+    exhibition.command({ action: 'switch', lookId: 'evening' });
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_DEVICE_BUSY' });
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute',
+      live: { sessionId: previous.id, status: 'error' } });
+    expect(store.get(previous.id).status).toBe('stopping'); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+  });
+
+  it('retains ownership and allocation when stop is not confirmed, preventing a second screen from charging', async () => {
+    const { exhibition, provider, store } = fixture(); start(exhibition); const session = await create(exhibition);
+    provider.deactivate = async () => { throw new Error('network failure'); };
+    exhibition.command({ action: 'end' }); await exhibition.reconcileLive();
+    expect(exhibition.get().live).toMatchObject({ status: 'error', sessionId: session.id }); expect(store.get(session.id).status).toBe('stopping');
+    expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
+    await expect(exhibition.createLiveSession({ deviceId: 'screen-test-002', lookId: 'commute', generationNumber: exhibition.get().generationNumber })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
+    expect(store.allocated()).toBe(30);
+  });
+
+  it('revokes late credentials when the visitor ends during issuance', async () => {
+    const { exhibition, provider, store, keys, deactivate } = fixture(); start(exhibition);
+    let resolve!: (issued: IssuedKey) => void;
+    provider.issueKey = () => new Promise(done => { resolve = done; });
+    const pending = create(exhibition); await vi.waitFor(() => expect(exhibition.get().live?.sessionId).toBeTruthy());
+    exhibition.command({ action: 'end' }); await exhibition.reconcileLive();
+    const issued = { token: 'tk-late', expiresAt: new Date(Date.now() + 120000).toISOString() };
+    keys.set(issued.token, { status: 'active', consumedCredit: 0, expireTimestamp: issued.expiresAt }); resolve(issued);
+    await expect(pending).rejects.toMatchObject({ code: 'SESSION_CANCELLED' });
+    expect(deactivate).toHaveBeenCalledWith('tk-late'); expect(store.list()[0].status).toBe('stopped'); expect(exhibition.get().live).toBeNull();
+  });
+
+  it('continues exhibition sessions beyond the ordinary local test limit without resetting history', async () => {
+    const { exhibition, store, issue } = fixture(); start(exhibition);
+    const sessions: string[] = [];
+    for (let index = 0; index < 13; index++) {
+      const session = await create(exhibition); sessions.push(session.id);
+      exhibition.command({ action: 'end' }); await exhibition.reconcileLive();
+      if (index < 12) exhibition.command({ action: 'begin' });
+    }
+    expect(issue).toHaveBeenCalledTimes(13);
+    expect(issue.mock.calls.every(([limit, seconds]) => limit === 30 && seconds === 120)).toBe(true);
+    expect(store.allocated()).toBe(390); expect(store.list()).toHaveLength(13);
+    expect(sessions.every(id => store.get(id).status === 'stopped')).toBe(true);
+    for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(exhibition.liveStatus()).not.toHaveProperty(field);
+  });
+
+  it('retains unknown issuance records and ownership without claiming cloud revocation', async () => {
+    const ambiguous = fixture(); start(ambiguous.exhibition); ambiguous.provider.issueKey = async () => { throw new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502); };
+    await expect(create(ambiguous.exhibition)).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
+    expect(ambiguous.store.allocated()).toBe(30); expect(ambiguous.exhibition.get().live).not.toBeNull(); expect(ambiguous.store.list()[0].status).toBe('issuance_unknown');
+    const before = ambiguous.store.list()[0];
+    await ambiguous.service.stop(before.id); await ambiguous.service.recover();
+    expect(ambiguous.store.get(before.id)).toEqual(before); expect(ambiguous.store.list()).toHaveLength(1);
+    expect(ambiguous.store.allocated()).toBe(30); expect(ambiguous.deactivate).not.toHaveBeenCalled();
+  });
+
+  it('pauses unknown issuance once and retains its lease and allocation through repeated sweeps', async () => {
+    const { exhibition, issue, deactivate, store, advance } = fixture(); start(exhibition);
+    issue.mockRejectedValue(new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502));
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
+    const id = store.list()[0].id; const failed = exhibition.get();
+    expect(failed).toMatchObject({ phase: 'paused', live: { sessionId: id, status: 'error', error: 'XMAX 凭证签发状态未确认，请联系工作人员。' } });
+    for (let index = 0; index < 5; index++) { advance(15_000); await exhibition.sweepLive(); }
+    expect(exhibition.get()).toEqual(failed);
+    expect(() => exhibition.command({ action: 'resume' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
+    exhibition.command({ action: 'end' });
+    expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
+    await exhibition.reconcileLive(); const stoppedAttempt = exhibition.get();
+    for (let index = 0; index < 5; index++) { advance(15_000); await exhibition.sweepLive(); }
+    expect(exhibition.get()).toEqual(stoppedAttempt);
+    expect(store.get(id)).toMatchObject({ status: 'issuance_unknown', errorCode: 'PROVIDER_NETWORK_ERROR' });
+    expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
+  });
+
+  it('keeps repeated known-key stop errors stable while allowing revocation to be retried', async () => {
+    const { exhibition, issue, deactivate, store, advance } = fixture(); start(exhibition); const session = await create(exhibition);
+    deactivate.mockRejectedValue(new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502));
+    exhibition.command({ action: 'end' }); await exhibition.reconcileLive(); const failed = exhibition.get();
+    for (let index = 0; index < 5; index++) { advance(15_000); await exhibition.sweepLive(); }
+    expect(exhibition.get()).toEqual(failed); expect(deactivate).toHaveBeenCalledTimes(6);
+    expect(store.get(session.id).status).toBe('stopping'); expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce();
+    deactivate.mockResolvedValueOnce({ status: 'inactive', consumedCredit: 1, expireTimestamp: session.expiresAt! });
+    await exhibition.sweepLive();
+    expect(exhibition.get()).toMatchObject({ phase: 'select', live: null });
+    expect(store.get(session.id).status).toBe('stopped'); expect(deactivate).toHaveBeenCalledTimes(7);
+  });
+
+  it.each([false, true])('revokes a known token with unknown issuance status instead of leaving its lease paused (first stop fails: %s)', async failFirst => {
+    const { exhibition, issue, deactivate, store } = fixture(); start(exhibition); const session = await create(exhibition);
+    store.update(session.id, { status: 'issuance_unknown' });
+    if (failFirst) deactivate.mockRejectedValueOnce(new ApiError('PROVIDER_NETWORK_ERROR', 'isolated timeout', 502));
+    await exhibition.reconcileLive();
+    expect(deactivate).toHaveBeenCalledWith(session.token); expect(deactivate).toHaveBeenCalledOnce();
+    if (failFirst) {
+      const failed = exhibition.get();
+      expect(failed.live).toMatchObject({ sessionId: session.id, status: 'error' });
+      expect(failed.live).not.toHaveProperty('localEnded'); expect(store.get(session.id).status).toBe('stopping');
+      await exhibition.reconcileLive(); expect(deactivate).toHaveBeenCalledTimes(2);
+    }
+    expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
+    expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce();
+  });
+
+  it.each(['true', 1, null, {}])('rejects an invalid stored local-ended marker %j without changing the cloud guard', async localEnded => {
+    const { exhibition, issue, deactivate, store, directory, now } = fixture(); start(exhibition);
+    issue.mockRejectedValue(new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502));
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
+    exhibition.command({ action: 'end' }); await exhibition.reconcileLive();
+    const record = store.list()[0]; const filename = join(directory, 'exhibition.json');
+    const invalid = JSON.parse(readFileSync(filename, 'utf8')); invalid.state.live.localEnded = localEnded;
+    writeFileSync(filename, JSON.stringify(invalid));
+    expect(() => new ExhibitionService(directory, { now, strictStorage: true })).toThrow('Invalid exhibition mirror data: default');
+    expect(JSON.parse(readFileSync(filename, 'utf8'))).toEqual(invalid);
+    expect(store.get(record.id)).toEqual(record); expect(store.allocated()).toBe(30);
+    expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
+  });
+
+  it('stops provider credentials on restart and keeps library/mode while clearing a recovered camera owner', async () => {
+    const { exhibition, service, directory, now, store } = fixture(); start(exhibition); const session = await create(exhibition);
+    const recovered = new ExhibitionService(directory, { now }); recovered.attachLiveService(service); await service.recover(); await recovered.sweepLive();
+    expect(recovered.get()).toMatchObject({ providerMode: 'xmax', phase: 'select', live: null, enabledLookIds: ['commute', 'city', 'evening'] });
+    expect(recovered.get().looks).toHaveLength(3); expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(30);
+  });
+
+  it('distinguishes rapid pause/resume generations so an old frame or error cannot complete the new attempt', async () => {
+    const { exhibition, service, store } = fixture(); start(exhibition); const oldGeneration = exhibition.get().generationNumber;
+    const session = await create(exhibition);
+    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
+    await service.link(session.id, 'ums-old');
+    exhibition.command({ action: 'pause' });
+    expect(() => exhibition.command({ action: 'resume' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
+    await exhibition.reconcileLive(); exhibition.command({ action: 'resume' });
+    const nextGeneration = exhibition.get().generationNumber; expect(nextGeneration).toBe(oldGeneration + 1);
+    exhibition.liveFirstFrame(session.id, 123);
+    expect(exhibition.get().phase).toBe('generating'); expect(exhibition.get().displayedLookId).toBeNull();
+    await expect(exhibition.reportLiveError({ deviceId, sessionId: session.id, lookId: 'commute', sessionNumber: 1, generationNumber: oldGeneration, message: '迟到错误' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+    await exhibition.reconcileLive(); expect(store.get(session.id).status).toBe('stopped');
+    await expect(service.firstFrame(session.id, 150)).rejects.toMatchObject({ code: 'SESSION_INACTIVE' });
+    await expect(service.link(session.id, 'ums-old')).rejects.toMatchObject({ code: 'SESSION_INACTIVE' });
+    await expect(exhibition.createLiveSession({ deviceId, lookId: 'commute', generationNumber: oldGeneration })).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' });
+    const next = await create(exhibition); expect(next.exhibition?.generationNumber).toBe(nextGeneration);
+  });
+
+  it('requires a slow timeout stop to finish before the next visitor can begin', async () => {
+    const { exhibition, provider, advance, keys } = fixture(); start(exhibition); const session = await create(exhibition);
+    let finishStop!: () => void;
+    provider.deactivate = token => new Promise(resolve => { finishStop = () => resolve({ ...keys.get(token)!, status: 'inactive' }); });
+    advance(15000); const stopping = exhibition.sweepLive(); await vi.waitFor(() => expect(finishStop).toBeTypeOf('function'));
+    exhibition.command({ action: 'end' });
+    expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
+    expect(exhibition.get().sessionNumber).toBe(1);
+    finishStop(); await stopping;
+    expect(exhibition.get()).toMatchObject({ phase: 'select', sessionNumber: 1, live: null });
+    const fresh = exhibition.command({ action: 'begin' }); expect(fresh.sessionNumber).toBe(2);
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', sessionNumber: 2, generationNumber: fresh.generationNumber, live: null });
+    expect((await create(exhibition)).id).not.toBe(session.id);
+  });
+
+  it('coalesces concurrent stop requests and rechecks provider linking after an in-flight stop', async () => {
+    const { exhibition, service, provider, keys, store } = fixture(); start(exhibition); const session = await create(exhibition);
+    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
+    let finishLink!: () => void; let finishStop!: () => void;
+    provider.sessionStatus = (_token, sessionUid) => new Promise(resolve => { finishLink = () => resolve({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }); });
+    const linking = service.link(session.id, 'ums-late-link');
+    const revoke = vi.fn((token: string): Promise<KeyStatus> => new Promise(resolve => { finishStop = () => resolve({ ...keys.get(token)!, status: 'inactive' }); }));
+    provider.deactivate = revoke;
+    const stopA = service.stop(session.id); const stopB = service.stop(session.id);
+    expect(revoke).toHaveBeenCalledTimes(1); finishLink();
+    await expect(linking).rejects.toMatchObject({ code: 'SESSION_INACTIVE' });
+    finishStop(); await Promise.all([stopA, stopB]);
+    expect(store.get(session.id).providerSessionId).toBeUndefined(); expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(30);
+  });
+
+  it('revokes late issuance after client request cancellation without charging an automatic retry', async () => {
+    const { exhibition, provider, keys, deactivate, store } = fixture(); start(exhibition);
+    let cancelled = false; let finish!: (issued: IssuedKey) => void;
+    provider.issueKey = () => new Promise(resolve => { finish = resolve; });
+    const pending = exhibition.createLiveSession({ deviceId, lookId: 'commute', generationNumber: exhibition.get().generationNumber }, { cancelled: () => cancelled });
+    await vi.waitFor(() => expect(exhibition.get().live?.sessionId).toBeTruthy()); cancelled = true;
+    const issued = { token: 'tk-cancelled', expiresAt: new Date(Date.now() + 120000).toISOString() };
+    keys.set(issued.token, { status: 'active', consumedCredit: 0, expireTimestamp: issued.expiresAt }); finish(issued);
+    await expect(pending).rejects.toMatchObject({ code: 'SESSION_CANCELLED' });
+    expect(deactivate).toHaveBeenCalledWith(issued.token); expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null }); expect(store.allocated()).toBe(30);
+  });
+
+  it('handles device errors without automatic retry and rejects stale error reports', async () => {
+    const { exhibition, store } = fixture(); start(exhibition); const session = await create(exhibition);
+    await expect(exhibition.reportLiveError({ deviceId, sessionId: session.id, lookId: 'city', sessionNumber: 1, generationNumber: exhibition.get().generationNumber, message: '摄像头断开' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+    const state = await exhibition.reportLiveError({ deviceId, sessionId: session.id, lookId: 'commute', sessionNumber: 1, generationNumber: exhibition.get().generationNumber, message: '连接失败 tk-secret https://example.test/token' });
+    expect(state).toMatchObject({ phase: 'paused', live: null }); expect(store.get(session.id).status).toBe('stopped');
+    expect(state.logs[0].message).not.toContain('tk-secret'); expect(state.logs[0].message).not.toContain('https://');
+  });
+});
+
+describe('live HTTP integration uses mock provider only', () => {
+  it('links and reports the first frame through the existing session API and stops from the staff command', async () => {
+    const { exhibition, service, store } = fixture();
+    const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, exhibition);
+    server.listen(0, '127.0.0.1'); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const headers = { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
+    const post = async (path: string, input: unknown) => {
+      const response = await fetch(base + path, { method: 'POST', headers, body: JSON.stringify(input) });
+      expect(response.ok).toBe(true); return response.json();
+    };
+    try {
+      const before = await fetch(base + '/api/exhibition/live/status'); const status = await before.json();
+      expect(status).toMatchObject({ mode: 'demo', perSessionLimit: 30 });
+      for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(status).not.toHaveProperty(field);
+      await post('/api/exhibition/command', { action: 'configure', providerMode: 'xmax' });
+      expect(await post('/api/exhibition/command', { action: 'begin' })).toMatchObject({ phase: 'generating', sessionNumber: 1, generationNumber: 1, generationReadyAt: null });
+      const session = await post('/api/exhibition/live/session', { deviceId, lookId: 'commute', generationNumber: exhibition.get().generationNumber });
+      await post(`/api/exhibition/live/session/${session.id}/reference`, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
+      await post(`/api/exhibition/sessions/${session.id}/link`, { providerSessionId: 'ums-http-session' });
+      await post(`/api/exhibition/sessions/${session.id}/first-frame`, { firstFrameMs: 111 });
+      expect(exhibition.get().phase).toBe('showcase');
+      await post('/api/exhibition/live/heartbeat', { deviceId, sessionId: session.id });
+      const switched = await post('/api/exhibition/command', { action: 'switch', lookId: 'evening', expectedRevision: exhibition.get().revision });
+      expect(switched).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute', sessionNumber: 1, generationNumber: 2, live: null });
+      expect(store.get(session.id).status).toBe('stopped');
+      const stopped = await post('/api/exhibition/command', { action: 'end' }); expect(stopped).toMatchObject({ phase: 'select', live: null });
+    } finally { server.close(); await once(server, 'close'); }
+  });
+});

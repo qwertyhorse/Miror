@@ -1,0 +1,229 @@
+import type { XmaxRegion } from './xmax.ts';
+
+export const EXHIBITION_LOOK_IDS = ['commute', 'city', 'evening'] as const;
+export const EXHIBITION_EXPERIENCE_MODES = ['free', 'charx', 'clothx', 'vibex', 'dimx', 'mox'] as const;
+export type ExhibitionExperienceMode = typeof EXHIBITION_EXPERIENCE_MODES[number];
+export type ExhibitionReferenceKind = 'image' | 'none';
+export const EXHIBITION_MODE_LABELS: Record<ExhibitionExperienceMode, string> = { free: 'Free', charx: 'CharX', clothx: 'ClothX', vibex: 'VibeX', dimx: 'DimX', mox: 'MoX' };
+export const EXHIBITION_FREE_PROMPT_MAX_LENGTH = 1000;
+export const EXHIBITION_AUTO_SWITCH_MIN_SECONDS = 5;
+export const EXHIBITION_AUTO_SWITCH_MAX_SECONDS = 600;
+export const EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS = 30;
+export type ExhibitionSwitchMode = 'manual' | 'auto';
+export const EXHIBITION_UI_SKIN_PRESETS = ['crystal', 'brand'] as const;
+export type ExhibitionUiSkinPreset = typeof EXHIBITION_UI_SKIN_PRESETS[number];
+export interface ExhibitionUiSkin { image: string; width: number; height: number; bytes: number; }
+const MODE_PROMPTS: Record<Exclude<ExhibitionExperienceMode, 'free'>, string> = {
+  charx: '视频中角色替换成参考图中角色', clothx: '视频中人物衣服替换成参考图中衣服',
+  vibex: '视频风格变为参考图指定的风格', dimx: '指定角色在场景中互动', mox: '视频中角色跟随拖拽轨迹运动',
+};
+export function exhibitionPromptForLook(look: { mode: ExhibitionExperienceMode; prompt?: string }): string {
+  return look.mode === 'free' ? (look.prompt ?? '').trim() : MODE_PROMPTS[look.mode];
+}
+
+/** Uploaded garments receive an opaque server-generated ID. */
+export type ExhibitionLookId = string;
+export type ExhibitionPhase = 'select' | 'positioning' | 'generating' | 'showcase' | 'paused' | 'idle';
+export type ExhibitionCommandAction = 'select' | 'begin' | 'confirm' | 'switch' | 'next' | 'previous' | 'pause' | 'resume' | 'end' | 'idle' | 'recover' | 'configure' | 'reorder';
+
+export interface ExhibitionUploadLimits {
+  /** 1–20 MiB, applied to the original image bytes. */
+  maxFileSizeMB: number;
+  /** Integer pixel dimensions, 64–8192 inclusive; maximum area is 32 megapixels. */
+  minWidth: number;
+  maxWidth: number;
+  minHeight: number;
+  maxHeight: number;
+}
+export interface ExhibitionLook {
+  id: ExhibitionLookId;
+  name: string;
+  description: string;
+  /** Version-relative URL: clients should resolve through their version-aware app URL helper. */
+  image: string;
+  palette: string;
+  mode: ExhibitionExperienceMode;
+  /** Defaults to image. Free prompt-only presets use none; image remains a display cover. */
+  referenceKind?: ExhibitionReferenceKind;
+  /** Required for Free; other modes use the shared preset. */
+  prompt?: string;
+  category: string;
+  tags: string[];
+  source: 'sample' | 'upload';
+  width?: number;
+  height?: number;
+  bytes?: number;
+  mime?: 'image/png' | 'image/jpeg' | 'image/webp';
+}
+export interface ExhibitionLookInput {
+  name: string;
+  description?: string;
+  mode?: ExhibitionExperienceMode;
+  referenceKind?: ExhibitionReferenceKind;
+  prompt?: string;
+  category?: string;
+  tags?: string[];
+  expectedRevision?: number;
+}
+export interface ExhibitionUploadInput extends ExhibitionLookInput {
+  /** Uploads append a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock append operations. */
+  expectedRevision?: number;
+  /** Raw base64 or a data URL. Only fully decoded, static PNG/JPEG/WebP images are accepted. */
+  imageBase64: string;
+}
+export interface ExhibitionTaxonomyInput {
+  categories: string[];
+  tags: string[];
+  expectedRevision?: number;
+}
+export interface ExhibitionCommand {
+  action: ExhibitionCommandAction;
+  lookId?: ExhibitionLookId;
+  enabledLookIds?: ExhibitionLookId[];
+  /** Complete ordered catalog IDs for experienceMode, including disabled materials. */
+  lookIds?: ExhibitionLookId[];
+  switchMode?: ExhibitionSwitchMode;
+  /** Result display interval, integer seconds from 5 through 600. */
+  autoSwitchSeconds?: number;
+  /** Zero disables automatic return; otherwise 15–600 seconds. */
+  autoReturnSeconds?: number;
+  uploadLimits?: ExhibitionUploadLimits;
+  providerMode?: 'demo' | 'xmax';
+  experienceMode?: ExhibitionExperienceMode;
+  /** Selecting a built-in skin replaces any uploaded custom image. */
+  uiSkinPreset?: ExhibitionUiSkinPreset;
+  expectedRevision?: number;
+}
+
+export interface ExhibitionState {
+  /** Stable registered mirror; deviceId in live state is a separate browser lease. */
+  mirrorId?: string;
+  revision: number;
+  phase: ExhibitionPhase;
+  selectedLookId: ExhibitionLookId | null;
+  experienceMode: ExhibitionExperienceMode;
+  displayedLookId: ExhibitionLookId | null;
+  enabledLookIds: ExhibitionLookId[];
+  looks: ExhibitionLook[];
+  /** Flat, unique names. No nested taxonomy. */
+  categories: string[];
+  tags: string[];
+  sessionNumber: number;
+  generationNumber: number;
+  /** Server epoch milliseconds. */
+  updatedAt: number;
+  generationReadyAt: number | null;
+  /** Server deadline; null outside an automatic result display. */
+  autoSwitchAt?: number | null;
+  settings: { autoReturnSeconds: number; uploadLimits: ExhibitionUploadLimits; switchMode?: ExhibitionSwitchMode; autoSwitchSeconds?: number; uiSkinPreset?: ExhibitionUiSkinPreset; uiSkin?: ExhibitionUiSkin | null };
+  providerMode: 'demo' | 'xmax';
+  live: ExhibitionLiveState | null;
+  /** Newest first. Only an explicitly enabled live mode can allocate XMAX credentials. */
+  logs: { id: string; time: number; message: string }[];
+}
+
+export interface ExhibitionMirrorSummary {
+  id: string;
+  name: string;
+  phase: ExhibitionPhase;
+  revision: number;
+  providerMode: 'demo' | 'xmax';
+  updatedAt: number;
+  binding?: ExhibitionDeviceBinding | null;
+}
+export interface ExhibitionDeviceCredentials { terminalId?: string; terminalToken?: string; }
+export interface ExhibitionDeviceBinding {
+  terminalId: string;
+  label: string;
+  platform: 'android' | 'browser';
+  boundAt: number;
+  lastSeenAt: number;
+  online: boolean;
+}
+export interface ExhibitionDeviceConnectInput {
+  terminalId: string;
+  token: string;
+  label: string;
+  platform: 'android' | 'browser';
+}
+export interface ExhibitionDeviceConnection {
+  terminalId: string;
+  mirrorId: string | null;
+  mirrorName?: string;
+  code?: string;
+  expiresAt?: number;
+}
+export interface ExhibitionMirrorList {
+  defaultMirrorId: string;
+  mirrors: ExhibitionMirrorSummary[];
+}
+export interface ExhibitionMirrorCopyInput {
+  sourceMirrorId: string;
+  expectedRevision: number;
+  copyLooks: boolean;
+  copySettings: boolean;
+}
+
+export interface ExhibitionLiveState {
+  generationNumber: number;
+  deviceId: string;
+  sessionId: string | null;
+  lookId: string;
+  status: 'preparing' | 'connecting' | 'running' | 'stopping' | 'error';
+  updatedAt: number;
+  heartbeatAt: number;
+  firstFrameMs?: number;
+  error?: string;
+  /** The local experience ended; the retained cloud lease is still unconfirmed. */
+  localEnded?: boolean;
+}
+export function isExhibitionLocallyEnded(state: Pick<ExhibitionState, 'phase' | 'live'>): boolean {
+  return ['idle', 'select'].includes(state.phase) && state.live?.status === 'error' && state.live.localEnded === true;
+}
+export interface ExhibitionLiveStatus {
+  configured: boolean;
+  providerRegion?: XmaxRegion;
+  mode: 'demo' | 'xmax';
+  model: string;
+  perSessionLimit: number;
+  /** @deprecated Legacy local counters; not XMAX balance and omitted by current mirror APIs. */
+  totalLimit?: number;
+  /** @deprecated Legacy local counters; omitted by current mirror APIs. */
+  allocatedCredits?: number;
+  /** @deprecated Legacy local counters; omitted by current mirror APIs. */
+  remainingCredits?: number;
+  expireSeconds: number;
+  heartbeatTimeoutSeconds: number;
+  live: ExhibitionLiveState | null;
+}
+/** Safe server configuration summary; a permanent API key is never returned. */
+export interface ExhibitionCredentialsStatus {
+  configured: boolean;
+  region?: XmaxRegion;
+  hasUnconfirmedSession?: boolean;
+  source: 'mirror' | 'default';
+  /** Credential configuration revision, independent of the material state revision. */
+  revision: number;
+  editable: boolean;
+  perSessionLimit: number;
+  /** @deprecated Legacy local counters; not XMAX balance and omitted by current mirror APIs. */
+  totalLimit?: number;
+  /** @deprecated Legacy local counters; omitted by current mirror APIs. */
+  allocatedCredits?: number;
+  /** @deprecated Legacy local counters; omitted by current mirror APIs. */
+  remainingCredits?: number;
+}
+export interface ExhibitionLiveSessionInput extends ExhibitionDeviceCredentials {
+  generationNumber: number;
+  deviceId: string;
+  lookId: string;
+  expectedRevision?: number;
+}
+export interface ExhibitionLiveReferenceInput {
+  deviceId: string;
+  lookId: string;
+  refImageUrl: string;
+}
+export interface ExhibitionLiveHeartbeatInput { deviceId: string; sessionId: string; }
+
+export interface ExhibitionLiveErrorInput { deviceId: string; sessionId?: string; lookId: string; sessionNumber: number; generationNumber: number; message: string; }

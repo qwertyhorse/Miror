@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1600" viewBox="0 0 900 1600" fill="none">
+  <defs>
+    <linearGradient id="silk" x1="50" y1="1600" x2="850" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".15"/>
+      <stop offset=".24" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".74" stop-color="#2d225d" stop-opacity=".07"/>
+      <stop offset="1" stop-color="#fff" stop-opacity=".12"/>
+    </linearGradient>
+    <radialGradient id="light" cx="0" cy="0" r="1" gradientTransform="translate(0 1090) rotate(-40) scale(620 950)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency=".7" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+    </filter>
+  </defs>
+  <path d="M-90 1640C110 1400-70 1100 120 860S580 360 1010-70H1100V1700Z" fill="url(#silk)"/>
+  <path d="M-70 1610C170 1290-110 1040 90 760S620 240 1000-80" stroke="#fff" stroke-opacity=".08" stroke-width="62"/>
+  <rect width="900" height="1600" fill="url(#light)"/>
+  <g stroke="#fff" stroke-width="1.15" stroke-opacity=".22">
+    <path d="M-170 1630C130 1360-120 1100 38 830S590 280 1010-80"/>
+    <path d="M-151 1642C149 1372-101 1112 57 842S609 292 1029-68"/>
+    <path d="M-132 1654C168 1384-82 1124 76 854S628 304 1048-56"/>
+    <path d="M-113 1666C187 1396-63 1136 95 866S647 316 1067-44"/>
+    <path d="M-94 1678C206 1408-44 1148 114 878S666 328 1086-32"/>
+    <path d="M-75 1690C225 1420-25 1160 133 890S685 340 1105-20"/>
+  </g>
+  <g stroke="#fff" stroke-width="1" stroke-opacity=".13">
+    <path d="M-150 300C180 110 480 220 680 100S910-30 1020-110"/>
+    <path d="M-150 317C180 127 480 237 680 117S910-13 1020-93"/>
+    <path d="M-150 334C180 144 480 254 680 134S910 4 1020-76"/>
+    <path d="M-150 351C180 161 480 271 680 151S910 21 1020-59"/>
+    <path d="M-150 368C180 178 480 288 680 168S910 38 1020-42"/>
+  </g>
+  <path d="M780-60C1000 210 770 490 940 810S1080 1360 800 1660" stroke="#fff" stroke-opacity=".1" stroke-width="48"/>
+  <g stroke="#fff" stroke-width="1.1" stroke-opacity=".16">
+    <path d="M810-60C1030 210 800 490 970 810S1110 1360 830 1660"/>
+    <path d="M790-60C1010 210 780 490 950 810S1090 1360 810 1660"/>
+    <path d="M770-60C990 210 760 490 930 810S1070 1360 790 1660"/>
+    <path d="M750-60C970 210 740 490 910 810S1050 1360 770 1660"/>
+  </g>
+  <rect width="900" height="1600" filter="url(#grain)" opacity=".045"/>
+</svg>

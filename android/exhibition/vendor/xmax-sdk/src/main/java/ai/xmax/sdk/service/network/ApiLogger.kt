@@ -1,0 +1,49 @@
+package ai.xmax.sdk.service.network
+
+import ai.xmax.sdk.ErrorMessageFormatter
+import ai.xmax.sdk.XmaxLogger
+
+/** 输出不包含认证信息和响应正文的 API 调试日志。 */
+internal object ApiLogger {
+    fun logResponse(
+        method: ApiMethod,
+        path: String,
+        statusCode: Int,
+        bodyByteCount: Int,
+        durationMs: Long,
+        successful: Boolean,
+    ) {
+        val message = responseMessage(method, path, statusCode, bodyByteCount, durationMs)
+        if (successful) {
+            XmaxLogger.api.debug(message = { message })
+        } else {
+            XmaxLogger.api.error(message = { message })
+        }
+    }
+
+    fun logFailure(
+        method: ApiMethod,
+        path: String,
+        error: Throwable,
+        durationMs: Long,
+    ) {
+        XmaxLogger.api.error(
+            message = {
+                "${method.wireValue} $path 失败 (Request Failed)\n" +
+                    "├─ ${XmaxLogger.localized("耗时：", "Duration: ")}$durationMs ms\n" +
+                    "└─ ${XmaxLogger.localized("原因：", "Reason: ")}${ErrorMessageFormatter.format(error)}"
+            },
+        )
+    }
+
+    fun responseMessage(
+        method: ApiMethod,
+        path: String,
+        statusCode: Int,
+        bodyByteCount: Int,
+        durationMs: Long,
+    ): String = "${method.wireValue} $path\n" +
+        "├─ ${XmaxLogger.localized("状态：", "Status: ")}$statusCode\n" +
+        "├─ ${XmaxLogger.localized("耗时：", "Duration: ")}$durationMs ms\n" +
+        "└─ ${XmaxLogger.localized("响应：", "Response: ")}$bodyByteCount bytes"
+}

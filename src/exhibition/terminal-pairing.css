@@ -1,0 +1,16 @@
+.ex-terminal-pairing{min-height:100dvh;display:grid;place-items:center;padding:32px 20px;background:radial-gradient(ellipse at top,#ece5fe,transparent 60%),#f8f7fc;text-align:center}
+.ex-terminal-pairing>section{width:min(540px,100%);padding:48px 32px;border:1px solid #e6def3;border-radius:20px;background:#ffffffed;box-shadow:0 15px 80px #6352880b}
+.ex-terminal-pair-icon{display:flex;align-items:center;justify-content:center;position:relative;width:70px;height:70px;margin:0 auto 27px;background:#f1ebfd;border-radius:20px;color:#8261cf}
+.ex-terminal-pair-icon>svg:last-child{position:absolute;right:10px;bottom:10px;background:#f1ebfd}
+.ex-terminal-eyebrow{font-size:10px;letter-spacing:2px;color:#a08db7}
+.ex-terminal-pairing h1{font-size:28px;margin:14px 0 16px;letter-spacing:.5px}
+.ex-terminal-pairing p{font-size:14px;line-height:1.9;color:#93839f;max-width:390px;margin:0 auto}
+.ex-terminal-code{font-size:58px;letter-spacing:5px;font-weight:650;font-variant-numeric:tabular-nums;color:#7653bf;margin:30px 0 8px;white-space:nowrap}
+.ex-terminal-code-expiry{font-size:12px;color:#a18cb4;font-variant-numeric:tabular-nums}
+.ex-terminal-pairing .ex-button{margin:30px auto 24px;min-height:42px;font-size:12px}
+.ex-terminal-pairing small{display:block;font-size:11px;line-height:1.9;color:#b1a3bc}
+.ex-terminal-pairing p.ex-terminal-error{color:#b16571;font-size:12px;margin-top:15px}
+.ex-terminal-wait{font-size:15px;color:#a08ab9;padding:35px 0 10px}
+.ex-terminal-bind-trigger{position:fixed;z-index:10;right:12px;top:12px;display:flex;align-items:center;gap:5px;min-height:34px;padding:7px 10px;border:1px solid #ddd2ef;border-radius:7px;background:#ffffffb8;color:#927cad;font-size:11px;opacity:.7}
+.ex-terminal-preview-note{position:fixed;top:12px;left:12px;max-width:240px;border-radius:7px;padding:8px 11px;background:#ffffffd9;color:#9c8aaa;font-size:11px;z-index:10}
+@media(max-width:420px){.ex-terminal-pairing>section{padding:34px 20px}.ex-terminal-pairing h1{font-size:25px}.ex-terminal-pairing p{font-size:12px}.ex-terminal-code{font-size:45px;letter-spacing:3px}.ex-terminal-preview-note{max-width:180px}}

@@ -1,0 +1,28 @@
+:root {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #302b29;
+  background: var(--paper);
+  font-synthesis: none;
+  --paper: #f7f7fb;
+  --ink: #302b29;
+  --brand: #7063d0;
+  --brand-soft: #efedfb;
+  --line: #e5e4ef;
+  --line-strong: #c7c5d8;
+}
+* { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
+body { margin: 0; }
+button, input, select { font: inherit; }
+button, a, input, select { -webkit-tap-highlight-color: transparent; }
+button { cursor: pointer; color: inherit; border: 0; background: none; }
+button:disabled { cursor: not-allowed; opacity: .42; }
+a { color: inherit; text-decoration: none; }
+button, select { touch-action: manipulation; }
+svg { flex-shrink: 0; stroke-width: 1.65; }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 4px;
+}
+h1, h2, h3, p { margin: 0; }
+input[type="checkbox"] { accent-color: var(--brand); }

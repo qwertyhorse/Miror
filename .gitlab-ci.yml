@@ -1,0 +1,11 @@
+# Source handoff only. Prevent the project Auto DevOps fallback from deploying.
+workflow:
+  rules:
+    - when: never
+
+source-validation:
+  image: node:24
+  script:
+    - npm ci
+    - npm test
+    - npm run build

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps, type ExhibitionSdkSession } from '../src/exhibition/useExhibitionLive';
-import type { ConnectOptions } from '../src/sdkTypes';
+import type { ConnectOptions } from '../src/liveTryOn';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

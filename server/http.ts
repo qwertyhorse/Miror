@@ -3,7 +3,6 @@ import { ApiError } from './types.ts';
 import { TryOnService } from './service.ts';
 import type { ExhibitionService } from './exhibition.ts';
 import type { ExhibitionMirrors } from './exhibitionMirrors.ts';
-import { EXHIBITION_SKIN_MAX_BYTES } from './exhibitionSkin.ts';
 
 function json(response: ServerResponse, status: number, body: unknown) {
   if (response.destroyed) return;
@@ -67,8 +66,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           await mirrors!.unbindDevice(mirrorId, await body(request));
           return json(response, 200, { binding: null });
         }
-        if (request.method === 'GET' && !path) { await current.sweepLive(); return json(response, 200, current.get()); }
-        if (request.method === 'POST' && path === '/skin') return json(response, 200, await current.uploadUiSkin(await body(request, Math.ceil(EXHIBITION_SKIN_MAX_BYTES / 3) * 4 + 16_384)));
+        if (request.method === 'GET' && !path) { void current.sweepLive().catch(() => undefined); return json(response, 200, current.get()); }
+        if (request.method === 'POST' && path === '/skin') return json(response, 200, await current.uploadUiSkin(await body(request, Infinity)));
         if (request.method === 'DELETE' && path === '/skin') return json(response, 200, current.removeUiSkin(await body(request)));
         const skin = /^\/skin\/([a-f0-9-]{36})$/.exec(path);
         if (skin && ['GET', 'HEAD'].includes(request.method ?? '')) {
@@ -76,7 +75,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           response.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.data.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
           return response.end(request.method === 'HEAD' ? undefined : image.data);
         }
-        if (request.method === 'GET' && path === '/live/status') { await current.sweepLive(); return json(response, 200, current.liveStatus()); }
+        if (request.method === 'GET' && path === '/live/status') { void current.sweepLive().catch(() => undefined); return json(response, 200, current.liveStatus()); }
         if (request.method === 'POST' && path === '/live/error') return json(response, 200, await current.reportLiveError(await body(request)));
         if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await body(request)));
         if (request.method === 'POST' && path === '/live/session') {
@@ -93,7 +92,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           return json(response, 200, await current.bindLiveReference(liveReference[1], await body(request)));
         }
         const session = /^\/sessions\/([a-f0-9-]{36})(?:\/(stop|link|first-frame))?$/.exec(path);
-        if (session) {
+        if (mirrorRoute && session) {
           const [, id, action] = session;
           service.assertSessionMirror(id, mirrorId, true);
           if (!action && request.method === 'GET') return json(response, 200, await service.get(id));
@@ -101,7 +100,15 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           if (action === 'link' && request.method === 'POST') { const input = await body(request); return json(response, 200, await service.link(id, input.providerSessionId as string)); }
           if (action === 'first-frame' && request.method === 'POST') { const input = await body(request); const framed = await service.firstFrame(id, input.firstFrameMs as number); current.liveFirstFrame(id, framed.firstFrameMs!); return json(response, 200, framed); }
         }
-        if (request.method === 'POST' && path === '/command') { current.command(await body(request)); await current.reconcileLive(); return json(response, 200, current.get()); }
+        if (request.method === 'POST' && path === '/command') {
+          const input = await body(request);
+          current.command(input);
+          // Selection is local and immediate; keep the old lease until its background stop confirms.
+          const reconciling = current.reconcileLive();
+          if (['switch', 'next', 'previous'].includes(String(input.action))) void reconciling.catch(() => undefined);
+          else await reconciling;
+          return json(response, 200, current.get());
+        }
         if (request.method === 'POST' && path === '/looks') return json(response, 201, await current.upload(await body(request, current.uploadRequestLimit())));
         if (request.method === 'POST' && path === '/taxonomy') return json(response, 200, current.taxonomy(await body(request)));
         const look = /^\/looks\/([^/]+)$/.exec(path);

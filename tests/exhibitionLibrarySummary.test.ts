@@ -123,7 +123,8 @@ describe('priority stop in the staff console', () => {
     expect(f.controller.stopExperience).toHaveBeenCalledOnce();
     expect(f.controller.send).not.toHaveBeenCalled();
     f.controller.stopPending = true; await f.render();
-    const stopping = host!.find(node => node.getReactProps().className === 'ex-secondary-commands')!.childNodes.at(-1)!;
+    const stopping = host!.find(node => node.nodeName === 'button' && node.textContent === '正在停止…')!;
+    expect(stopping).toBeDefined();
     expect(stopping.textContent).toBe('正在停止…');
     expect(stopping.getReactProps().disabled).toBe(true);
     await act(async () => stopping.getReactProps().onClick());

@@ -1,25 +1,13 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Check, Upload } from 'lucide-react';
 import { EXHIBITION_UI_SKIN_PRESETS, type ExhibitionUiSkinPreset } from '../../shared/exhibition';
 import { appUrl } from '../versionScope';
 import type { ExhibitionController } from './useExhibition';
 import { mirrorSkin, MIRROR_SKIN_LABELS, MirrorSkinThumbnail } from './uiSkins';
 
-const MAX_BYTES = 8 * 1024 * 1024;
 function validateFile(file: File) {
-  if (!/\.(jpe?g|png|webp)$/i.test(file.name)) return '请选择 PNG、JPG 或 WebP 图片。';
   if (!file.size) return '图片为空，请重新选择。';
-  if (file.size > MAX_BYTES) return '皮肤图片不能超过 8 MB。';
   return '';
-}
-function readSize(url: string) {
-  return new Promise<{ width: number; height: number }>((resolve, reject) => {
-    const image = new globalThis.Image();
-    const timer = setTimeout(() => reject(new Error('图片读取超时，请重新选择。')), 15000);
-    image.onload = () => { clearTimeout(timer); resolve({ width: image.naturalWidth, height: image.naturalHeight }); };
-    image.onerror = () => { clearTimeout(timer); reject(new Error('无法读取这张图片，请重新选择。')); };
-    image.src = url;
-  });
 }
 function readBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
@@ -34,12 +22,9 @@ function readBase64(file: File) {
 
 export function MirrorUiSkinSettings({ controller }: { controller: ExhibitionController }) {
   const { state, pending, connected } = controller;
-  const noteId = useId();
   const [file, setFile] = useState<File | null>(null);
   const [baseline, setBaseline] = useState<number>();
   const [preview, setPreview] = useState('');
-  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
-  const [reading, setReading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const input = useRef<HTMLInputElement>(null);
@@ -47,21 +32,13 @@ export function MirrorUiSkinSettings({ controller }: { controller: ExhibitionCon
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
-    setSize(null); setError(''); setPreview('');
-    if (!file) { setReading(false); return; }
+    setError(''); setPreview('');
+    if (!file) return;
     const invalid = validateFile(file);
-    if (invalid) { setError(invalid); setReading(false); return; }
-    let cancelled = false;
+    if (invalid) { setError(invalid); return; }
     const url = URL.createObjectURL(file);
-    setPreview(url); setReading(true);
-    void readSize(url).then(dimensions => {
-      if (cancelled) return;
-      const ratio = dimensions.width / dimensions.height;
-      if (!Number.isFinite(ratio) || ratio < 0.45 || ratio > 0.75) setError('请使用 9:16 附近的竖图，宽高比需在 0.45–0.75 之间。');
-      else setSize(dimensions);
-    }).catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : '图片读取失败。'); })
-      .finally(() => { if (!cancelled) setReading(false); });
-    return () => { cancelled = true; URL.revokeObjectURL(url); };
+    setPreview(url);
+    return () => { URL.revokeObjectURL(url); };
   }, [file]);
   if (!state) return null;
   const skin = state.settings.uiSkin;
@@ -71,7 +48,7 @@ export function MirrorUiSkinSettings({ controller }: { controller: ExhibitionCon
   function resetFile() { setFile(null); setBaseline(undefined); if (input.current) input.current.value = ''; }
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (disabled || reading || !file || !size || error || inFlight.current) return;
+    if (disabled || !file || validateFile(file) || error || inFlight.current) return;
     inFlight.current = true; setSaving(true); setError('');
     try {
       const imageBase64 = await readBase64(file);
@@ -112,14 +89,12 @@ export function MirrorUiSkinSettings({ controller }: { controller: ExhibitionCon
       <div className="ex-ui-skin-custom">
       {(preview || skin) && <div className="ex-ui-skin-preview"><img src={preview || appUrl(skin!.image)} alt={preview ? '待保存的镜端皮肤' : '当前镜端皮肤'} /></div>}
       <div className="ex-ui-skin-upload-controls">
-      <div className="ex-ui-skin-actions"><label className={`ex-ui-skin-picker${disabled ? ' is-disabled' : ''}`}><Upload size={13} aria-hidden="true" />{file ? '重新选择' : '上传自定义皮肤'}<input ref={input} type="file" aria-label="镜端皮肤图片" aria-describedby={noteId} accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" disabled={disabled} onChange={event => { if (disabled || inFlight.current) return; setFile(event.target.files?.[0] ?? null); setBaseline(state.revision); setError(''); controller.clearError(); }} /></label>
-        {file && <button className="ex-button" disabled={disabled || reading || !size || !!error}>{saving ? '保存中…' : '保存皮肤'}</button>}
+      <div className="ex-ui-skin-actions"><label className={`ex-ui-skin-picker${disabled ? ' is-disabled' : ''}`}><Upload size={13} aria-hidden="true" />{file ? '重新选择' : '上传自定义皮肤'}<input ref={input} type="file" aria-label="镜端皮肤图片" accept="image/*" disabled={disabled} onChange={event => { if (disabled || inFlight.current) return; setFile(event.target.files?.[0] ?? null); setBaseline(state.revision); setError(''); controller.clearError(); }} /></label>
+        {file && <button className="ex-button" disabled={disabled || !!error}>{saving ? '保存中…' : '保存皮肤'}</button>}
         {skin && <button type="button" className="ex-button ex-ui-skin-restore" disabled={disabled} onClick={() => void restore()}>恢复默认</button>}
         {file && <button type="button" className="ex-reset-setting" disabled={saving || pending} onClick={() => { resetFile(); setError(''); controller.clearError(); }}>取消选择</button>}
       </div>
-      <p id={noteId}>9:16 竖图 · PNG / JPG / WebP · 最大 8 MB</p>
       </div></div>
-      {reading && <p className="ex-ui-skin-feedback" role="status">正在检查图片…</p>}
       {!configurable && <p className="ex-ui-skin-feedback" role="status">结束体验并等待实时会话停止后可修改。</p>}
       {!connected && <p className="ex-ui-skin-feedback" role="status">状态同步断开，恢复连接后可修改。</p>}
       {error && <p className="ex-field-error" role="alert">{controller.error || error}</p>}

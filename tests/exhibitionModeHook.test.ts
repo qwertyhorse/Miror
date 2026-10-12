@@ -9,6 +9,7 @@ import { createReactHost, flushReact } from './support/reactHost';
 const mocks = vi.hoisted(() => ({ api: vi.fn(), createXmaxClient: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
 vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: mocks.createXmaxClient, models: { realtime: (name: string) => name } }));
+vi.mock('../src/exhibition/OutfitCarousel', () => ({ OutfitCarousel: () => null }));
 vi.mock('../src/exhibition/MoXDragSurface', () => ({ MoXDragSurface: () => null }));
 vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: () => null, LiveCameraPanel: () => null }));
 

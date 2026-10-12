@@ -1,7 +1,7 @@
 {
   "name": "exhibition-smart-mirror",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.2",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n web,api \"npm:dev:web\" \"npm:dev:api\"",
@@ -16,7 +16,14 @@
     "lan:status": "node scripts/lan-managed.mjs status",
     "camera:check": "node scripts/camera-https.mjs check",
     "camera:serve": "node scripts/camera-https.mjs serve",
-    "camera:certificate": "bash scripts/lan-certificate.sh"
+    "camera:certificate": "node scripts/setup.mjs --certificate-only",
+    "start": "node scripts/start.mjs",
+    "setup": "node scripts/setup.mjs",
+    "seed:materials": "node scripts/seed-materials.mjs",
+    "preview": "node scripts/start.mjs",
+    "test:runtime": "node --test scripts/*.test.mjs",
+    "test:package": "node scripts/package-smoke.mjs",
+    "serve:web": "node scripts/static-web.mjs"
   },
   "dependencies": {
     "@xmaxai/sdk": "1.1.13",
@@ -24,7 +31,9 @@
     "lucide-react": "^1.49.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "tsx": "^4.23.15",
+    "selfsigned": "5.5.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
@@ -32,7 +41,6 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^10.0.5",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.3"

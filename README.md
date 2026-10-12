@@ -1,55 +1,71 @@
-# 展会智能镜
+# OpenBuy 展会智能镜 · 2026-10-12
 
-从 V1.1 提取的独立智能镜工程：镜端页面、管理后台、Node API 和 Android 原生镜端。未包含主站、V1.0、用户运行数据或永久密钥。
+独立的 V1.1 镜端、工作人员后台和 Node API，包含预构建前端与 99 个展会预设素材。前端与 API 由同一入口提供。
 
-## 目录
+## 启动
 
-- `src/exhibition/`：智能镜和管理后台界面。
-- `server/`：多镜管理、素材、设备绑定、密钥与实时会话。
-- `shared/`：镜端接口及 XMAX 区域类型。
-- `android/exhibition/`：Android 镜端及带许可证的 XMAX SDK。
-- `scripts/`：智能镜专用 HTTP/HTTPS 网关和 macOS 后台托管。
-- `tests/`：隔离测试；供应商和摄像头使用模拟对象。
+安装 Node.js 22.13 或更新版本（建议 24），本地交付 ZIP 已包含 dist；从 GitHub 获取源码时，先执行 npm ci 和 npm run build。解压整个目录后执行：
 
-## 本地准备
+```sh
+npm ci --omit=dev
+npm run setup
+npm start
+```
 
-需要 Node.js 22.13 或更新版本（建议 Node.js 24）和 npm。
+`setup` 只在缺少时创建环境文件与素材库，并生成本机 HTTPS 证书；重复执行保留已有配置与素材。`npm start` 同时启动前端、API、HTTP 和 HTTPS。窗口需保持运行，按 Ctrl+C 停止。
+
+- 工作人员后台：[http://xuminghong.local:10601/](http://xuminghong.local:10601/)
+- 本地入口：[http://xuminghong.local:10200/](http://xuminghong.local:10200/)
+- 镜端：[http://xuminghong.local:10200/v1.1/exhibition/screen](http://xuminghong.local:10200/v1.1/exhibition/screen)，自动进入 HTTPS 10202 摄像头页面。
+
+macOS 可双击 `启动展会局域网.command`。脚本会自动查找已安装的 Node（包括 Codex 本机运行时），需要安装带 npm 的 Node.js。首次自动安装依赖、初始化并启用后台托管，关闭窗口、锁屏或熄屏后继续运行；重启后登录自动恢复。后台运行文件与持久数据保存在 `~/Library/Application Support/Miror/preview/<目录标识>/`，不依赖后台进程读取“桌面”或“文稿”。双击 `停止局域网预览.command` 停止本包服务并解除防眠。主动睡眠、合盖、退出登录、关机或断网会影响访问。
+
+Windows 可双击 `启动展会.cmd`。首次安装需联网；其他电脑需要能解析 `xuminghong.local`，或使用后台输出的局域网 IP 备用地址。设备与服务电脑应在同一局域网，防火墙需允许 HTTP 10200/10201/10601 和 HTTPS 10202。
+
+## 摄像头与 XMAX
+
+首次在镜端设备上安装并信任本包生成的 `.data/lan-tls/root-ca.crt`，也可从后台下载公开 CA。初始化不会修改系统信任。
+
+在后台当前设备设置区的 HTTPS 表单中配置每台镜的 XMAX SK 和区域。HTTP 页面只接收保存结果，不接收密钥。也可在服务端 `.env` 配置默认 `XMAX_API_KEY`。密钥、会话记录和证书私钥仅保存在运行电脑。前台运行数据在包内 `.data`；macOS 后台托管的数据在上述运行目录的 `data/`，环境文件为 `app/.env`。搬迁已有运行数据时需同时保留数据目录中的加密密钥，不能只搬数据库。
+
+素材库首次以演示模式初始化。配置 SK 后在后台选择实时模式；镜端仅准备本地取景，点击“开始体验”才启动生成。临时凭证有单次限制和有效期；不设置本地累计预算，额度不足以 XMAX 返回为准。
+
+## 技术接手
+
+- `src/`：独立智能镜和后台界面。
+- `server/`：多镜、素材、设备、凭证和实时会话 API。
+- `shared/`：前后端共享类型与命令协议。
+- `dist/`：可直接运行的前端构建；改源码后需重新构建。
+- `seed/`：99 个预设素材及 SHA256 清单，不包含设备绑定和历史会话。
+- `scripts/`：初始化、静态服务、HTTP/HTTPS 网关和 macOS 后台托管。
+- [docs/API.md](docs/API.md)：接口、请求示例与完整实时会话流程。
+
+外部接口前缀是 `/v1.1/api/exhibition`；前端使用同源相对地址，网关将其代理到内部 API 的 `/api/exhibition`。**不要只上传 `dist` 到普通静态空间**；后台 API 与 HTTPS 网关也必须一起运行。`dist/index.html` 需要由服务打开，不支持双击文件预览。
+
+内部 API 3002 与静态服务 5173 仅监听本机；前台启动和 macOS 托管均使用同一组固定端口。端口被其他工程占用时会明确报错，不停止占用程序。本机正在运行原工程时，独立包不能同时占用同一组入口。
+
+启动环境检查（不安装依赖、不启动服务）：
+
+```sh
+bash scripts/launch-mac.sh doctor
+```
+
+修改后验证：
 
 ```sh
 npm ci
-cp .env.example .env
-npm run typecheck
-npm test
 npm run build
+npm test
+npm run test:runtime
+npm run test:package
 ```
 
-镜端永久密钥通过管理后台当前设置区中的 HTTPS 表单填写；也可在仅服务端读取的 `.env` 中填写默认 `XMAX_API_KEY`。密钥在本机加密保存，不进入浏览器 HTTP 页面或 Git。
+普通界面开发可用 `npm run dev`；完整局域网与摄像头流程使用 `npm start` 或 macOS `npm run lan:start`。停止后台服务后重新启动会同步源码与依赖，已有后台数据与环境配置保留。运行数据与本机依赖不进入交付压缩包，应在目标系统重新安装依赖。本包不包含主站、V1.0、生产密钥或现场运行记录，未配置自动发布。
 
-每次会话使用受限临时凭证，保留有效期、撤销和异常会话记录。智能镜不设置本地累计预算；余额不足以 XMAX 实际返回为准。
+## 本次技术交接
 
-## 固定局域网入口
+本次交付以当前 V1.1 展会源码为准，包含连续快速切换素材和停止竞争处理。详见 `技术交接说明.txt`；本次构建、测试和校验记录见 `docs/verification.json`。
 
-后台：`http://xuminghong.local:10200/`（重定向 `/v1.1/exhibition`）。
+Ubuntu 可使用上述 Node 前台启动流程；Linux 的 systemd 开机自启、进程守护、防闲置睡眠与 Avahi 域名广播需由技术补充，本次未进行 Ubuntu 实机验收。当前展会代码尚未接入 MediaPipe 挥手识别。
 
-镜端：`http://xuminghong.local:10200/v1.1/exhibition/screen`，自动进入同主机 `https://xuminghong.local:10202/v1.1/exhibition/screen`，保留设备参数。进入后仅准备本地取景，点击“开始体验”才启动生成。
-
-```sh
-npm run camera:certificate
-npm run lan:start
-npm run lan:status
-npm run lan:stop
-```
-
-证书只在显式执行时生成于本工程 `.data/lan-tls/`，需要在访问设备上自行信任生成的 CA 公钥。脚本不自动安装系统信任。内部 Vite 5173、API 3002 仅监听回环地址；HTTP 10200/10201 和 HTTPS 10202 为局域网网关。HTTP 网关禁止永久密钥写入。
-
-`lan:start` 仅支持 macOS，注册本工程独立的登录自启及退出重启服务。运行期间防止闲置睡眠，允许锁屏与屏幕熄灭；停止后释放防眠。网络变化自动刷新域名广播和备用地址。合盖、主动睡眠、退出登录、关机或断网会影响访问。端口被其他工程占用时拒绝启动，不停止现有服务。
-
-只需前台开发时，可运行 `npm run dev`，另行运行 `npm run lan:serve` 和 `npm run camera:serve`。不要与已经占用同一端口的工程同时启动。
-
-运行数据、凭证加密密钥和本地证书均不入库。Android debug 附带的 `openbuy_local_ca.crt` 为原展台的公开 CA 信任锚，证书脚本会同步新 CA 公钥到此资源，换用证书后须重新构建并安装 APK；不包含证书私钥。Android 的构建步骤见 `android/exhibition/README.md`。
-
-## 仓库与验证
-
-目标仓库：https://github.com/qwertyhorse/Miror
-
-此次交付仅同步源码。`.gitlab-ci.yml` 禁用自动流水线，避免项目默认 Auto DevOps 自动部署；未配置站点发布任务。
+本次验证：源码构建与类型检查通过，685 项单元/集成测试、4 项运行测试、99 份素材校验通过；仅生产依赖的干净安装也通过打包运行检查。所有验证使用模拟供应商，XMAX 调用为 0。

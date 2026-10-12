@@ -29,7 +29,7 @@ async function fixture() {
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!,
     deactivate: async token => { const value = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, value); return value; },
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 0 }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)) });
+  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
   const mirrors = new ExhibitionMirrors(directory, { now: () => time });
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');

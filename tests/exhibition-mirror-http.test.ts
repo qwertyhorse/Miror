@@ -14,7 +14,7 @@ import { ApiError, type IssuedKey, type KeyStatus, type Provider } from '../serv
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const clean of cleanups.splice(0)) await clean(); });
 
-async function fixture() {
+async function fixture(totalLimit = 360) {
   const directory = mkdtempSync(join(tmpdir(), 'openbuy-mirror-http-'));
   const store = new SessionStore(':memory:');
   const keys = new Map<string, KeyStatus>();
@@ -32,7 +32,7 @@ async function fixture() {
   const sessionStatus = vi.fn(async (_token: string, sessionUid: string) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }));
   const provider: Provider = { configured: true, issueKey: issue, deactivate, keyStatus, sessionStatus };
   const resolveHost = vi.fn(async () => ['8.8.8.8']);
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost });
+  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], totalLimit, resolveHost });
   const mirrors = new ExhibitionMirrors(directory);
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -53,20 +53,6 @@ async function fixture() {
 }
 
 describe('mirror-scoped exhibition HTTP APIs', () => {
-  it('does not expose main-site status, settings, validation, or ordinary session endpoints', async () => {
-    const { request, store, issue } = await fixture();
-    for (const [path, input] of [
-      ['/api/status'], ['/api/validation'], ['/api/settings/api-key'],
-      ['/api/validation/attempts', {}], ['/api/sessions', {}], ['/api/settings/api-key', {}],
-    ] as const) {
-      const response = await request(path, input);
-      expect(response.status, path).toBe(404);
-      expect(await response.json()).toMatchObject({ code: 'NOT_FOUND' });
-    }
-    expect(store.list()).toEqual([]);
-    expect(issue).not.toHaveBeenCalled();
-  });
-
   it('returns a reference DNS failure without binding, linking, or allocating another credential', async () => {
     const { request, root, start, resolveHost, store, issue, sessionStatus } = await fixture();
     const input = start('default');
@@ -144,9 +130,9 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     ];
     for (const [path, value, method] of denied) {
       const response = await request(path, value, method);
-      const removedMainRoute = path.startsWith('/api/sessions/');
-      expect(response.status, path).toBe(removedMainRoute ? 404 : 409);
-      expect(await response.json()).toMatchObject({ code: removedMainRoute ? 'NOT_FOUND' : 'EXHIBITION_MIRROR_MISMATCH' });
+      const mainSitePath = path.startsWith('/api/sessions/');
+      expect(response.status, path).toBe(mainSitePath ? 404 : 409);
+      expect(await response.json()).toMatchObject({ code: mainSitePath ? 'NOT_FOUND' : 'EXHIBITION_MIRROR_MISMATCH' });
     }
     expect(keyStatus).not.toHaveBeenCalled(); expect(sessionStatus).not.toHaveBeenCalled();
     expect(deactivate).not.toHaveBeenCalled(); expect(resolveHost).not.toHaveBeenCalled();
@@ -178,7 +164,7 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
   });
 
   it('allows simultaneous mirror reservations regardless of the ordinary local test limit', async () => {
-    const { mirrors, store, issue, request, root, start } = await fixture();
+    const { mirrors, store, issue, request, root, start } = await fixture(30);
     const a = mirrors.create({ name: '左镜' }); const b = mirrors.create({ name: '右镜' });
     const responses = await Promise.all([a, b].map(mirror => request(root(mirror.id) + '/live/session', start(mirror.id))));
     expect(responses.map(response => response.status)).toEqual([201, 201]);
@@ -205,9 +191,12 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     const response = await request('/api/exhibition/live/session', input); const session = await response.json();
     const metadata = { ...store.get(session.id).exhibition! }; delete metadata.mirrorId;
     store.update(session.id, { exhibition: metadata });
-    expect((await request(`/api/sessions/${session.id}`)).status).toBe(404);
-    expect((await request(`/api/exhibition/sessions/${session.id}`)).status).toBe(200);
-    expect((await request(root('default') + `/sessions/${session.id}`)).status).toBe(200);
+    const legacyResponse = await request(`/api/sessions/${session.id}`);
+    expect(legacyResponse.status).toBe(404);
+    expect(await legacyResponse.json()).toMatchObject({ code: 'NOT_FOUND' });
+    const scopedResponse = await request(root('default') + `/sessions/${session.id}`);
+    expect(scopedResponse.status).toBe(200);
+    expect(await scopedResponse.json()).toMatchObject({ id: session.id, exhibition: { mirrorId: 'default' } });
     const other = mirrors.create({ name: '新镜' });
     expect((await request(root(other.id) + `/sessions/${session.id}`)).status).toBe(409);
     await expect(service.bindExhibitionReference(session.id, { ...input, mirrorId: other.id, refImageUrl: 'https://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_MIRROR_MISMATCH' });

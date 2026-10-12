@@ -32,7 +32,7 @@ function liveFixture() {
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!,
     deactivate: async token => { const status = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, status); return status; },
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
-  const live = new TryOnService({ store, provider, secrets: new SecretBox(randomBytes(32)), resolveHost: async () => ['8.8.8.8'] });
+  const live = new TryOnService({ store, provider, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], resolveHost: async () => ['8.8.8.8'] });
   base.service.attachLiveService(live);
   return { ...base, live, store, issue, provider };
 }

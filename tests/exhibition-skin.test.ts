@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import { ExhibitionService } from '../server/exhibition.ts';
 import { ExhibitionMirrors } from '../server/exhibitionMirrors.ts';
-import { EXHIBITION_SKIN_MAX_BYTES } from '../server/exhibitionSkin.ts';
 import { createApiServer } from '../server/http.ts';
 import type { TryOnService } from '../server/service.ts';
 import type { ExhibitionState, ExhibitionUiSkin } from '../shared/exhibition.ts';
@@ -18,7 +17,7 @@ function fixture() {
   const path = directory(); let time = 1_800_000_000_000; const now = () => time;
   return { directory: path, now, service: new ExhibitionService(path, { now }), advance: (ms: number) => { time += ms; } };
 }
-function image(width = 360, height = 640, format: 'png' | 'jpeg' | 'webp' = 'png') {
+function image(width = 360, height = 640, format: 'png' | 'jpeg' | 'webp' | 'gif' | 'avif' | 'tiff' = 'png') {
   return sharp({ create: { width, height, channels: 4, background: '#aa88ff80' } })[format]().toBuffer();
 }
 function input(bytes: Buffer, expectedRevision?: number) { return { imageBase64: bytes.toString('base64'), ...(expectedRevision === undefined ? {} : { expectedRevision }) }; }
@@ -125,7 +124,7 @@ describe('built-in exhibition UI skins', () => {
 });
 
 describe('exhibition UI skin validation and persistence', () => {
-  it.each(['png', 'jpeg', 'webp'] as const)('decodes real %s content to WebP and preserves the exhibition selection', async format => {
+  it.each(['png', 'jpeg', 'webp', 'gif', 'avif', 'tiff'] as const)('decodes real %s content to WebP and preserves the exhibition selection', async format => {
     const { service } = fixture(); const before = service.get();
     const uploaded = await service.uploadUiSkin(input(await image(360, 640, format), before.revision));
     const skin = uploaded.settings.uiSkin!; const asset = service.uiSkinAsset(skinId(skin));
@@ -134,7 +133,8 @@ describe('exhibition UI skin validation and persistence', () => {
     expect(uploaded).toMatchObject({ revision: before.revision + 1, looks: before.looks, enabledLookIds: before.enabledLookIds,
       selectedLookId: before.selectedLookId, phase: before.phase, generationNumber: before.generationNumber, sessionNumber: before.sessionNumber });
     expect(asset.mime).toBe('image/webp');
-    expect(await sharp(asset.data).metadata()).toMatchObject({ format: 'webp', width: 360, height: 640, hasAlpha: format !== 'jpeg' });
+    expect(await sharp(asset.data).metadata()).toMatchObject({ format: 'webp', width: 360, height: 640 });
+    if (format === 'png' || format === 'webp') expect((await sharp(asset.data).metadata()).hasAlpha).toBe(true);
   });
 
   it('retains transparency while stripping embedded metadata', async () => {
@@ -150,7 +150,7 @@ describe('exhibition UI skin validation and persistence', () => {
     expect(info.channels).toBe(4); expect(data[3]).toBeGreaterThan(0); expect(data[3]).toBeLessThan(255);
   });
 
-  it('validates oriented dimensions and stores the correctly rotated portrait', async () => {
+  it('stores dimensions from the decoded and correctly rotated image', async () => {
     const { service } = fixture();
     const source = await sharp({ create: { width: 640, height: 360, channels: 3, background: '#ccc' } }).jpeg().withMetadata({ orientation: 6 }).toBuffer();
     const skin = (await service.uploadUiSkin(input(source))).settings.uiSkin!;
@@ -161,7 +161,7 @@ describe('exhibition UI skin validation and persistence', () => {
 
   it('rejects fake, truncated, unsupported and malformed image content without changing state', async () => {
     const { service, directory } = fixture(); const before = service.get(); const png = await image();
-    for (const bytes of [Buffer.from('<html>not an image</html>'), Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="360" height="640"></svg>'), png.subarray(0, 70)]) {
+    for (const bytes of [Buffer.alloc(0), Buffer.from('<html>not an image</html>'), Buffer.from('<svg broken'), png.subarray(0, 70)]) {
       await expect(service.uploadUiSkin({ imageBase64: `data:image/png;base64,${bytes.toString('base64')}`, filename: 'skin.png', width: 360, height: 640 })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_SKIN' });
     }
     for (const imageBase64 of ['', '%%%%', 'a===', 'data:text/html;base64,AAAA', 'AAAA\nAAAA', 123, null]) {
@@ -170,24 +170,50 @@ describe('exhibition UI skin validation and persistence', () => {
     expect(service.get()).toEqual(before); expect(existsSync(join(directory, 'exhibition-skins'))).toBe(false);
   });
 
-  it('rejects APNG and genuinely animated WebP inputs', async () => {
-    const { service } = fixture(); const before = service.get(); const png = await image();
-    const animation = Buffer.alloc(20); animation.writeUInt32BE(8, 0); animation.write('acTL', 4); animation.writeUInt32BE(2, 8);
-    await expect(service.uploadUiSkin(input(Buffer.concat([png.subarray(0, 8), animation, png.subarray(8)])))).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_SKIN' });
+  it('normalizes the first frame of an animated image to a static skin', async () => {
+    const { service } = fixture();
     const pixels = Buffer.concat([Buffer.alloc(360 * 640 * 4, 80), Buffer.alloc(360 * 640 * 4, 160)]);
     const webp = await sharp(pixels, { raw: { width: 360, height: 1280, channels: 4, pageHeight: 640 } }).webp({ loop: 0, delay: [100, 100] }).toBuffer();
     expect((await sharp(webp).metadata()).pages).toBe(2);
-    await expect(service.uploadUiSkin(input(webp))).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_SKIN' });
-    expect(service.get()).toEqual(before);
+    const skin = (await service.uploadUiSkin(input(webp))).settings.uiSkin!;
+    const stored = service.uiSkinAsset(skinId(skin));
+    const metadata = await sharp(stored.data).metadata();
+    expect(metadata).toMatchObject({ format: 'webp', width: 360, height: 640 });
+    expect(metadata.pages ?? 1).toBe(1);
+    const pixel = await sharp(stored.data).extract({ left: 0, top: 0, width: 1, height: 1 }).raw().toBuffer();
+    expect(pixel[0]).toBeLessThan(100);
   });
 
-  it('enforces server dimension, aspect ratio and byte limits rather than client metadata', async () => {
-    const { service, directory } = fixture(); const before = service.get();
-    for (const [width, height] of [[359, 640], [360, 639], [2161, 3000], [400, 3841], [360, 1000], [1000, 1000]]) {
-      await expect(service.uploadUiSkin({ ...input(await image(width, height)), width: 1080, height: 1920 })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_SKIN_DIMENSIONS' });
+  it.each([[1, 1], [359, 640], [360, 639], [2161, 3000], [400, 3841], [360, 1000], [1000, 1000], [4000, 2500]])('accepts %s × %s without dimension or aspect ratio restrictions', async (width, height) => {
+    const { service } = fixture();
+    const skin = (await service.uploadUiSkin({ ...input(await image(width, height)), width: 1080, height: 1920 })).settings.uiSkin!;
+    expect(skin).toMatchObject({ width, height });
+    expect(await sharp(service.uiSkinAsset(skinId(skin)).data).metadata()).toMatchObject({ width, height });
+  });
+
+  it('accepts SVG image data and image data URLs for other decodable formats', async () => {
+    const { service } = fixture();
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>');
+    for (const [mime, bytes] of [['image/svg+xml', svg], ['image/tiff', await image(200, 100, 'tiff')]] as const) {
+      const skin = (await service.uploadUiSkin({ imageBase64: `data:${mime};base64,${bytes.toString('base64')}` })).settings.uiSkin!;
+      expect((await sharp(service.uiSkinAsset(skinId(skin)).data).metadata()).format).toBe('webp');
     }
-    await expect(service.uploadUiSkin(input(Buffer.alloc(EXHIBITION_SKIN_MAX_BYTES + 1)))).rejects.toMatchObject({ code: 'EXHIBITION_SKIN_TOO_LARGE', statusCode: 413 });
-    expect(service.get()).toEqual(before); expect(existsSync(join(directory, 'exhibition-skins'))).toBe(false);
+  });
+
+  it.each([[16_384, 100, 16_383, 100], [100, 16_384, 100, 16_383]])('scales %s × %s to the WebP encoder range without rejecting the upload', async (width, height, storedWidth, storedHeight) => {
+    const { service } = fixture();
+    const skin = (await service.uploadUiSkin(input(await image(width, height)))).settings.uiSkin!;
+    expect(skin).toMatchObject({ width: storedWidth, height: storedHeight });
+    expect(await sharp(service.uiSkinAsset(skinId(skin)).data).metadata()).toMatchObject({ width: storedWidth, height: storedHeight });
+  });
+
+  it('accepts a real image over the former 8 MB upload limit', async () => {
+    const { service } = fixture();
+    const bytes = await sharp({ create: { width: 1500, height: 1500, channels: 4, background: '#aa88ff80' } }).tiff({ compression: 'none' }).toBuffer();
+    expect(bytes.length).toBeGreaterThan(8 * 1024 * 1024);
+    const skin = (await service.uploadUiSkin(input(bytes))).settings.uiSkin!;
+    expect(skin).toMatchObject({ width: 1500, height: 1500 });
+    expect((await sharp(service.uiSkinAsset(skinId(skin)).data).metadata()).format).toBe('webp');
   });
 
   it('rechecks revisions after decoding and does not install stale or in-experience updates', async () => {
@@ -298,7 +324,7 @@ describe('exhibition UI skin HTTP boundary', () => {
     });
   });
 
-  it('enforces origin, revision, content type and route-specific body limits before installing a skin', async () => {
+  it('enforces origin, revision, content type and invalid content checks before installing a skin', async () => {
     await withServer(async (base, mirrors) => {
       const path = `${base}/api/exhibition/mirrors/default/skin`; const service = mirrors.getMirror(); const before = service.get(); const payload = input(await image(), before.revision);
       const forbidden = await fetch(path, { method: 'POST', headers: { ...headers, Origin: 'http://outside.example' }, body: JSON.stringify(payload) });
@@ -306,10 +332,23 @@ describe('exhibition UI skin HTTP boundary', () => {
       const stale = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ ...payload, expectedRevision: before.revision - 1 }) });
       expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
       const wrongType = await fetch(path, { method: 'POST', headers: { ...headers, 'Content-Type': 'text/plain' }, body: JSON.stringify(payload) }); expect(wrongType.status).toBe(415);
-      const tooLarge = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ imageBase64: 'A'.repeat(Math.ceil(EXHIBITION_SKIN_MAX_BYTES / 3) * 4 + 16384) }) });
-      expect(tooLarge.status).toBe(413); expect(await tooLarge.json()).toMatchObject({ code: 'REQUEST_TOO_LARGE' });
       const malformed = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ imageBase64: 'AAAA' }) });
       expect(malformed.status).toBe(400); expect(await malformed.json()).toMatchObject({ code: 'EXHIBITION_INVALID_SKIN' });
+      expect(service.get()).toEqual(before);
+    });
+  });
+
+  it('accepts a skin body over the former 8 MB limit while retaining command body limits', async () => {
+    await withServer(async (base, mirrors) => {
+      const root = `${base}/api/exhibition/mirrors/default`; const service = mirrors.getMirror();
+      const bytes = await sharp({ create: { width: 1500, height: 1500, channels: 4, background: '#aa88ff80' } }).tiff({ compression: 'none' }).toBuffer();
+      expect(bytes.length).toBeGreaterThan(8 * 1024 * 1024);
+      const uploaded = await fetch(`${root}/skin`, { method: 'POST', headers, body: JSON.stringify(input(bytes, service.get().revision)) });
+      expect(uploaded.status).toBe(200);
+      expect(await uploaded.json()).toMatchObject({ settings: { uiSkin: { width: 1500, height: 1500 } } });
+      const before = service.get();
+      const tooLarge = await fetch(`${root}/command`, { method: 'POST', headers, body: JSON.stringify({ action: 'configure', padding: 'A'.repeat(16_384) }) });
+      expect(tooLarge.status).toBe(413); expect(await tooLarge.json()).toMatchObject({ code: 'REQUEST_TOO_LARGE' });
       expect(service.get()).toEqual(before);
     });
   });

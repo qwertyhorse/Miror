@@ -4,14 +4,15 @@ import http from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOSTNAME, HTTP_PORT, HTTP_COMPAT_PORT, isPrivateAddress, proxyRequest, proxyUpgrade, reject, requestPath } from './gateway-shared.mjs';
+import { HOSTNAME, HTTP_PORT, HTTP_COMPAT_PORT, EXHIBITION_PORT, isPrivateAddress, proxyRequest, proxyUpgrade, reject, requestPath } from './gateway-shared.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const script = fileURLToPath(import.meta.url);
 export const LAN_URL = `http://${HOSTNAME}:${HTTP_PORT}/`;
 const defaultHosts = [HOSTNAME, '127.0.0.1', 'localhost'];
+const httpPorts = [HTTP_PORT, HTTP_COMPAT_PORT, EXHIBITION_PORT];
 
-export function validateLanRequest(request, ip = null, websocket = false, { ports = [HTTP_PORT, HTTP_COMPAT_PORT] } = {}) {
+export function validateLanRequest(request, ip = null, websocket = false, { ports = httpPorts } = {}) {
   const ips = Array.isArray(ip) ? ip : ip ? [ip] : [];
   const hosts = new Set(ports.flatMap(port => [...defaultHosts, ...ips].map(host => `${host}:${port}`)));
   const host = (request.headers.host ?? '').toLowerCase();
@@ -22,19 +23,19 @@ export function validateLanRequest(request, ip = null, websocket = false, { port
   if ((writing || websocket) && (!origin || request.headers['sec-fetch-site'] === 'cross-site')) return { code: 403, message: '写入与 WebSocket 请求必须来自同源页面。' };
   const parsed = requestPath(request, `http://${host}`);
   if (!parsed) return { code: 400, message: '无效请求路径。' };
-  if (!['/', '/__mirror_health'].includes(parsed.path) && (!/^\/v1\.1(?:\/|$)/.test(parsed.path) || !/^\/v1\.1(?:\/|$)/.test(parsed.rawPath))) return { code: 404, message: '未找到智能镜页面。' };
+  if (!['/', '/__mirror_health', '/openbuy-local-ca.crt'].includes(parsed.path) && (!/^\/v1\.1(?:\/|$)/.test(parsed.path) || !/^\/v1\.1(?:\/|$)/.test(parsed.rawPath))) return { code: 404, message: '未找到智能镜页面。' };
   if (/^\/v1\.1\/api\/(?!exhibition(?:\/|$))/.test(parsed.path)) return { code: 404, message: '未找到智能镜接口。' };
   if (writing && /^\/v1\.1\/api\/exhibition\/mirrors\/[a-z0-9][a-z0-9-]{0,63}\/credentials(?:\/|$)/.test(parsed.path)) return { code: 403, message: '密钥请通过安全连接保存。' };
   return null;
 }
 
-export function createLanRequestHandler({ getIPs = () => [], targetPort = 5173, ports = [HTTP_PORT, HTTP_COMPAT_PORT] } = {}) {
+export function createLanRequestHandler({ getIPs = () => [], targetPort = 5173, ports = httpPorts } = {}) {
   return (request, response) => {
     const failure = validateLanRequest(request, getIPs(), false, { ports });
     if (failure) { reject(response, failure.code, failure.message); return; }
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname === '/') {
-      response.writeHead(302, { Location: `/v1.1/exhibition${url.search}`, 'Cache-Control': 'no-store' }); response.end(); return;
+      response.writeHead(302, { Location: `/v1.1/exhibition/control${url.search}`, 'Cache-Control': 'no-store' }); response.end(); return;
     }
     if (url.pathname === '/__mirror_health') {
       response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -67,7 +68,7 @@ async function serve() {
   let ips = lanIPv4();
   const sockets = new Set();
   const handler = createLanRequestHandler({ getIPs: () => ips });
-  const servers = [HTTP_PORT, HTTP_COMPAT_PORT].map(port => ({ server: http.createServer(handler), port }));
+  const servers = httpPorts.map(port => ({ server: http.createServer(handler), port }));
   let closing = false;
   let awake;
   let registration;
@@ -125,7 +126,7 @@ async function serve() {
   await writeAddresses(ips); broadcast();
   networkTimer = setInterval(() => { void refreshNetwork(); }, 10000);
   process.once('SIGTERM', () => stop()); process.once('SIGINT', () => stop());
-  console.log(`智能镜入口：${LAN_URL}；兼容入口：http://${HOSTNAME}:${HTTP_COMPAT_PORT}/`);
+  console.log(`工作人员后台：http://${HOSTNAME}:${EXHIBITION_PORT}/；智能镜入口：${LAN_URL}；兼容入口：http://${HOSTNAME}:${HTTP_COMPAT_PORT}/`);
   console.log('锁屏与熄屏期间继续运行；停止后释放防睡眠。');
 }
 

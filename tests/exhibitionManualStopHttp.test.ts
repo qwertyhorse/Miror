@@ -32,7 +32,7 @@ async function fixture() {
     issueKey: issue, keyStatus: async () => ({ status: 'active', consumedCredit: 1, expireTimestamp: new Date(now + 120_000).toISOString() }),
     deactivate: token => deactivate(credential, token), sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 1 }),
   });
-  const service = new TryOnService({ provider: provider(key), providerForApiKey: provider, store, secrets: new SecretBox(randomBytes(32)) });
+  const service = new TryOnService({ provider: provider(key), providerForApiKey: provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
   const mirrors = new ExhibitionMirrors(directory, { now: () => now });
   mirrors.attachLiveService(service);
   const mirror = mirrors.getMirror('default');

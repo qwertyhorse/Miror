@@ -15,14 +15,14 @@ type CredentialInfo = { configured: boolean; source: 'mirror' | 'default'; revis
 function safeInfo(overrides: Partial<CredentialInfo> = {}): CredentialInfo { return { configured: true, source: 'default', revision: 11, editable: true, perSessionLimit: 30, totalLimit: 360, allocatedCredits: 60, remainingCredits: 300, ...overrides }; }
 type RequestHandler = (url: string, init?: RequestInit) => Promise<Response>;
 
-async function fixture(options: { secure?: boolean; embedded?: boolean; hostname?: string; httpPort?: '10200' | '10201'; info?: CredentialInfo; handler?: RequestHandler } = {}) {
+async function fixture(options: { secure?: boolean; embedded?: boolean; httpPort?: number; parentOrigin?: string; info?: CredentialInfo; handler?: RequestHandler } = {}) {
   host = await createReactHost();
   const secure = options.secure ?? true;
-  const hostname = options.hostname ?? 'xuminghong.local';
-  const port = secure ? '10202' : options.httpPort ?? '10200';
   Object.assign(window, { isSecureContext: secure });
-  Object.assign(window.location, { protocol: secure ? 'https:' : 'http:', hostname, host: `${hostname}:${port}`, port,
-    pathname: '/v1.1/exhibition/control', search: '?mirror=east', href: `${secure ? 'https' : 'http'}://${hostname}:${port}/v1.1/exhibition/control?mirror=east` });
+  const page = new URL(`${secure ? 'https' : 'http'}://xuminghong.local:${secure ? 10202 : options.httpPort ?? 10200}/v1.1/exhibition/control?mirror=east`);
+  if (options.parentOrigin !== undefined) page.searchParams.set('parentOrigin', options.parentOrigin);
+  Object.assign(window.location, { protocol: page.protocol, hostname: page.hostname, host: page.host, port: page.port,
+    pathname: page.pathname, search: page.search, href: page.href });
   const postMessage = vi.fn();
   Object.assign(window, { parent: options.embedded ? { postMessage } : window });
   if (options.embedded) {
@@ -141,14 +141,15 @@ describe('per-mirror XMAX credential settings', () => {
     expect(f.live.refreshStatus).not.toHaveBeenCalled();
   });
 
-  it('embeds a mirror-specific HTTPS form on HTTP without collecting a password or opening a page', async () => {
-    const f = await fixture({ secure: false });
+  it.each([10200, 10201, 10601])('embeds a mirror-specific HTTPS form from HTTP %s without collecting a password or opening a page', async httpPort => {
+    const f = await fixture({ secure: false, httpPort });
     expect(f.input()).toBeUndefined(); expect(f.saveButton()).toBeUndefined();
     const frame = host!.find(node => node.nodeName === 'iframe')!;
     const destination = new URL(frame.getReactProps().src);
     expect(destination.protocol).toBe('https:'); expect(destination.host).toBe('xuminghong.local:10202');
     expect(destination.pathname).toBe(appUrl('/exhibition/control')); expect(destination.searchParams.get('mirror')).toBe('east');
     expect(destination.searchParams.get('credentialForm')).toBe('1'); expect(destination.hash).toBe('');
+    expect(destination.searchParams.get('parentOrigin')).toBe(`http://xuminghong.local:${httpPort}`);
     expect(frame.getReactProps().title).toBe('XMAX SK 配置');
     expect(host!.find(node => node.nodeName === 'a')).toBeUndefined();
     expect(f.fetcher).not.toHaveBeenCalled();
@@ -193,35 +194,40 @@ describe('per-mirror XMAX credential settings', () => {
     expect(f.controller.refresh).toHaveBeenCalledOnce();
   });
 
-  it.each(['xuminghong.local', '192.168.14.50'])('notifies only supported same-host HTTP parent origins on %s without including the secret', async hostname => {
-    const f = await fixture({ embedded: true, hostname });
+  it('notifies the fixed HTTP parent of height and successful save without including the secret', async () => {
+    const f = await fixture({ embedded: true });
     const secret = 'uk-isolated-embedded-fixture';
-    const origins = ['10200', '10201'].map(port => `http://${hostname}:${port}`);
-    for (const origin of origins)
-      expect(f.postMessage).toHaveBeenCalledWith({ type: 'openbuy:mirror-credential', mirrorId: 'east', height: 86 }, origin);
+    expect(f.postMessage).toHaveBeenCalledWith({ type: 'openbuy:mirror-credential', mirrorId: 'east', height: 86 }, 'http://xuminghong.local:10200');
     await f.fill(secret); await f.save();
-    for (const origin of origins)
-      expect(f.postMessage).toHaveBeenCalledWith({ type: 'openbuy:mirror-credential', mirrorId: 'east', saved: true }, origin);
+    expect(f.postMessage).toHaveBeenCalledWith({ type: 'openbuy:mirror-credential', mirrorId: 'east', saved: true }, 'http://xuminghong.local:10200');
     expect(JSON.stringify(f.postMessage.mock.calls)).not.toContain(secret);
     for (const [message, origin] of f.postMessage.mock.calls) {
       expect(Object.keys(message).every(key => ['type', 'mirrorId', 'height', 'saved'].includes(key))).toBe(true);
-      expect(origins).toContain(origin);
+      expect(origin).toBe('http://xuminghong.local:10200');
     }
   });
 
-  it.each(['xuminghong.local', '192.168.14.50'])('refreshes the 10201 parent on %s only from its current secure frame', async hostname => {
-    const f = await fixture({ secure: false, hostname, httpPort: '10201' });
-    const frame = host!.find(node => node.nodeName === 'iframe')!;
-    expect(new URL(frame.getReactProps().src).origin).toBe(`https://${hostname}:10202`);
-    const source = {}; Object.defineProperty(frame, 'contentWindow', { value: source });
-    const message = { type: 'openbuy:mirror-credential', mirrorId: 'east', saved: true, height: 90 };
-    await frameMessage(message, `http://${hostname}:10201`, source);
-    await frameMessage(message, `https://${hostname}:10202`, {});
-    expect(f.controller.refresh).not.toHaveBeenCalled();
-    await frameMessage(message, `https://${hostname}:10202`, source);
-    expect(frame.getReactProps().style.height).toBe(90);
-    expect(f.controller.refresh).toHaveBeenCalledOnce(); expect(f.live.refreshStatus).toHaveBeenCalledOnce();
-    expect(f.input()).toBeUndefined(); expect(f.fetcher).not.toHaveBeenCalled();
+  it.each([10200, 10201, 10601])('notifies the selected trusted HTTP %s parent without including the secret', async port => {
+    const parentOrigin = `http://xuminghong.local:${port}`;
+    const f = await fixture({ embedded: true, parentOrigin });
+    const secret = 'uk-isolated-parent-origin-fixture';
+    expect(f.postMessage).toHaveBeenCalledWith({ type: 'openbuy:mirror-credential', mirrorId: 'east', height: 86 }, parentOrigin);
+    await f.fill(secret); await f.save();
+    expect(f.postMessage).toHaveBeenCalledWith({ type: 'openbuy:mirror-credential', mirrorId: 'east', saved: true }, parentOrigin);
+    expect(JSON.stringify(f.postMessage.mock.calls)).not.toContain(secret);
+    for (const [message, origin] of f.postMessage.mock.calls) {
+      expect(Object.keys(message).every(key => ['type', 'mirrorId', 'height', 'saved'].includes(key))).toBe(true);
+      expect(origin).toBe(parentOrigin);
+    }
+  });
+
+  it.each(['http://evil.example:10601', 'https://xuminghong.local:10601', 'http://xuminghong.local:5173',
+    'http://user:password@xuminghong.local:10601', 'http://xuminghong.local:10601/path', 'http://xuminghong.local:10601?other=1',
+    'http://xuminghong.local:10601#other', '*', ''])('rejects an untrusted credential parent origin %s', async parentOrigin => {
+    const f = await fixture({ embedded: true, parentOrigin });
+    expect(f.postMessage).not.toHaveBeenCalled();
+    await f.fill('uk-isolated-invalid-parent-fixture'); await f.save();
+    expect(f.postMessage).not.toHaveBeenCalled();
   });
 
   it.each(['generating', 'showcase', 'positioning', 'paused'] as const)('guards saving during %s', async phase => {

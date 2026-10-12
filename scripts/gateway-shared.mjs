@@ -5,6 +5,7 @@ export const HOSTNAME = 'xuminghong.local';
 export const WEB_PORT = 5173;
 export const HTTP_PORT = 10200;
 export const HTTP_COMPAT_PORT = 10201;
+export const EXHIBITION_PORT = 10601;
 export const CAMERA_PORT = 10202;
 
 export function isPrivateAddress(address = '') {
@@ -41,12 +42,13 @@ export function reject(response, code, message) {
   response.end(message + '\n');
 }
 
-export function proxyRequest(request, response, { targetPort = WEB_PORT, targetHost = `127.0.0.1:${targetPort}`, protocol = 'http', camera = false } = {}) {
+export function proxyRequest(request, response, { targetPort = WEB_PORT, targetHost = `127.0.0.1:${targetPort}`, protocol = 'http', camera = false, responseHeaders = {} } = {}) {
   const upstream = http.request({ hostname: '127.0.0.1', port: targetPort, path: request.url, method: request.method, headers: proxyHeaders(request, false, targetHost) }, incoming => {
     const headers = Object.fromEntries(Object.entries(incoming.headers).filter(([name]) => !HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== 'strict-transport-security'));
     headers['cache-control'] = 'no-store';
     headers['x-content-type-options'] = 'nosniff';
     if (camera) headers['permissions-policy'] = 'camera=(self), microphone=(), geolocation=()';
+    Object.assign(headers, responseHeaders);
     if (typeof headers.location === 'string' && headers.location.startsWith(`http://${targetHost}/`)) {
       headers.location = headers.location.replace(`http://${targetHost}`, `${protocol}://${request.headers.host}`);
     }

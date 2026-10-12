@@ -128,7 +128,7 @@ export class ExhibitionLiveConnection {
   }
   private async run() {
     this.events.status('preparing');
-    this.timer = setTimeout(() => void this.fail('换装连接超时，请检查网络后由工作人员重新开始。'), 45000);
+    this.timer = setTimeout(() => void this.fail('换装连接超时，请检查网络后由工作人员重新开始。', `client_stage=${this.failureStage}`), 45000);
     try {
       const mode = this.input.mode ?? 'clothx';
       const hasReference = this.input.referenceKind !== 'none';
@@ -265,7 +265,7 @@ export class ExhibitionLiveConnection {
         // earlier stop is awaiting confirmation. Failed resources retry only
         // after another explicit stop, never in an unbounded loop.
         if (sdk && !this.sdkDisconnected) tasks.push(deadline(Promise.resolve().then(() => sdk.disconnect())).then(() => { this.sdkDisconnected = true; }));
-        if (local && !this.credentialStopped) tasks.push(deadline(Promise.resolve().then(() => this.deps.stop(local.id))).then(result => {
+        if (local && !this.credentialStopped) tasks.push(deadline(Promise.resolve().then(() => this.deps.stop(local.id)), 15000).then(result => {
           if (result.status !== 'stopped') throw new Error('stop-unconfirmed');
           this.credentialStopped = true;
         }));
@@ -289,7 +289,7 @@ function cameraError(cause: unknown) {
   }
   return cause instanceof Error ? cause.message : '摄像头开启失败，请检查设备后重试。';
 }
-export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string } }) {
+export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean }) {
   // Per mounted page instance: duplicate tabs must not inherit another screen's lease.
   const [deviceId] = useState(() => `screen-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
@@ -436,7 +436,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     }
     if (occupied) { setStatus('other-device'); return; }
     setStatus(previous => previous === 'other-device' ? cameraStream ? 'preview' : 'off' : previous);
-    if (currentState.phase !== 'generating' || (!mox && (!cameraStream || cameraStream !== camera.current)) || connection.current || failedKey.current === desiredKey || manuallyStoppedKey.current === desiredKey) return;
+    if (selectionPending || currentState.phase !== 'generating' || (!mox && (!cameraStream || cameraStream !== camera.current)) || connection.current || failedKey.current === desiredKey || manuallyStoppedKey.current === desiredKey) return;
     // Polling can see the new outfit while the command is still releasing the
     // old lease. Wait for that release instead of allocating against its revision.
     if (currentState.live && (currentState.live.generationNumber !== currentState.generationNumber
@@ -457,7 +457,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       refresh: () => { if (mounted.current && current.current.identity === identity) { void current.current.refresh(); void refreshStatus(); } },
     });
     connection.current = next; void next.start();
-  }, [identity, active, state?.phase, state?.providerMode, state?.experienceMode, state?.selectedLookId, state?.sessionNumber, state?.generationNumber, state?.live?.deviceId, state?.live?.sessionId, cameraStream, deviceId, refreshStatus, retryEpoch, terminal?.terminalId, terminal?.token]);
+  }, [identity, active, selectionPending, state?.phase, state?.providerMode, state?.experienceMode, state?.selectedLookId, state?.sessionNumber, state?.generationNumber, state?.live?.deviceId, state?.live?.sessionId, cameraStream, deviceId, refreshStatus, retryEpoch, terminal?.terminalId, terminal?.token]);
   const retry = useCallback(async () => {
     if (!mounted.current || !current.current.active) return false;
     const owner = current.current.identity;

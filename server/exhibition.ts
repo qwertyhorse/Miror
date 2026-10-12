@@ -619,7 +619,7 @@ export class ExhibitionService {
         requirePhase('positioning'); requireSelection(); state.phase = 'generating'; state.generationNumber += 1; state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = state.providerMode === 'demo' ? '站位已手动确认，正在演示换装流程。' : '站位已确认，等待拥有摄像头的大屏连接 XMAX。'; break;
       case 'switch':
-        requirePhase('showcase');
+        requirePhase('generating', 'showcase');
         if (!isLookId(input.lookId) || !currentModeIds.includes(input.lookId)) throw new ApiError('EXHIBITION_INVALID_LOOK', '这份素材不属于当前模式或尚未启用。');
         // Tapping the current outfit must not restart or allocate another live session.
         if (input.lookId === state.selectedLookId) return structuredClone(this.stored.state);
@@ -628,11 +628,11 @@ export class ExhibitionService {
         message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
       case 'next':
       case 'previous': {
-        requirePhase('showcase'); requireSelection(); const current = currentModeIds.indexOf(state.selectedLookId!); const direction = input.action === 'next' ? 1 : -1;
+        requirePhase('generating', 'showcase'); requireSelection(); const current = currentModeIds.indexOf(state.selectedLookId!); const direction = input.action === 'next' ? 1 : -1;
         if (currentModeIds.length === 1) return structuredClone(this.stored.state);
         state.selectedLookId = currentModeIds[(current + direction + currentModeIds.length) % currentModeIds.length];
         state.phase = 'generating'; state.generationNumber += 1; state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
-        message = `正在切换至${this.lookName(state.selectedLookId)}演示图。`; break;
+        message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
       }
       case 'pause':
         requirePhase('generating', 'showcase'); draft.pausedPhase = state.phase as 'generating' | 'showcase';

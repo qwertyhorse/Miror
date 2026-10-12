@@ -27,7 +27,7 @@ function fixture() {
   const issue = vi.fn(async (): Promise<IssuedKey> => ({ token: 'tk-isolated-manual-stop', expiresAt }));
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async () => state('active'), deactivate: revoke,
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost: async () => ['93.184.216.34'] });
+  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], resolveHost: async () => ['93.184.216.34'] });
   const exhibition = new ExhibitionService(directory); exhibition.attachLiveService(service);
   exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0, switchMode: 'auto', autoSwitchSeconds: 5 });
   exhibition.command({ action: 'begin' });

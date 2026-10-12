@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import type { CreatedSession } from '../src/api';
-import type { SdkSession } from '../src/sdkTypes';
+import type { SdkSession } from '../src/liveTryOn';
 
 const connections: ExhibitionLiveConnection[] = [];
 const sessionId = '11111111-1111-4111-8111-111111111111';

@@ -101,7 +101,7 @@ describe('standalone mirror gateway boundaries', () => {
     // HTTP transport isolates the HTTPS handler from local certificate trust setup.
     const camera = await listen();
     camera.server.on('request', createCameraRequestHandler({ port: camera.port }));
-    for (const [port, destination] of [[lan.port, '/v1.1/exhibition'], [camera.port, '/v1.1/exhibition/screen']] as const) {
+    for (const [port, destination] of [[lan.port, '/v1.1/exhibition/control'], [camera.port, '/v1.1/exhibition/screen']] as const) {
       const response = await rawRequest(port, `/${query}`);
       expect(response.status).toBe(302);
       expect(response.headers.location).toBe(destination + query);

@@ -4,7 +4,8 @@ import { exhibitionApiPath } from './mirrorApi';
 import { isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionLookInput, type ExhibitionUploadInput, type ExhibitionTaxonomyInput } from '../../shared/exhibition';
 
 interface RequestScope { epoch: number; controller: AbortController; busy: boolean; }
-interface ExhibitionSnapshot { state: ExhibitionState | null; pending: boolean; stopPending: boolean; connected: boolean; error: string; }
+interface ExhibitionSnapshot { state: ExhibitionState | null; pending: boolean; selectionPending: boolean; stopPending: boolean; connected: boolean; error: string; }
+interface SelectionIntent { command: ExhibitionCommand; resolve: (value: boolean) => void; }
 export interface ExhibitionCopyInput { sourceMirrorId: string; copyLooks: boolean; copySettings: boolean; expectedRevision: number; }
 export interface ExhibitionUiSkinUploadInput { imageBase64: string; expectedRevision?: number; }
 const STOP_UNCONFIRMED = '停止状态未确认，请联系工作人员。';
@@ -27,13 +28,16 @@ async function timedJson(url: string, scope: RequestScope, init: RequestInit = {
 
 /** One immutable mirror identity; every start/stop also advances its request epoch. */
 export class ExhibitionMirrorClient {
-  private snapshot: ExhibitionSnapshot = { state: null, pending: false, stopPending: false, connected: false, error: '' };
+  private snapshot: ExhibitionSnapshot = { state: null, pending: false, selectionPending: false, stopPending: false, connected: false, error: '' };
   private listeners = new Set<() => void>();
   private scope: RequestScope | null = null;
   private epoch = 0;
   private refreshError = '';
   private timer?: ReturnType<typeof setTimeout>;
   private stopping?: { scope: RequestScope; promise: Promise<boolean> };
+  private selectingScope?: RequestScope;
+  private queuedSelection?: SelectionIntent;
+  private activeSelection?: SelectionIntent;
 
   constructor(readonly mirrorId = 'default') {}
   getSnapshot = () => this.snapshot;
@@ -72,7 +76,7 @@ export class ExhibitionMirrorClient {
     if (this.scope) return;
     const scope: RequestScope = { epoch: ++this.epoch, controller: new AbortController(), busy: false };
     this.scope = scope;
-    this.publish({ pending: false, stopPending: false, connected: false, error: '' });
+    this.publish({ pending: false, selectionPending: false, stopPending: false, connected: false, error: '' });
     const poll = async () => {
       await this.refreshScope(scope);
       if (this.current(scope)) this.timer = setTimeout(poll, 850);
@@ -85,6 +89,62 @@ export class ExhibitionMirrorClient {
     ++this.epoch;
     clearTimeout(this.timer);
     scope?.controller.abort();
+    this.queuedSelection?.resolve(false); this.activeSelection?.resolve(false);
+    this.queuedSelection = undefined; this.activeSelection = undefined; this.selectingScope = undefined;
+  }
+  private select(command: SelectionIntent['command']): Promise<boolean> {
+    const scope = this.scope;
+    if (!scope || !this.current(scope) || !this.snapshot.state || this.snapshot.stopPending
+      || (scope.busy && this.selectingScope !== scope)) return Promise.resolve(false);
+    return new Promise(resolve => {
+      this.queuedSelection?.resolve(false);
+      this.queuedSelection = { command, resolve };
+      if (this.selectingScope === scope) return;
+      this.selectingScope = scope; scope.busy = true;
+      this.publish({ pending: true, selectionPending: true, error: '' });
+      void this.drainSelections(scope);
+    });
+  }
+  private async drainSelections(scope: RequestScope) {
+    try {
+      while (this.current(scope) && this.queuedSelection && !this.snapshot.stopPending) {
+        const intent = this.queuedSelection;
+        this.queuedSelection = undefined; this.activeSelection = intent;
+        let completed = false;
+        try {
+          // Only the last unsent choice survives. A revision conflict may be
+          // retried once after a fresh read, without replaying a superseded choice.
+          for (let attempt = 0; attempt < 2 && this.current(scope); attempt++) {
+            const state = this.snapshot.state!;
+            const action = ['idle', 'select'].includes(state.phase) ? 'select' : 'switch';
+            const { ok, result } = await timedJson(this.url('command'), scope, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...intent.command, action, expectedRevision: intent.command.expectedRevision ?? state.revision }),
+            });
+            if (!this.current(scope)) break;
+            if (ok) {
+              this.adopt(result as ExhibitionState, scope);
+              completed = !this.queuedSelection;
+              break;
+            }
+            await this.refreshScope(scope);
+            if (!this.current(scope) || this.queuedSelection) break;
+            if (attempt === 0 && result.code === 'EXHIBITION_STALE_REVISION' && intent.command.expectedRevision === undefined) continue;
+            throw new Error(result.message ?? '素材切换未完成，请重试。');
+          }
+        } catch (cause) {
+          if (this.current(scope) && !this.queuedSelection) this.publish({ error: cause instanceof Error ? cause.message : '素材切换未完成，请重试。' });
+        } finally {
+          intent.resolve(completed);
+          if (this.activeSelection === intent) this.activeSelection = undefined;
+        }
+      }
+    } finally {
+      if (this.selectingScope === scope) {
+        this.selectingScope = undefined;
+        if (this.current(scope)) { scope.busy = false; this.publish({ pending: false, selectionPending: false }); }
+      }
+    }
   }
   private async mutate(path: string, input: { expectedRevision?: number }, method = 'POST', timeout = 5000, withRevision = true, onSuccess?: (next: ExhibitionState) => void) {
     const scope = this.scope;
@@ -145,7 +205,8 @@ export class ExhibitionMirrorClient {
     return promise;
   }
   stopExperience = () => this.stopCommand('end');
-  send = (command: ExhibitionCommand) => command.action === 'end' || command.action === 'idle' ? this.stopCommand(command.action) : this.mutate('command', command);
+  send = (command: ExhibitionCommand) => command.action === 'end' || command.action === 'idle' ? this.stopCommand(command.action)
+    : command.action === 'select' || command.action === 'switch' ? this.select(command) : this.mutate('command', command);
   upload = async (input: ExhibitionUploadInput): Promise<{ lookId: string; index: number } | null> => {
     let created: { lookId: string; index: number } | null = null;
     await this.mutate('looks', input, 'POST', 60000, false, next => {

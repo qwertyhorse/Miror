@@ -11,28 +11,33 @@ import './mirror-credential-settings.css';
 interface Props { controller: ExhibitionController; live: ExhibitionLiveController; embedded?: boolean; }
 
 const FRAME_MESSAGE = 'openbuy:mirror-credential';
+const HTTP_PARENT_PORTS = new Set(['10200', '10201', '10601']);
 const REGIONS: readonly { value: XmaxRegion; label: string }[] = [{ value: 'cn', label: '国内版' }, { value: 'global', label: '国际版' }];
 const frameHeight = (height: number) => Math.max(68, Math.min(300, Math.ceil(height)));
 const currentPageUrl = () => new URL(typeof window === 'undefined' ? 'http://xuminghong.local:10200/v1.1/exhibition/control' : window.location.href);
 
 function secureFormUrl(mirrorId: string) {
-  const url = new URL(exhibitionUrl('/exhibition/control', mirrorId), currentPageUrl());
+  const page = currentPageUrl();
+  const url = new URL(exhibitionUrl('/exhibition/control', mirrorId), page);
   url.protocol = 'https:'; url.port = '10202'; url.searchParams.set('credentialForm', '1');
+  url.searchParams.set('parentOrigin', page.origin);
   return url;
 }
 
 function notifyParent(mirrorId: string, detail: { height?: number; saved?: true }) {
   if (window.parent === window) return;
-  const origin = currentPageUrl(); origin.protocol = 'http:';
-  const message = { type: FRAME_MESSAGE, mirrorId,
-    ...(detail.height === undefined ? {} : { height: detail.height }),
-    ...(detail.saved === true ? { saved: true } : {}),
-  };
-  // Only the matching parent receives this safe status on either supported HTTP entry.
-  for (const port of ['10200', '10201']) {
-    origin.port = port;
-    window.parent.postMessage(message, origin.origin);
+  const page = currentPageUrl();
+  let origin = new URL(page.origin); origin.protocol = 'http:'; origin.port = '10200';
+  const requestedOrigin = page.searchParams.get('parentOrigin');
+  if (requestedOrigin !== null) {
+    try {
+      const candidate = new URL(requestedOrigin);
+      if (candidate.protocol !== 'http:' || candidate.hostname !== page.hostname || !HTTP_PARENT_PORTS.has(candidate.port)
+        || requestedOrigin !== candidate.origin) return;
+      origin = candidate;
+    } catch { return; }
   }
+  window.parent.postMessage({ type: FRAME_MESSAGE, mirrorId, ...detail }, origin.origin);
 }
 
 function safeStatus(value: unknown): ExhibitionCredentialsStatus | null {

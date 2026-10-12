@@ -1,0 +1,50 @@
+OpenBuy 展会智能镜技术交接
+日期：2026-10-12　版本：V1.1
+
+交付内容
+src/：镜端大屏与工作人员后台；server/：Node API；shared/：共享类型与协议。
+public/assets/exhibition/：界面素材；seed/：99 份预设素材、初始化配置及素材 SHA256 清单。
+dist/：本地 ZIP 附带的前端构建；scripts/：初始化、静态服务、HTTP/HTTPS 网关与 macOS 后台托管。
+docs/API.md：接口与实时会话流程；docs/verification.json：本次验收记录。
+
+素材初始化
+预设素材放在一台默认镜 default 中，首次以演示模式导入。新建其他智能镜后，在后台复制默认镜的素材和设置。
+初始化保留已有素材和配置。本包不带现场设备绑定、SK、会话记录、数据库或证书私钥；目标设备首次使用需重新配对和配置。
+
+启动
+安装 Node.js 22.13 或更高版本，建议 Node.js 24，并带 npm。
+解压本地 ZIP 后，在包目录执行：
+  npm ci --omit=dev
+  npm run setup
+  npm start
+前台运行时保持终端开启，Ctrl+C 停止。
+从 GitHub 获取源码或修改前端后，先执行 npm ci 和 npm run build，再执行 npm run setup、npm start。
+需运行完整前后台，不能只托管 dist，也不能双击 dist/index.html。
+
+固定入口
+工作人员后台：http://xuminghong.local:10601/
+本地入口：http://xuminghong.local:10200/
+镜端入口：http://xuminghong.local:10200/v1.1/exhibition/screen
+镜端自动转入同主机 HTTPS 10202 摄像头页面；后台仍使用 HTTP。设备需在同一局域网，并可解析 xuminghong.local。
+防火墙放行 HTTP 10200、10201、10601 和 HTTPS 10202。API 3002 与静态服务 5173 只监听本机。
+摄像头设备首次需信任本机生成的公开根证书，可从后台下载；前台证书位于 .data/lan-tls/root-ca.crt。
+
+XMAX 配置
+在后台当前智能镜设置区，通过内嵌 HTTPS 表单分别配置每镜 SK 和区域，再选择实时模式。
+HTTP 父页面不接收密钥。镜端准备本地取景，点击“开始体验”才启动生成。
+保留单次凭证额度、有效期和撤销流程；不设置本地累计测试预算，额度不足以 XMAX 实际返回为准。
+
+系统适配
+macOS：可双击“启动展会局域网.command”启用后台托管、登录自启和防闲置睡眠；“停止局域网预览.command”停止并释放防眠。
+Ubuntu：代码提供 Node 前台启动流程，本次未做 Ubuntu 实机验收。systemd 自启与进程守护、Avahi 域名广播、系统防闲置睡眠及目标机器摄像头/驱动/证书信任需技术补充和联调。
+Windows：附启动展会.cmd，本次未做 Windows 实机验收。
+
+开发与验收
+  npm ci
+  npm run build
+  npm test
+  npm run test:runtime
+  npm run test:package
+本次源码包含连续快速切换素材及停止竞争处理。交付 SHA256 清单用于核对包内文件。
+当前展会代码尚未实现 MediaPipe 挥手识别，挥手触发、双摄像头路由和现场识别参数需后续开发与实机联调。
+本次仅做本地技术打包，未发布或部署站点。

@@ -10,8 +10,12 @@ import { createReactHost } from './support/reactHost';
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-async function fixture(phase: ExhibitionState['phase']) {
+async function fixture(phase: ExhibitionState['phase'], pageHref?: string) {
   host = await createReactHost();
+  if (pageHref) {
+    const page = new URL(pageHref);
+    Object.assign(window.location, { protocol: page.protocol, href: page.href });
+  }
   // Native select behavior is unrelated to command navigation. Supply its option
   // collection locally so the existing small host needs no new DOM features.
   const create = document.createElement.bind(document);
@@ -40,6 +44,18 @@ describe('console material navigation commands', () => {
     const link = host!.find(node => node.nodeName === 'a' && node.textContent === '打开大屏');
     const target = new URL(link!.getReactProps().href);
     expect(target.origin).toBe('https://xuminghong.local:10202'); expect(target.searchParams.get('mirror')).toBe('default');
+  });
+  it.each(['http://xuminghong.local:10200', 'http://xuminghong.local:10201', 'http://xuminghong.local:10601', 'http://192.168.1.2:10601'])('keeps the staff link on the current HTTP origin %s', async origin => {
+    await fixture('idle', `${origin}/v1.1/exhibition/control?mirror=default`);
+    const link = host!.find(node => node.nodeName === 'a' && node.textContent.startsWith(origin));
+    const target = new URL(link!.getReactProps().href);
+    expect(target.origin).toBe(origin); expect(target.pathname).toMatch(/\/exhibition\/control$/);
+    expect(target.searchParams.get('mirror')).toBe('default');
+  });
+  it('retains the HTTP 10200 staff link from the secure camera origin', async () => {
+    await fixture('idle', 'https://xuminghong.local:10202/v1.1/exhibition/control?mirror=default');
+    const link = host!.find(node => node.nodeName === 'a' && node.textContent.startsWith('http://xuminghong.local:10200'));
+    expect(new URL(link!.getReactProps().href).origin).toBe('http://xuminghong.local:10200');
   });
   it.each(['idle', 'select'] as const)('wraps current-mode selections in %s without starting an experience', async phase => {
     const f = await fixture(phase);

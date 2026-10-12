@@ -39,7 +39,7 @@ describe('exhibition experience lifecycle', () => {
       expect(() => service.command({ action })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
       expect(service.get()).toEqual(generating);
     }
-    expect(() => service.command({ action: 'next' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
+    expect(service.command({ action: 'switch', lookId: 'evening' })).toEqual(generating);
     advance(2_199);
     expect(service.get().phase).toBe('generating');
     advance(1);
@@ -70,7 +70,7 @@ describe('exhibition experience lifecycle', () => {
     expect(() => service.command({ action: 'resume' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
   });
 
-  it('switches directly to an enabled outfit within the same showcase experience', () => {
+  it('keeps only the latest direct switch while generating within the same experience', () => {
     const { service, advance, now } = fixture();
     beginGeneration(service); advance(2_200);
     const previous = service.get();
@@ -79,10 +79,22 @@ describe('exhibition experience lifecycle', () => {
     expect(switching).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute',
       sessionNumber: previous.sessionNumber, generationNumber: previous.generationNumber + 1,
       generationReadyAt: now() + 2_200, revision: previous.revision + 1 });
-    expect(() => service.command({ action: 'switch', lookId: 'city' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
-    expect(service.get()).toEqual(switching);
+    advance(500);
+    const latest = service.command({ action: 'switch', lookId: 'city' });
+    expect(latest).toMatchObject({ phase: 'generating', selectedLookId: 'city', displayedLookId: 'commute',
+      generationNumber: switching.generationNumber + 1, generationReadyAt: now() + 2_200 });
+    expect(service.command({ action: 'switch', lookId: 'city' })).toEqual(latest);
     advance(2_199); expect(service.get().displayedLookId).toBe('commute');
-    advance(1); expect(service.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'evening', sessionNumber: previous.sessionNumber });
+    advance(1); expect(service.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'city', sessionNumber: previous.sessionNumber });
+  });
+
+  it('accepts consecutive next and previous choices before a generated result arrives', () => {
+    const { service } = fixture();
+    const initial = beginGeneration(service);
+    expect(service.command({ action: 'next' })).toMatchObject({ phase: 'generating', selectedLookId: 'city', generationNumber: initial.generationNumber + 1 });
+    expect(service.command({ action: 'next' })).toMatchObject({ phase: 'generating', selectedLookId: 'evening', generationNumber: initial.generationNumber + 2 });
+    expect(service.command({ action: 'previous' })).toMatchObject({ phase: 'generating', selectedLookId: 'city', generationNumber: initial.generationNumber + 3,
+      displayedLookId: null, sessionNumber: initial.sessionNumber });
   });
 
   it('rejects invalid, disabled, stale and out-of-phase direct outfit switches without mutating the round', () => {

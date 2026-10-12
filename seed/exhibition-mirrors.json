@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "defaultMirrorId": "default",
+  "mirrors": [
+    {
+      "id": "default",
+      "name": "智能镜 1"
+    }
+  ]
+}

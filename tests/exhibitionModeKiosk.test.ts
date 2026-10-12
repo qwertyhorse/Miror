@@ -79,7 +79,7 @@ describe('mirror video state labels', () => {
 
   it('waits for confirmed output instead of treating an allocated stream as a result', () => {
     const connecting = screen('generating', live({ outputStream: output, status: 'connecting' }));
-    expect(badgeText(connecting)).toBe('等待生成画面');
+    expect(badgeText(connecting)).toBe('连接实时服务');
     expect(connecting).not.toContain('生成结果');
     expect(badgeText(screen('showcase', live({ outputStream: output, status: 'running' })))).toBe('生成结果');
   });
@@ -99,7 +99,7 @@ describe('mirror video state labels', () => {
   });
 
   it('shows server-side stop failures instead of claiming a new round is generating', () => {
-    const html = screen('generating', live(), false, { live: { deviceId: 'screen-fixture', status: 'error' } as ExhibitionState['live'] });
+    const html = screen('generating', live(), false, { live: { deviceId: 'screen-fixture', status: 'error', generationNumber: 0, lookId: 'commute' } as ExhibitionState['live'] });
     expect(html).toContain('连接暂未恢复');
     expect(html).toContain('换装连接状态未确认，请联系工作人员。');
     expect(badgeText(html)).toBe('');
@@ -107,7 +107,7 @@ describe('mirror video state labels', () => {
   });
 
   it('retains concise server failure feedback after a refresh on the selection screen', () => {
-    const html = screen('select', live(), false, { live: { deviceId: 'screen-fixture', status: 'error', error: 'technical diagnostic code=INTERNAL_ERROR' } as ExhibitionState['live'] });
+    const html = screen('select', live(), false, { live: { deviceId: 'screen-fixture', status: 'error', generationNumber: 0, lookId: 'commute', error: 'technical diagnostic code=INTERNAL_ERROR' } as ExhibitionState['live'] });
     expect(html).toContain('换装连接状态未确认，请联系工作人员。');
     expect(html).not.toContain('technical diagnostic');
     expect(html).not.toContain('code=');

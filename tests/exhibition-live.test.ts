@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { ExhibitionService } from '../server/exhibition.ts';
+import { ExhibitionMirrors } from '../server/exhibitionMirrors.ts';
 import { TryOnService } from '../server/service.ts';
 import { SecretBox, SessionStore } from '../server/store.ts';
 import { createApiServer } from '../server/http.ts';
@@ -38,13 +39,28 @@ function start(exhibition: ExhibitionService) {
 async function create(exhibition: ExhibitionService) { return exhibition.createLiveSession({ deviceId, lookId: exhibition.get().selectedLookId, generationNumber: exhibition.get().generationNumber }); }
 
 describe('explicit exhibition XMAX path', () => {
-  it('requires explicit XMAX mode and a started experience', async () => {
-    const { exhibition, issue, store } = fixture();
+  it('requires explicit live mode and rejects main-site session APIs without allocating credentials', async () => {
+    const { exhibition, service, issue, store } = fixture();
     expect(exhibition.liveStatus()).toMatchObject({ mode: 'demo', configured: true, perSessionLimit: 30, live: null });
     for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(exhibition.liveStatus()).not.toHaveProperty(field);
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_LIVE_DISABLED' });
     exhibition.command({ action: 'configure', providerMode: 'xmax' });
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
+    const before = exhibition.get();
+    const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, exhibition);
+    server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      for (const sourceKind of ['photo', 'camera']) {
+        const response = await fetch(base + '/api/sessions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+          body: JSON.stringify({ targetItemId: 'real-inner', sourceId: 'test', sourceKind, sourceName: 'test' }),
+        });
+        expect(response.status).toBe(404);
+        expect(await response.json()).toMatchObject({ code: 'NOT_FOUND' });
+      }
+    } finally { server.close(); await once(server, 'close'); }
+    expect(exhibition.get()).toEqual(before);
     expect(issue).not.toHaveBeenCalled(); expect(store.allocated()).toBe(0);
   });
 
@@ -362,31 +378,37 @@ describe('explicit exhibition XMAX path', () => {
 });
 
 describe('live HTTP integration uses mock provider only', () => {
-  it('links and reports the first frame through the existing session API and stops from the staff command', async () => {
-    const { exhibition, service, store } = fixture();
-    const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, exhibition);
+  it('links and reports the first frame through mirror-scoped APIs and stops from the staff command', async () => {
+    const { service, store, directory } = fixture();
+    const mirrors = new ExhibitionMirrors(directory);
+    const exhibition = mirrors.getMirror('default');
+    const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const headers = { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
+    const mirrorPath = '/api/exhibition/mirrors/default';
     const post = async (path: string, input: unknown) => {
       const response = await fetch(base + path, { method: 'POST', headers, body: JSON.stringify(input) });
       expect(response.ok).toBe(true); return response.json();
     };
     try {
-      const before = await fetch(base + '/api/exhibition/live/status'); const status = await before.json();
+      const before = await fetch(base + mirrorPath + '/live/status'); const status = await before.json();
       expect(status).toMatchObject({ mode: 'demo', perSessionLimit: 30 });
       for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(status).not.toHaveProperty(field);
-      await post('/api/exhibition/command', { action: 'configure', providerMode: 'xmax' });
-      expect(await post('/api/exhibition/command', { action: 'begin' })).toMatchObject({ phase: 'generating', sessionNumber: 1, generationNumber: 1, generationReadyAt: null });
-      const session = await post('/api/exhibition/live/session', { deviceId, lookId: 'commute', generationNumber: exhibition.get().generationNumber });
-      await post(`/api/exhibition/live/session/${session.id}/reference`, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
-      await post(`/api/exhibition/sessions/${session.id}/link`, { providerSessionId: 'ums-http-session' });
-      await post(`/api/exhibition/sessions/${session.id}/first-frame`, { firstFrameMs: 111 });
+      await post(mirrorPath + '/command', { action: 'configure', providerMode: 'xmax' });
+      expect(await post(mirrorPath + '/command', { action: 'begin' })).toMatchObject({ phase: 'generating', sessionNumber: 1, generationNumber: 1, generationReadyAt: null });
+      const session = await post(mirrorPath + '/live/session', { deviceId, lookId: 'commute', generationNumber: exhibition.get().generationNumber });
+      await post(`${mirrorPath}/live/session/${session.id}/reference`, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
+      await post(`${mirrorPath}/sessions/${session.id}/link`, { providerSessionId: 'ums-http-session' });
+      await post(`${mirrorPath}/sessions/${session.id}/first-frame`, { firstFrameMs: 111 });
       expect(exhibition.get().phase).toBe('showcase');
-      await post('/api/exhibition/live/heartbeat', { deviceId, sessionId: session.id });
-      const switched = await post('/api/exhibition/command', { action: 'switch', lookId: 'evening', expectedRevision: exhibition.get().revision });
-      expect(switched).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute', sessionNumber: 1, generationNumber: 2, live: null });
+      await post(mirrorPath + '/live/heartbeat', { deviceId, sessionId: session.id });
+      const switched = await post(mirrorPath + '/command', { action: 'switch', lookId: 'evening', expectedRevision: exhibition.get().revision });
+      expect(switched).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute', sessionNumber: 1, generationNumber: 2,
+        live: { sessionId: session.id, status: 'stopping' } });
+      await exhibition.reconcileLive();
+      expect(exhibition.get().live).toBeNull();
       expect(store.get(session.id).status).toBe('stopped');
-      const stopped = await post('/api/exhibition/command', { action: 'end' }); expect(stopped).toMatchObject({ phase: 'select', live: null });
+      const stopped = await post(mirrorPath + '/command', { action: 'end' }); expect(stopped).toMatchObject({ phase: 'select', live: null });
     } finally { server.close(); await once(server, 'close'); }
   });
 });

@@ -9,7 +9,7 @@ import { createReactHost, flushReact } from './support/reactHost';
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-async function fixture(options: { phase?: ExhibitionState['phase']; skin?: boolean; preset?: ExhibitionUiSkinPreset; width?: number; height?: number } = {}) {
+async function fixture(options: { phase?: ExhibitionState['phase']; skin?: boolean; preset?: ExhibitionUiSkinPreset } = {}) {
   host = await createReactHost();
   const state: ExhibitionState = { mirrorId: 'east', revision: 7, phase: options.phase ?? 'idle', experienceMode: 'clothx', selectedLookId: null, displayedLookId: null, looks: [], enabledLookIds: [], categories: [], tags: [], sessionNumber: 0, generationNumber: 0, updatedAt: 1000, generationReadyAt: null, providerMode: 'demo', live: null, logs: [],
     settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 }, uiSkinPreset: options.preset, uiSkin: options.skin ? { image: '/api/exhibition/mirrors/east/skin/current-id', width: 1080, height: 1920, bytes: 1234 } : null } };
@@ -20,11 +20,6 @@ async function fixture(options: { phase?: ExhibitionState['phase']; skin?: boole
   const createObjectURL = vi.fn(() => 'blob:test-skin'); const revokeObjectURL = vi.fn();
   vi.spyOn(URL, 'createObjectURL').mockImplementation(createObjectURL);
   vi.spyOn(URL, 'revokeObjectURL').mockImplementation(revokeObjectURL);
-  vi.stubGlobal('Image', class {
-    naturalWidth = options.width ?? 1080; naturalHeight = options.height ?? 1920;
-    onload: (() => void) | null = null; onerror: (() => void) | null = null;
-    set src(_value: string) { queueMicrotask(() => this.onload?.()); }
-  });
   const readers: any[] = [];
   vi.stubGlobal('FileReader', class {
     result = 'data:image/png;base64,dGVzdA=='; onload: (() => void) | null = null; onerror: (() => void) | null = null; onabort: (() => void) | null = null;
@@ -94,7 +89,7 @@ describe('mirror UI skin settings', () => {
     expect(f.button('水晶浅紫').disabled).toBe(false);
   });
 
-  it('checks a selected portrait image and saves it with the selection revision', async () => {
+  it('saves a selected image with the selection revision', async () => {
     const f = await fixture();
     await f.choose();
     expect(f.uploadUiSkin).not.toHaveBeenCalled();
@@ -104,20 +99,21 @@ describe('mirror UI skin settings', () => {
     expect(f.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:test-skin');
   });
 
-  it.each([
-    { file: () => new File(['fixture'], 'skin.gif'), message: '请选择 PNG、JPG 或 WebP 图片。' },
-    { file: () => new File([], 'skin.png'), message: '图片为空，请重新选择。' },
-    { file: () => new File([new Uint8Array(8 * 1024 * 1024 + 1)], 'skin.png'), message: '皮肤图片不能超过 8 MB。' },
-  ])('rejects unsuitable files before decoding or sending', async ({ file, message }) => {
-    const f = await fixture(); await f.choose(file()); await f.save();
+  it('rejects an empty image before reading or sending', async () => {
+    const f = await fixture(); await f.choose(new File([], 'skin.png')); await f.save();
     expect(f.createObjectURL).not.toHaveBeenCalled(); expect(f.uploadUiSkin).not.toHaveBeenCalled();
-    expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toBe(message);
+    expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toBe('图片为空，请重新选择。');
   });
 
-  it.each([{ width: 1000, height: 1000 }, { width: 400, height: 1000 }])('rejects a $width × $height image outside the portrait range', async dimensions => {
-    const f = await fixture(dimensions); await f.choose(); await f.save();
-    expect(f.button('保存皮肤').disabled).toBe(true); expect(f.uploadUiSkin).not.toHaveBeenCalled();
-    expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toContain('0.45–0.75');
+  it.each([
+    { name: 'large.png', bytes: 8 * 1024 * 1024 + 1, type: 'image/png' },
+    { name: 'skin.gif', bytes: 7, type: 'image/gif' },
+    { name: 'skin.avif', bytes: 7, type: 'image/avif' },
+  ])('allows $name without a client size or format whitelist', async ({ name, bytes, type }) => {
+    const f = await fixture(); await f.choose(new File([new Uint8Array(bytes)], name, { type }));
+    expect(f.button('保存皮肤').disabled).toBe(false);
+    await f.save();
+    expect(f.uploadUiSkin).toHaveBeenCalledExactlyOnceWith({ imageBase64: 'data:image/png;base64,dGVzdA==', expectedRevision: 7 });
   });
 
   it.each(['generating', 'showcase', 'paused', 'positioning'] as const)('blocks uploads and restores while %s', async phase => {

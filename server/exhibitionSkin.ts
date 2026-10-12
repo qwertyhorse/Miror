@@ -5,18 +5,9 @@ import sharp from 'sharp';
 import type { ExhibitionUiSkin } from '../shared/exhibition.ts';
 import { ApiError } from './types.ts';
 
-export const EXHIBITION_SKIN_MAX_BYTES = 8 * 1024 * 1024;
 type PreparedSkin = { info: ExhibitionUiSkin; data: Buffer };
-const invalid = () => new ApiError('EXHIBITION_INVALID_SKIN', '请选择有效的静态 PNG、JPG 或 WebP 图片。');
-function isAnimatedPng(data: Buffer) {
-  if (data.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') return false;
-  for (let offset = 8; offset + 12 <= data.length;) {
-    const length = data.readUInt32BE(offset);
-    if (data.toString('ascii', offset + 4, offset + 8) === 'acTL') return true;
-    offset += 12 + length;
-  }
-  return false;
-}
+const WEBP_MAX_DIMENSION = 16_383;
+const invalid = () => new ApiError('EXHIBITION_INVALID_SKIN', '请选择有效的图片。');
 export class ExhibitionSkinStore {
   private readonly directory: string;
   constructor(dataDirectory: string, private readonly assetBasePath: string) {
@@ -24,29 +15,15 @@ export class ExhibitionSkinStore {
   }
   async prepare(value: unknown): Promise<PreparedSkin> {
     if (typeof value !== 'string') throw invalid();
-    const base64 = value.replace(/^data:image\/(?:png|jpeg|webp);base64,/u, '');
-    if (base64.length > Math.ceil(EXHIBITION_SKIN_MAX_BYTES / 3) * 4) throw new ApiError('EXHIBITION_SKIN_TOO_LARGE', 'UI 皮肤图片不能超过 8 MB。', 413);
+    const base64 = value.replace(/^data:image\/[^;,]+;base64,/iu, '');
     if (!base64 || base64.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(base64)) throw invalid();
     const bytes = Buffer.from(base64, 'base64');
-    if (bytes.length > EXHIBITION_SKIN_MAX_BYTES) throw new ApiError('EXHIBITION_SKIN_TOO_LARGE', 'UI 皮肤图片不能超过 8 MB。', 413);
-    const png = bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a';
-    const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-    const webp = bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
-    if (!(png || jpeg || webp) || isAnimatedPng(bytes)) throw invalid();
     try {
-      const decoder = sharp(bytes, { failOn: 'warning', limitInputPixels: 2160 * 3840 });
-      const meta = await decoder.metadata();
-      if (!['png', 'jpeg', 'webp'].includes(meta.format ?? '') || (meta.pages ?? 1) > 1) throw invalid();
-      const swap = [5, 6, 7, 8].includes(meta.orientation ?? 0);
-      const width = swap ? meta.height : meta.width;
-      const height = swap ? meta.width : meta.height;
-      if (!width || !height || width < 360 || height < 640 || width > 2160 || height > 3840 || width / height < .45 || width / height > .75) {
-        throw new ApiError('EXHIBITION_INVALID_SKIN_DIMENSIONS', '请使用竖屏图片，建议 1080 × 1920，尺寸范围 360 × 640 至 2160 × 3840。');
-      }
-      const data = await decoder.rotate().webp({ quality: 92, alphaQuality: 100 }).toBuffer();
-      return { info: { image: `${this.assetBasePath}/${randomUUID()}`, width, height, bytes: data.length }, data };
-    } catch (error) {
-      if (error instanceof ApiError) throw error;
+      const { data, info } = await sharp(bytes, { failOn: 'warning', limitInputPixels: false })
+        .rotate().resize({ width: WEBP_MAX_DIMENSION, height: WEBP_MAX_DIMENSION, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 92, alphaQuality: 100 }).toBuffer({ resolveWithObject: true });
+      return { info: { image: `${this.assetBasePath}/${randomUUID()}`, width: info.width, height: info.height, bytes: data.length }, data };
+    } catch {
       throw invalid();
     }
   }

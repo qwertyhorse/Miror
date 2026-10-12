@@ -1,0 +1,58 @@
+{
+  "verifiedAt": "2026-10-12T20:38:49.102159+08:00",
+  "version": "1.1.2",
+  "scope": "V1.1 standalone exhibition frontend, staff console, API and bundled materials",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.19.0"
+  },
+  "build": {
+    "passed": true,
+    "typecheckPassed": true
+  },
+  "unitTests": {
+    "passed": true,
+    "files": 46,
+    "tests": 685
+  },
+  "runtimeTests": {
+    "passed": true,
+    "tests": 4
+  },
+  "packageSmoke": {
+    "passed": true,
+    "temporaryListenersOnly": true,
+    "importsChecked": 110,
+    "materialAssets": 99,
+    "securityChecks": 10,
+    "providerCalls": 0
+  },
+  "productionOnlyInstall": {
+    "passed": true,
+    "packagesInstalled": 54,
+    "packageSmokePassed": true
+  },
+  "materialManifest": {
+    "passed": true,
+    "files": 101,
+    "uniqueImages": 99
+  },
+  "exclusions": [
+    "real .env",
+    "runtime .data",
+    "SK and temporary credentials",
+    "device bindings",
+    "session databases and logs",
+    "TLS private keys",
+    "node_modules",
+    "V1.0",
+    "historical build backups"
+  ],
+  "limitations": [
+    "Ubuntu and Windows not tested on physical machines",
+    "Linux systemd/Avahi/inhibit-sleep integration pending",
+    "MediaPipe waving detection is not implemented"
+  ],
+  "siteDeployed": false
+}

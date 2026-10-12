@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Camera, CameraOff, RefreshCw, ExternalLink } from 'lucide-react';
+import { appUrl } from '../versionScope';
 import { exhibitionUrl } from './mirrorApi';
 import type { ExhibitionLiveController } from './useExhibitionLive';
 import './live-camera.css';
@@ -60,6 +61,7 @@ export function LiveCameraPanel({ live, compact = false, mirrorId = 'default' }:
     <div className="ex-camera-panel-heading"><Camera size={19} /><strong>摄像头与实时换装</strong><span role="status">{statusLabel[live.status]}</span></div>
     {!live.secure ? <div className="ex-camera-note">
       <p>这个 HTTP 页面可以选衣和控制大屏；浏览器调用摄像头需要可信的 HTTPS 连接。</p>
+      <a className="ex-camera-link" href={appUrl('/openbuy-local-ca.crt')} download="OpenBuy-Local-CA.crt">下载局域网证书 <ExternalLink size={14} /></a>
       <a className="ex-camera-link" href={cameraUrl} target="_blank" rel="noreferrer">打开摄像头专用入口 <ExternalLink size={14} /></a>
       <small>首次使用：先在设备设置中安装并信任局域网证书，再打开摄像头入口。进入后点击“开启摄像头”，允许权限，并选择外接摄像头。</small>
     </div> : <>

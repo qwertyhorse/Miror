@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
-import type { SdkSession } from '../src/sdkTypes';
+import type { SdkSession } from '../src/liveTryOn';
 import { attachExhibitionStream } from '../src/exhibition/LiveCameraPanel';
 
 const controllers: ExhibitionLiveConnection[] = [];

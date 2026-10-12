@@ -1,0 +1,2052 @@
+{
+  "schemaVersion": 3,
+  "state": {
+    "mirrorId": "default",
+    "revision": 0,
+    "phase": "idle",
+    "experienceMode": "charx",
+    "selectedLookId": "upload-586dee00-edc6-44d6-adba-c48f813aad3c",
+    "displayedLookId": null,
+    "enabledLookIds": [
+      "upload-586dee00-edc6-44d6-adba-c48f813aad3c",
+      "upload-c25081c7-ff52-4b68-b597-3152590d1349",
+      "upload-76dc784e-6336-4611-9351-1a63f7c7d0ff",
+      "upload-162b77fe-277f-4902-b95d-62eff7c3a71a",
+      "upload-89fc753f-2c84-4a1a-a3f3-c23c88a70cf2",
+      "upload-668d2256-e5f6-44b0-9a00-ad0e825aac9e",
+      "upload-81146ac2-416f-4765-93a3-ee1a2afc8dd2",
+      "upload-836c6496-8c88-4677-8be7-ddaf6e0bb220",
+      "upload-2b9a1c44-5c07-43df-abc2-9416b0b7e7fc",
+      "upload-17998469-6f72-45a9-b1b4-aa1eefe3f402",
+      "upload-bc4a5112-430c-4e9d-8516-34da8af68589",
+      "upload-09ca3f81-4e66-4a5c-b25c-423b1fb974ef",
+      "upload-735983b1-0800-49b6-a692-9044c8602e76",
+      "upload-1ff69e4d-999c-43b2-9a7a-36635c5e761d",
+      "upload-59e250bb-2ebb-4bdc-8f1a-847f937edc4e",
+      "upload-cf9ca8a3-2b15-4f53-bedc-84e333a22033",
+      "upload-06641d7e-4aca-4aeb-bbe7-e20281ff26a4",
+      "upload-a1f1b5e8-6677-4c88-acf4-29ad71099b1c",
+      "upload-69b7f764-9b4c-424b-9e2a-4f85804e3e5e",
+      "upload-e14b038c-5793-480e-8138-5ad1ee406622",
+      "upload-24552476-3dbd-4606-a81b-8dc81815e9a3",
+      "upload-a524889e-eb68-44c3-829a-c4c58e4de1ee",
+      "upload-19ee5dbd-00a6-435c-aa1d-4ea04af00fbf",
+      "upload-de3f768f-46ac-41be-96b2-a190b915f8ca",
+      "upload-7a188772-b896-4ea9-9a8c-5ac88d76b50e",
+      "upload-df78127d-5f23-4928-86bc-9ce0836ca3c9",
+      "upload-d45f3743-9a49-4770-bf58-ad2a44d30fc5",
+      "upload-e418718b-cac8-429a-97e3-1b195b5ded5b",
+      "upload-45deef16-9e8d-4ab2-bc17-052797a79a84",
+      "upload-21552af7-df78-4d4b-8abb-2fadfa98dd15",
+      "upload-11df834f-a02b-43ef-9e20-682d1bf2a0c7",
+      "upload-009b73a6-c4fa-4909-bceb-d443905e18f7",
+      "upload-d9605b59-617c-4c9c-804e-34daf8f506d8",
+      "upload-67e7299d-359a-4255-884a-a3e468a324f8",
+      "upload-7195a3ec-fe51-4a0f-ad15-f3adb69a9a3c",
+      "upload-d99bf2c5-0a4b-493b-9689-a4fc0ca05d2c",
+      "upload-8a542201-00b1-40c0-95c9-1f50a74d441c",
+      "upload-c40f6614-e1e5-48ab-81b0-7e09c782906c",
+      "upload-3967fe0c-92b2-4d7b-a4e0-c63e53d19680",
+      "upload-3684df25-ac7c-4d5a-ae46-a77ebf3f5b5b",
+      "upload-ab3dce46-83af-45a4-a7b9-20ab309c40b6",
+      "upload-e4b8c7ce-08b9-44f9-ba6e-03fbc7e50b59",
+      "upload-88ad3953-23bb-4970-8de9-a0b90d1d059a",
+      "upload-a8826c64-af47-4ada-9841-149a534c2bd3",
+      "upload-cfa1f1d1-0913-40a5-b141-bdee8a891325",
+      "upload-cd3d7b4c-34cf-43eb-8efd-2053a1c57be6",
+      "upload-b6df04af-5858-4ec9-b1dc-b74fc043e043",
+      "upload-efec18d9-aa74-4da4-862e-b915562f99af",
+      "upload-6105cd1e-c787-4127-b0b5-1c95880f2e17",
+      "upload-9f303e40-112d-44ad-b484-ba45037bcadc",
+      "upload-8f3b6730-001a-4502-aba7-d9ba730e9b16",
+      "upload-420c8cf2-6915-48f2-adf3-6ba5e848e949",
+      "upload-3f632b01-781d-42da-8a62-08d8ea1e33bd",
+      "upload-e541f879-a64a-41b1-8fde-6aa3796e8e60",
+      "upload-55e04290-5f1c-4a73-ab75-e21dbc4fd295",
+      "upload-99d1b571-7302-4fa9-95d8-7420770bcf57",
+      "upload-138585fa-c851-4d0f-95ab-a3589577ecab",
+      "upload-b2952586-2059-49d8-8ce0-29ace812228c",
+      "upload-cfd9e848-72a9-4e0c-9327-5cee2a449902",
+      "upload-003709fc-4200-4a27-9af2-50184930be49",
+      "upload-f4a5a1a3-1f28-4115-bb4e-470c732a7ac7",
+      "upload-91baaf07-a94d-4283-b63c-e695887e62b8",
+      "upload-ef0f0883-d987-4955-bc1a-7ca055d883c6",
+      "upload-41d0f77f-faaf-4611-97a5-62850e09b754",
+      "upload-dcc2823c-8c1f-4bf8-bec3-c262ef4eb53d",
+      "upload-6def0c96-975e-4f90-952c-e996b111efc1",
+      "upload-041d4ef8-d19c-4ae2-b822-c8624ee7b9c8",
+      "upload-232ec69f-bdc7-4575-b1d4-1f608f0a8362",
+      "upload-5eb522b1-54aa-46a3-a362-3fff8777ba25",
+      "upload-215f6151-d30f-49fa-b9ea-1d6c38d72b38",
+      "upload-802bb15b-34bb-468f-911f-6ce2465c23f4",
+      "upload-6ffa08d2-e7d5-4b97-916e-40f166e83c6f",
+      "upload-3f2f6146-1600-4456-af02-3af0f366cc6c",
+      "upload-a248686c-aa17-4435-bd87-d5c54888efa4",
+      "upload-cb611f90-3707-4c6d-b38c-bcda1fb1135c",
+      "upload-02a7d088-2486-4909-825e-1e51064f151d",
+      "upload-b99acada-5f2b-46ed-92ec-d3278b727227",
+      "upload-bf2f83f7-e62a-48d2-9171-8bb2571939b5",
+      "upload-bb6d74b2-f0ba-4801-ba39-2dfe2b3ff34e",
+      "upload-f65efa98-5b52-4437-87c6-bcc8b15b3478",
+      "upload-3b43995f-8cf0-4359-b57a-10bdb4f9a7da",
+      "upload-5425d8ce-a8fa-4f2b-bf8d-df213cea2e28",
+      "upload-e528071a-5e9c-45fb-a642-cf002f8b8a61",
+      "upload-562c56ea-63da-40d7-9b6d-2e68b9fb8ae4",
+      "upload-f6e3678b-39ff-4628-b2e5-fe2eb453c568",
+      "upload-62f7f92c-d7b2-4e7a-8e95-e87dd0ba40d0",
+      "upload-066fb851-1900-4b9d-83ad-876d4d6d1ca9",
+      "upload-15aab111-9dc6-4653-82fc-0cb0084c8b00",
+      "upload-da17e6fc-13a9-425c-8d1a-556fe2fd9bfa",
+      "upload-31167095-2c7c-4d20-8432-b80c197e3a54",
+      "upload-58504550-1f75-439a-8fd8-f3a78230cd44",
+      "upload-4d70d96a-3981-40eb-8fee-6599c1c0f631",
+      "upload-5d0c73b2-e667-4ae5-b61f-3f7e63fc8b84",
+      "upload-6d7b57d0-f34e-4269-b1ad-a8235047ee0c",
+      "upload-d4b07cba-2ad9-4efe-b52f-e88affef4743",
+      "upload-ba9d019c-0e07-4b39-af20-2de5c827e399",
+      "upload-3ab6554c-5e44-46f3-a5fc-7917e05033b7",
+      "upload-4730685c-15ea-494c-b829-a3f83a4febb9",
+      "upload-53624bf5-e4c9-4727-9d52-ed029ca9adcc"
+    ],
+    "looks": [
+      {
+        "id": "upload-586dee00-edc6-44d6-adba-c48f813aad3c",
+        "name": "古风少女",
+        "description": "Xmax 官方预设 · Classical Girl",
+        "image": "/api/exhibition/mirrors/default/assets/upload-586dee00-edc6-44d6-adba-c48f813aad3c",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 108876,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-c25081c7-ff52-4b68-b597-3152590d1349",
+        "name": "古风少年",
+        "description": "Xmax 官方预设 · Classical Boy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-c25081c7-ff52-4b68-b597-3152590d1349",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 138682,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-76dc784e-6336-4611-9351-1a63f7c7d0ff",
+        "name": "现代少女",
+        "description": "Xmax 官方预设 · Modern Girl",
+        "image": "/api/exhibition/mirrors/default/assets/upload-76dc784e-6336-4611-9351-1a63f7c7d0ff",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 88028,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-162b77fe-277f-4902-b95d-62eff7c3a71a",
+        "name": "现代少年",
+        "description": "Xmax 官方预设 · Modern Boy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-162b77fe-277f-4902-b95d-62eff7c3a71a",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 84260,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-89fc753f-2c84-4a1a-a3f3-c23c88a70cf2",
+        "name": "金发少女",
+        "description": "Xmax 官方预设 · Blonde Girl",
+        "image": "/api/exhibition/mirrors/default/assets/upload-89fc753f-2c84-4a1a-a3f3-c23c88a70cf2",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 56538,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-668d2256-e5f6-44b0-9a00-ad0e825aac9e",
+        "name": "卷发少年",
+        "description": "Xmax 官方预设 · Curly-Haired Boy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-668d2256-e5f6-44b0-9a00-ad0e825aac9e",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 49398,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-81146ac2-416f-4765-93a3-ee1a2afc8dd2",
+        "name": "动漫少年",
+        "description": "Xmax 官方预设 · Anime Boy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-81146ac2-416f-4765-93a3-ee1a2afc8dd2",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 60318,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-836c6496-8c88-4677-8be7-ddaf6e0bb220",
+        "name": "动漫少女",
+        "description": "Xmax 官方预设 · Anime Girl",
+        "image": "/api/exhibition/mirrors/default/assets/upload-836c6496-8c88-4677-8be7-ddaf6e0bb220",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 80060,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-2b9a1c44-5c07-43df-abc2-9416b0b7e7fc",
+        "name": "外星小猫",
+        "description": "Xmax 官方预设 · Alien Kitty",
+        "image": "/api/exhibition/mirrors/default/assets/upload-2b9a1c44-5c07-43df-abc2-9416b0b7e7fc",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 149500,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-17998469-6f72-45a9-b1b4-aa1eefe3f402",
+        "name": "青铜人像",
+        "description": "Xmax 官方预设 · Bronze Figure",
+        "image": "/api/exhibition/mirrors/default/assets/upload-17998469-6f72-45a9-b1b4-aa1eefe3f402",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 576,
+        "height": 1024,
+        "bytes": 104074,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-bc4a5112-430c-4e9d-8516-34da8af68589",
+        "name": "3D牛来",
+        "description": "Xmax 官方预设 · 3D Cow",
+        "image": "/api/exhibition/mirrors/default/assets/upload-bc4a5112-430c-4e9d-8516-34da8af68589",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 960,
+        "height": 1280,
+        "bytes": 67470,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-09ca3f81-4e66-4a5c-b25c-423b1fb974ef",
+        "name": "3D奶蛙",
+        "description": "Xmax 官方预设 · 3D Milk Frog",
+        "image": "/api/exhibition/mirrors/default/assets/upload-09ca3f81-4e66-4a5c-b25c-423b1fb974ef",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 2311,
+        "height": 2834,
+        "bytes": 105226,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-735983b1-0800-49b6-a692-9044c8602e76",
+        "name": "3D袋鼠",
+        "description": "Xmax 官方预设 · 3D Kangaroo",
+        "image": "/api/exhibition/mirrors/default/assets/upload-735983b1-0800-49b6-a692-9044c8602e76",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1080,
+        "height": 1080,
+        "bytes": 48856,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-1ff69e4d-999c-43b2-9a7a-36635c5e761d",
+        "name": "机甲少女",
+        "description": "Xmax 官方预设 · Mecha Girl",
+        "image": "/api/exhibition/mirrors/default/assets/upload-1ff69e4d-999c-43b2-9a7a-36635c5e761d",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 107288,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-59e250bb-2ebb-4bdc-8f1a-847f937edc4e",
+        "name": "机甲战士",
+        "description": "Xmax 官方预设 · Mecha Warrior",
+        "image": "/api/exhibition/mirrors/default/assets/upload-59e250bb-2ebb-4bdc-8f1a-847f937edc4e",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 896,
+        "height": 1200,
+        "bytes": 108530,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-cf9ca8a3-2b15-4f53-bedc-84e333a22033",
+        "name": "特战士兵",
+        "description": "Xmax 官方预设 · Special Ops",
+        "image": "/api/exhibition/mirrors/default/assets/upload-cf9ca8a3-2b15-4f53-bedc-84e333a22033",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 119186,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-06641d7e-4aca-4aeb-bbe7-e20281ff26a4",
+        "name": "人形机器",
+        "description": "Xmax 官方预设 · Humanoid Robot",
+        "image": "/api/exhibition/mirrors/default/assets/upload-06641d7e-4aca-4aeb-bbe7-e20281ff26a4",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1792,
+        "height": 2400,
+        "bytes": 407250,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-a1f1b5e8-6677-4c88-acf4-29ad71099b1c",
+        "name": "淡定水豚",
+        "description": "Xmax 官方预设 · Chill Capybara",
+        "image": "/api/exhibition/mirrors/default/assets/upload-a1f1b5e8-6677-4c88-acf4-29ad71099b1c",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1290,
+        "height": 1290,
+        "bytes": 264508,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-69b7f764-9b4c-424b-9e2a-4f85804e3e5e",
+        "name": "憨厚熊猫",
+        "description": "Xmax 官方预设 · Gentle Panda",
+        "image": "/api/exhibition/mirrors/default/assets/upload-69b7f764-9b4c-424b-9e2a-4f85804e3e5e",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 1280,
+        "bytes": 225696,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-e14b038c-5793-480e-8138-5ad1ee406622",
+        "name": "呆萌仓鼠",
+        "description": "Xmax 官方预设 · Cute Hamster",
+        "image": "/api/exhibition/mirrors/default/assets/upload-e14b038c-5793-480e-8138-5ad1ee406622",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 736,
+        "height": 1308,
+        "bytes": 112044,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-24552476-3dbd-4606-a81b-8dc81815e9a3",
+        "name": "插画少女",
+        "description": "Xmax 官方预设 · Illustrated Girl",
+        "image": "/api/exhibition/mirrors/default/assets/upload-24552476-3dbd-4606-a81b-8dc81815e9a3",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 57786,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-a524889e-eb68-44c3-829a-c4c58e4de1ee",
+        "name": "卡通少年",
+        "description": "Xmax 官方预设 · Cartoon Boy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-a524889e-eb68-44c3-829a-c4c58e4de1ee",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1265,
+        "height": 1265,
+        "bytes": 152148,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-19ee5dbd-00a6-435c-aa1d-4ea04af00fbf",
+        "name": "商务奶蛙",
+        "description": "Xmax 官方预设 · Business Milk Frog",
+        "image": "/api/exhibition/mirrors/default/assets/upload-19ee5dbd-00a6-435c-aa1d-4ea04af00fbf",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 1280,
+        "bytes": 88546,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-de3f768f-46ac-41be-96b2-a190b915f8ca",
+        "name": "天选牛马",
+        "description": "Xmax 官方预设 · Corporate Cow",
+        "image": "/api/exhibition/mirrors/default/assets/upload-de3f768f-46ac-41be-96b2-a190b915f8ca",
+        "palette": "",
+        "mode": "charx",
+        "referenceKind": "image",
+        "category": "角色替换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1270,
+        "height": 1270,
+        "bytes": 129992,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-7a188772-b896-4ea9-9a8c-5ac88d76b50e",
+        "name": "银白仙侠袍",
+        "description": "Xmax 官方预设 · Silver Fantasy Robe",
+        "image": "/api/exhibition/mirrors/default/assets/upload-7a188772-b896-4ea9-9a8c-5ac88d76b50e",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1792,
+        "height": 2400,
+        "bytes": 356314,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-df78127d-5f23-4928-86bc-9ce0836ca3c9",
+        "name": "古铜战士甲",
+        "description": "Xmax 官方预设 · Bronze Warrior Armor",
+        "image": "/api/exhibition/mirrors/default/assets/upload-df78127d-5f23-4928-86bc-9ce0836ca3c9",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 100178,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-d45f3743-9a49-4770-bf58-ad2a44d30fc5",
+        "name": "黑背带裙装",
+        "description": "Xmax 官方预设 · Black Pinafore",
+        "image": "/api/exhibition/mirrors/default/assets/upload-d45f3743-9a49-4770-bf58-ad2a44d30fc5",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 39080,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-e418718b-cac8-429a-97e3-1b195b5ded5b",
+        "name": "鎏金女神装",
+        "description": "Xmax 官方预设 · Gilded Goddess",
+        "image": "/api/exhibition/mirrors/default/assets/upload-e418718b-cac8-429a-97e3-1b195b5ded5b",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1792,
+        "height": 2400,
+        "bytes": 290006,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-45deef16-9e8d-4ab2-bc17-052797a79a84",
+        "name": "藏青水手装",
+        "description": "Xmax 官方预设 · Navy Sailor Outfit",
+        "image": "/api/exhibition/mirrors/default/assets/upload-45deef16-9e8d-4ab2-bc17-052797a79a84",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 896,
+        "height": 1200,
+        "bytes": 95152,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-21552af7-df78-4d4b-8abb-2fadfa98dd15",
+        "name": "长风衣套装",
+        "description": "Xmax 官方预设 · Long Coat Set",
+        "image": "/api/exhibition/mirrors/default/assets/upload-21552af7-df78-4d4b-8abb-2fadfa98dd15",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1080,
+        "height": 1620,
+        "bytes": 140320,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-11df834f-a02b-43ef-9e20-682d1bf2a0c7",
+        "name": "粉色学院装",
+        "description": "Xmax 官方预设 · Pink Academy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-11df834f-a02b-43ef-9e20-682d1bf2a0c7",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 736,
+        "height": 1171,
+        "bytes": 54742,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-009b73a6-c4fa-4909-bceb-d443905e18f7",
+        "name": "黑白先锋装",
+        "description": "Xmax 官方预设 · Monochrome Vanguard",
+        "image": "/api/exhibition/mirrors/default/assets/upload-009b73a6-c4fa-4909-bceb-d443905e18f7",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 98888,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-d9605b59-617c-4c9c-804e-34daf8f506d8",
+        "name": "棕色文艺装",
+        "description": "Xmax 官方预设 · Vintage Brown",
+        "image": "/api/exhibition/mirrors/default/assets/upload-d9605b59-617c-4c9c-804e-34daf8f506d8",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 100556,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-67e7299d-359a-4255-884a-a3e468a324f8",
+        "name": "黑领学院装",
+        "description": "Xmax 官方预设 · Black-Collar Academy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-67e7299d-359a-4255-884a-a3e468a324f8",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 44460,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-7195a3ec-fe51-4a0f-ad15-f3adb69a9a3c",
+        "name": "蓝格学院装",
+        "description": "Xmax 官方预设 · Blue Plaid Academy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-7195a3ec-fe51-4a0f-ad15-f3adb69a9a3c",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 56084,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-d99bf2c5-0a4b-493b-9689-a4fc0ca05d2c",
+        "name": "咖色开衫装",
+        "description": "Xmax 官方预设 · Coffee Cardigan",
+        "image": "/api/exhibition/mirrors/default/assets/upload-d99bf2c5-0a4b-493b-9689-a4fc0ca05d2c",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 720,
+        "height": 1280,
+        "bytes": 73618,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-8a542201-00b1-40c0-95c9-1f50a74d441c",
+        "name": "淡紫吊带装",
+        "description": "Xmax 官方预设 · Lilac Slip Dress",
+        "image": "/api/exhibition/mirrors/default/assets/upload-8a542201-00b1-40c0-95c9-1f50a74d441c",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 54540,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-c40f6614-e1e5-48ab-81b0-7e09c782906c",
+        "name": "玫紫机能装",
+        "description": "Xmax 官方预设 · Magenta Techwear",
+        "image": "/api/exhibition/mirrors/default/assets/upload-c40f6614-e1e5-48ab-81b0-7e09c782906c",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1792,
+        "height": 2400,
+        "bytes": 232562,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-3967fe0c-92b2-4d7b-a4e0-c63e53d19680",
+        "name": "高级感西装",
+        "description": "Xmax 官方预设 · Luxury Suit",
+        "image": "/api/exhibition/mirrors/default/assets/upload-3967fe0c-92b2-4d7b-a4e0-c63e53d19680",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1792,
+        "height": 2400,
+        "bytes": 218718,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-3684df25-ac7c-4d5a-ae46-a77ebf3f5b5b",
+        "name": "藏蓝通勤装",
+        "description": "Xmax 官方预设 · Navy Officewear",
+        "image": "/api/exhibition/mirrors/default/assets/upload-3684df25-ac7c-4d5a-ae46-a77ebf3f5b5b",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 1280,
+        "bytes": 81122,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-ab3dce46-83af-45a4-a7b9-20ab309c40b6",
+        "name": "酒红条纹装",
+        "description": "Xmax 官方预设 · Burgundy Stripes",
+        "image": "/api/exhibition/mirrors/default/assets/upload-ab3dce46-83af-45a4-a7b9-20ab309c40b6",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 42052,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-e4b8c7ce-08b9-44f9-ba6e-03fbc7e50b59",
+        "name": "浅蓝运动装",
+        "description": "Xmax 官方预设 · Light Blue Sportswear",
+        "image": "/api/exhibition/mirrors/default/assets/upload-e4b8c7ce-08b9-44f9-ba6e-03fbc7e50b59",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 941,
+        "height": 1280,
+        "bytes": 67674,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-88ad3953-23bb-4970-8de9-a0b90d1d059a",
+        "name": "银灰休闲装",
+        "description": "Xmax 官方预设 · Silver Casualwear",
+        "image": "/api/exhibition/mirrors/default/assets/upload-88ad3953-23bb-4970-8de9-a0b90d1d059a",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 799,
+        "height": 1199,
+        "bytes": 63986,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-a8826c64-af47-4ada-9841-149a534c2bd3",
+        "name": "棕格英伦装",
+        "description": "Xmax 官方预设 · British Brown Plaid",
+        "image": "/api/exhibition/mirrors/default/assets/upload-a8826c64-af47-4ada-9841-149a534c2bd3",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 955,
+        "height": 1280,
+        "bytes": 71556,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-cfa1f1d1-0913-40a5-b141-bdee8a891325",
+        "name": "蓝白复古装",
+        "description": "Xmax 官方预设 · Blue and White Retro",
+        "image": "/api/exhibition/mirrors/default/assets/upload-cfa1f1d1-0913-40a5-b141-bdee8a891325",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 960,
+        "height": 1280,
+        "bytes": 114440,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-cd3d7b4c-34cf-43eb-8efd-2053a1c57be6",
+        "name": "全蓝牛仔装",
+        "description": "Xmax 官方预设 · All-Denim Outfit",
+        "image": "/api/exhibition/mirrors/default/assets/upload-cd3d7b4c-34cf-43eb-8efd-2053a1c57be6",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 853,
+        "height": 1280,
+        "bytes": 191968,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-b6df04af-5858-4ec9-b1dc-b74fc043e043",
+        "name": "灰调晚宴装",
+        "description": "Xmax 官方预设 · Gray Eveningwear",
+        "image": "/api/exhibition/mirrors/default/assets/upload-b6df04af-5858-4ec9-b1dc-b74fc043e043",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 942,
+        "height": 1280,
+        "bytes": 97088,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-efec18d9-aa74-4da4-862e-b915562f99af",
+        "name": "墨黑古风袍",
+        "description": "Xmax 官方预设 · Black Classical Robe",
+        "image": "/api/exhibition/mirrors/default/assets/upload-efec18d9-aa74-4da4-862e-b915562f99af",
+        "palette": "",
+        "mode": "clothx",
+        "referenceKind": "image",
+        "category": "服装换装",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 960,
+        "height": 1280,
+        "bytes": 216642,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-6105cd1e-c787-4127-b0b5-1c95880f2e17",
+        "name": "美式卡通",
+        "description": "Xmax 官方预设 · American Cartoon",
+        "image": "/api/exhibition/mirrors/default/assets/upload-6105cd1e-c787-4127-b0b5-1c95880f2e17",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 82938,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-9f303e40-112d-44ad-b484-ba45037bcadc",
+        "name": "3D卡通",
+        "description": "Xmax 官方预设 · 3D Cartoon",
+        "image": "/api/exhibition/mirrors/default/assets/upload-9f303e40-112d-44ad-b484-ba45037bcadc",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 149162,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-8f3b6730-001a-4502-aba7-d9ba730e9b16",
+        "name": "校园动漫",
+        "description": "Xmax 官方预设 · School Anime",
+        "image": "/api/exhibition/mirrors/default/assets/upload-8f3b6730-001a-4502-aba7-d9ba730e9b16",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 151506,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-420c8cf2-6915-48f2-adf3-6ba5e848e949",
+        "name": "都市动漫",
+        "description": "Xmax 官方预设 · Urban Anime",
+        "image": "/api/exhibition/mirrors/default/assets/upload-420c8cf2-6915-48f2-adf3-6ba5e848e949",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 228236,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-3f632b01-781d-42da-8a62-08d8ea1e33bd",
+        "name": "日系动漫",
+        "description": "Xmax 官方预设 · Japanese Anime",
+        "image": "/api/exhibition/mirrors/default/assets/upload-3f632b01-781d-42da-8a62-08d8ea1e33bd",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 156382,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-e541f879-a64a-41b1-8fde-6aa3796e8e60",
+        "name": "地狱梗图",
+        "description": "Xmax 官方预设 · Hell Meme",
+        "image": "/api/exhibition/mirrors/default/assets/upload-e541f879-a64a-41b1-8fde-6aa3796e8e60",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 67788,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-55e04290-5f1c-4a73-ab75-e21dbc4fd295",
+        "name": "战队特摄",
+        "description": "Xmax 官方预设 · Sentai Tokusatsu",
+        "image": "/api/exhibition/mirrors/default/assets/upload-55e04290-5f1c-4a73-ab75-e21dbc4fd295",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 126398,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-99d1b571-7302-4fa9-95d8-7420770bcf57",
+        "name": "科幻机甲",
+        "description": "Xmax 官方预设 · Sci-Fi Mecha",
+        "image": "/api/exhibition/mirrors/default/assets/upload-99d1b571-7302-4fa9-95d8-7420770bcf57",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 154086,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-138585fa-c851-4d0f-95ab-a3589577ecab",
+        "name": "写实动物",
+        "description": "Xmax 官方预设 · Realistic Animals",
+        "image": "/api/exhibition/mirrors/default/assets/upload-138585fa-c851-4d0f-95ab-a3589577ecab",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 184176,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-b2952586-2059-49d8-8ce0-29ace812228c",
+        "name": "潮玩人偶",
+        "description": "Xmax 官方预设 · Designer Toy",
+        "image": "/api/exhibition/mirrors/default/assets/upload-b2952586-2059-49d8-8ce0-29ace812228c",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 2752,
+        "height": 1536,
+        "bytes": 383720,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-cfd9e848-72a9-4e0c-9327-5cee2a449902",
+        "name": "欧美卡通",
+        "description": "Xmax 官方预设 · Western Cartoon",
+        "image": "/api/exhibition/mirrors/default/assets/upload-cfd9e848-72a9-4e0c-9327-5cee2a449902",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 2752,
+        "height": 1536,
+        "bytes": 698860,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-003709fc-4200-4a27-9af2-50184930be49",
+        "name": "偶像立绘",
+        "description": "Xmax 官方预设 · Idol Illustration",
+        "image": "/api/exhibition/mirrors/default/assets/upload-003709fc-4200-4a27-9af2-50184930be49",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 77996,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-f4a5a1a3-1f28-4115-bb4e-470c732a7ac7",
+        "name": "影视机甲",
+        "description": "Xmax 官方预设 · Cinematic Mecha",
+        "image": "/api/exhibition/mirrors/default/assets/upload-f4a5a1a3-1f28-4115-bb4e-470c732a7ac7",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 119354,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-91baaf07-a94d-4283-b63c-e695887e62b8",
+        "name": "草地小牛",
+        "description": "Xmax 官方预设 · Anthropomorphic Cartoon",
+        "image": "/api/exhibition/mirrors/default/assets/upload-91baaf07-a94d-4283-b63c-e695887e62b8",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 142792,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-ef0f0883-d987-4955-bc1a-7ca055d883c6",
+        "name": "写实人像",
+        "description": "Xmax 官方预设 · Realistic Portrait",
+        "image": "/api/exhibition/mirrors/default/assets/upload-ef0f0883-d987-4955-bc1a-7ca055d883c6",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 51630,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-41d0f77f-faaf-4611-97a5-62850e09b754",
+        "name": "超现实风",
+        "description": "Xmax 官方预设 · Surrealism",
+        "image": "/api/exhibition/mirrors/default/assets/upload-41d0f77f-faaf-4611-97a5-62850e09b754",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 173902,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-dcc2823c-8c1f-4bf8-bec3-c262ef4eb53d",
+        "name": "迪士尼风",
+        "description": "Xmax 官方预设 · Disney Style",
+        "image": "/api/exhibition/mirrors/default/assets/upload-dcc2823c-8c1f-4bf8-bec3-c262ef4eb53d",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 151268,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-6def0c96-975e-4f90-952c-e996b111efc1",
+        "name": "赛璐璐风",
+        "description": "Xmax 官方预设 · Cel Shading",
+        "image": "/api/exhibition/mirrors/default/assets/upload-6def0c96-975e-4f90-952c-e996b111efc1",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 183630,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-041d4ef8-d19c-4ae2-b822-c8624ee7b9c8",
+        "name": "朵拉强森",
+        "description": "Xmax 官方预设 · Live-Action Cartoon",
+        "image": "/api/exhibition/mirrors/default/assets/upload-041d4ef8-d19c-4ae2-b822-c8624ee7b9c8",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 122788,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-232ec69f-bdc7-4575-b1d4-1f608f0a8362",
+        "name": "日式动漫",
+        "description": "Xmax 官方预设 · Japanese Animation",
+        "image": "/api/exhibition/mirrors/default/assets/upload-232ec69f-bdc7-4575-b1d4-1f608f0a8362",
+        "palette": "",
+        "mode": "vibex",
+        "referenceKind": "image",
+        "category": "风格变换",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1280,
+        "height": 714,
+        "bytes": 57724,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-5eb522b1-54aa-46a3-a362-3fff8777ba25",
+        "name": "萌系吉娃娃",
+        "description": "Xmax 官方预设 · Cute Chihuahua",
+        "image": "/api/exhibition/mirrors/default/assets/upload-5eb522b1-54aa-46a3-a362-3fff8777ba25",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1134,
+        "height": 1078,
+        "bytes": 128824,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-215f6151-d30f-49fa-b9ea-1d6c38d72b38",
+        "name": "软萌白兔",
+        "description": "Xmax 官方预设 · Fluffy Bunny",
+        "image": "/api/exhibition/mirrors/default/assets/upload-215f6151-d30f-49fa-b9ea-1d6c38d72b38",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 736,
+        "height": 736,
+        "bytes": 65912,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-802bb15b-34bb-468f-911f-6ce2465c23f4",
+        "name": "初音未来",
+        "description": "Xmax 官方预设 · Hatsune Miku",
+        "image": "/api/exhibition/mirrors/default/assets/upload-802bb15b-34bb-468f-911f-6ce2465c23f4",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1088,
+        "height": 1080,
+        "bytes": 62234,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-6ffa08d2-e7d5-4b97-916e-40f166e83c6f",
+        "name": "奶白小猫",
+        "description": "Xmax 官方预设 · Cream Kitten",
+        "image": "/api/exhibition/mirrors/default/assets/upload-6ffa08d2-e7d5-4b97-916e-40f166e83c6f",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1113,
+        "height": 1080,
+        "bytes": 22590,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-3f2f6146-1600-4456-af02-3af0f366cc6c",
+        "name": "奶龙",
+        "description": "Xmax 官方预设 · Nailoong",
+        "image": "/api/exhibition/mirrors/default/assets/upload-3f2f6146-1600-4456-af02-3af0f366cc6c",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1109,
+        "height": 1080,
+        "bytes": 30410,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-a248686c-aa17-4435-bd87-d5c54888efa4",
+        "name": "蜜蜂Kitty",
+        "description": "Xmax 官方预设 · Bee Kitty",
+        "image": "/api/exhibition/mirrors/default/assets/upload-a248686c-aa17-4435-bd87-d5c54888efa4",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1080,
+        "height": 1080,
+        "bytes": 33380,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-cb611f90-3707-4c6d-b38c-bcda1fb1135c",
+        "name": "腊肠犬",
+        "description": "Xmax 官方预设 · Dachshund",
+        "image": "/api/exhibition/mirrors/default/assets/upload-cb611f90-3707-4c6d-b38c-bcda1fb1135c",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1080,
+        "height": 1204,
+        "bytes": 32928,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-02a7d088-2486-4909-825e-1e51064f151d",
+        "name": "奶牛玩偶",
+        "description": "Xmax 官方预设 · Cow Plushie",
+        "image": "/api/exhibition/mirrors/default/assets/upload-02a7d088-2486-4909-825e-1e51064f151d",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 3870,
+        "height": 3693,
+        "bytes": 209700,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-b99acada-5f2b-46ed-92ec-d3278b727227",
+        "name": "蜡笔小新",
+        "description": "Xmax 官方预设 · Shin-chan",
+        "image": "/api/exhibition/mirrors/default/assets/upload-b99acada-5f2b-46ed-92ec-d3278b727227",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 3867,
+        "height": 3867,
+        "bytes": 286356,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-bf2f83f7-e62a-48d2-9171-8bb2571939b5",
+        "name": "企鹅玩偶",
+        "description": "Xmax 官方预设 · Penguin Plushie",
+        "image": "/api/exhibition/mirrors/default/assets/upload-bf2f83f7-e62a-48d2-9171-8bb2571939b5",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1080,
+        "height": 1080,
+        "bytes": 30316,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-bb6d74b2-f0ba-4801-ba39-2dfe2b3ff34e",
+        "name": "Hello Kitty",
+        "description": "Xmax 官方预设 · Hello Kitty",
+        "image": "/api/exhibition/mirrors/default/assets/upload-bb6d74b2-f0ba-4801-ba39-2dfe2b3ff34e",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 3867,
+        "height": 3867,
+        "bytes": 123760,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-f65efa98-5b52-4437-87c6-bcc8b15b3478",
+        "name": "粉裙奶龙",
+        "description": "Xmax 官方预设 · Pink-Dress Nailoong",
+        "image": "/api/exhibition/mirrors/default/assets/upload-f65efa98-5b52-4437-87c6-bcc8b15b3478",
+        "palette": "",
+        "mode": "dimx",
+        "referenceKind": "image",
+        "category": "场景角色",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1079,
+        "height": 1678,
+        "bytes": 88190,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-3b43995f-8cf0-4359-b57a-10bdb4f9a7da",
+        "name": "蛛丝发射",
+        "description": "Xmax 官方预设 · Web Shooter",
+        "image": "/api/exhibition/mirrors/default/assets/upload-3b43995f-8cf0-4359-b57a-10bdb4f9a7da",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "image",
+        "prompt": "将视频中的人变成参考图中的形象，并且当他举起手时，手腕会有纯白色蛛丝射出",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 1282,
+        "height": 1240,
+        "bytes": 111380,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-5425d8ce-a8fa-4f2b-bf8d-df213cea2e28",
+        "name": "举手唤鸟",
+        "description": "Xmax 官方预设 · Bird Call",
+        "image": "/api/exhibition/mirrors/default/assets/upload-5425d8ce-a8fa-4f2b-bf8d-df213cea2e28",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "image",
+        "prompt": "将视频中的人变成参考图中的形象，并且当他举起手时，就会召唤一只小鸟飞来",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 736,
+        "height": 946,
+        "bytes": 106014,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-e528071a-5e9c-45fb-a642-cf002f8b8a61",
+        "name": "机器压扁",
+        "description": "Xmax 官方预设 · Machine Squash",
+        "image": "/api/exhibition/mirrors/default/assets/upload-e528071a-5e9c-45fb-a642-cf002f8b8a61",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "image",
+        "prompt": "将视频中的人物换成参考图的角色，鬼畜动画，上方出现一台机器，从上向下将角色的整个身体压扁，角色变成夸张的扁平形态",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "参考图"
+        ],
+        "source": "upload",
+        "width": 750,
+        "height": 750,
+        "bytes": 29570,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-562c56ea-63da-40d7-9b6d-2e68b9fb8ae4",
+        "name": "怦然心动",
+        "description": "Xmax 官方预设 · Heart Eyes",
+        "image": "/api/exhibition/mirrors/default/assets/upload-562c56ea-63da-40d7-9b6d-2e68b9fb8ae4",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "视频中的人物突然露出极其心动和兴奋的表情，眉毛抬起，脸颊上扬，嘴巴张开开心大笑，双颊明显变红。随后两只眼睛变成不断跳动的红心，大量粉色爱心和闪亮气泡从角色头部周围喷涌而出",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17154,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-f6e3678b-39ff-4628-b2e5-fe2eb453c568",
+        "name": "震惊爆炸",
+        "description": "Xmax 官方预设 · Mind Blown",
+        "image": "/api/exhibition/mirrors/default/assets/upload-f6e3678b-39ff-4628-b2e5-fe2eb453c568",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "视频中人物突然瞪大双眼、张大嘴巴，露出极度震惊和混乱的表情。大量巨大的黑色问号从角色头顶连续喷涌而出，围绕头部高速旋转、碰撞并不断爆炸。角色整个头部逐渐变红，头顶冒出浓密热气和电火花，最后头顶发生一次夸张的彩色烟雾爆炸",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17766,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-62f7f92c-d7b2-4e7a-8e95-e87dd0ba40d0",
+        "name": "彩虹瀑布",
+        "description": "Xmax 官方预设 · Rainbow Waterfall",
+        "image": "/api/exhibition/mirrors/default/assets/upload-62f7f92c-d7b2-4e7a-8e95-e87dd0ba40d0",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "视频中人物突然感到强烈恶心，紧皱眉头、瞪大双眼，双颊鼓起，身体向前弯曲并张大嘴巴。随后一条巨大、浓稠、五颜六色的彩虹液体瀑布从角色嘴里持续喷涌而出，形成红、橙、黄、绿、蓝、紫多层彩色水流，瀑布不断向下倾泻并飞溅出大量彩色水花，逐渐覆盖画面下半部分",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 18300,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-066fb851-1900-4b9d-83ad-876d4d6d1ca9",
+        "name": "雷劈冒烟",
+        "description": "Xmax 官方预设 · Lightning Scorch",
+        "image": "/api/exhibition/mirrors/default/assets/upload-066fb851-1900-4b9d-83ad-876d4d6d1ca9",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "给视频里的人生成像被雷电劈完，保持头发焦黑脸也焦黑，头顶冒烟",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17380,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-15aab111-9dc6-4653-82fc-0cb0084c8b00",
+        "name": "天使降临",
+        "description": "Xmax 官方预设 · Angel Form",
+        "image": "/api/exhibition/mirrors/default/assets/upload-15aab111-9dc6-4653-82fc-0cb0084c8b00",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "给视频里的人生成超大白色翅膀，头上有天使光圈，衣服换成天使中性穿搭",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 16976,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-da17e6fc-13a9-425c-8d1a-556fe2fd9bfa",
+        "name": "举手引雷",
+        "description": "Xmax 官方预设 · Call Lightning",
+        "image": "/api/exhibition/mirrors/default/assets/upload-da17e6fc-13a9-425c-8d1a-556fe2fd9bfa",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "给视频里的人生成当他举起手时有雷电劈下",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 16350,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-31167095-2c7c-4d20-8432-b80c197e3a54",
+        "name": "肩上白狐",
+        "description": "Xmax 官方预设 · Shoulder Fox",
+        "image": "/api/exhibition/mirrors/default/assets/upload-31167095-2c7c-4d20-8432-b80c197e3a54",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "生成一只白色小狐狸在视频人的肩膀上站着",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 15962,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-58504550-1f75-439a-8fd8-f3a78230cd44",
+        "name": "彩虹爆炸头",
+        "description": "Xmax 官方预设 · Rainbow Afro",
+        "image": "/api/exhibition/mirrors/default/assets/upload-58504550-1f75-439a-8fd8-f3a78230cd44",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "Turn my hair into a rainbow afro",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 18872,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-4d70d96a-3981-40eb-8fee-6599c1c0f631",
+        "name": "泪如雨下",
+        "description": "Xmax 官方预设 · Tears Fall",
+        "image": "/api/exhibition/mirrors/default/assets/upload-4d70d96a-3981-40eb-8fee-6599c1c0f631",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "Crying with tears",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 15814,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-5d0c73b2-e667-4ae5-b61f-3f7e63fc8b84",
+        "name": "猪头变身",
+        "description": "Xmax 官方预设 · Pig Head",
+        "image": "/api/exhibition/mirrors/default/assets/upload-5d0c73b2-e667-4ae5-b61f-3f7e63fc8b84",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "Turn into a pig head",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17176,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-6d7b57d0-f34e-4269-b1ad-a8235047ee0c",
+        "name": "无中生猫",
+        "description": "Xmax 官方预设 · Cute Cat",
+        "image": "/api/exhibition/mirrors/default/assets/upload-6d7b57d0-f34e-4269-b1ad-a8235047ee0c",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "召唤一只可爱的小母猫",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 15876,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-d4b07cba-2ad9-4efe-b52f-e88affef4743",
+        "name": "激光眼",
+        "description": "Xmax 官方预设 · Laser Eyes",
+        "image": "/api/exhibition/mirrors/default/assets/upload-d4b07cba-2ad9-4efe-b52f-e88affef4743",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "Laser beams fire from the eyes",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 16624,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-ba9d019c-0e07-4b39-af20-2de5c827e399",
+        "name": "烈焰骷髅",
+        "description": "Xmax 官方预设 · Flame Skull",
+        "image": "/api/exhibition/mirrors/default/assets/upload-ba9d019c-0e07-4b39-af20-2de5c827e399",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "Whole body catches fire and turns into a skeleton",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17822,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-3ab6554c-5e44-46f3-a5fc-7917e05033b7",
+        "name": "头发着火",
+        "description": "Xmax 官方预设 · Hair on Fire",
+        "image": "/api/exhibition/mirrors/default/assets/upload-3ab6554c-5e44-46f3-a5fc-7917e05033b7",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "让视频中的人物头发着火",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 16992,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-4730685c-15ea-494c-b829-a3f83a4febb9",
+        "name": "怒火上头",
+        "description": "Xmax 官方预设 · Boiling with Rage",
+        "image": "/api/exhibition/mirrors/default/assets/upload-4730685c-15ea-494c-b829-a3f83a4febb9",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "视频人物的原本的表情立即发生明显变化：皱紧眉头，瞪大双眼，咬紧牙关，露出强烈愤怒的表情。角色持续保持愤怒，随后整个面部逐渐变红，头部冒出大量热气",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17472,
+        "mime": "image/webp"
+      },
+      {
+        "id": "upload-53624bf5-e4c9-4727-9d52-ed029ca9adcc",
+        "name": "长颈摇头",
+        "description": "Xmax 官方预设 · Long Neck Spin",
+        "image": "/api/exhibition/mirrors/default/assets/upload-53624bf5-e4c9-4727-9d52-ed029ca9adcc",
+        "palette": "",
+        "mode": "free",
+        "referenceKind": "none",
+        "prompt": "鬼畜动画，视频中人物身体保持不动，脖子伸到特别长，头部在身体上方向上做夸张缓慢的圆周运动",
+        "category": "自由创意",
+        "tags": [
+          "Xmax 官方预设",
+          "纯提示词"
+        ],
+        "source": "upload",
+        "width": 768,
+        "height": 1024,
+        "bytes": 17782,
+        "mime": "image/webp"
+      }
+    ],
+    "categories": [
+      "角色替换",
+      "服装换装",
+      "风格变换",
+      "场景角色",
+      "自由创意",
+      "动作交互"
+    ],
+    "tags": [
+      "Xmax 官方预设",
+      "参考图",
+      "纯提示词"
+    ],
+    "sessionNumber": 0,
+    "generationNumber": 0,
+    "updatedAt": 0,
+    "generationReadyAt": null,
+    "autoSwitchAt": null,
+    "settings": {
+      "autoReturnSeconds": 90,
+      "uploadLimits": {
+        "maxFileSizeMB": 10,
+        "minWidth": 512,
+        "maxWidth": 4096,
+        "minHeight": 512,
+        "maxHeight": 4096
+      },
+      "switchMode": "auto",
+      "autoSwitchSeconds": 30,
+      "uiSkinPreset": "brand",
+      "uiSkin": null
+    },
+    "providerMode": "demo",
+    "live": null,
+    "logs": []
+  },
+  "lastCommandAt": 0,
+  "pausedPhase": null,
+  "pausedRemainingMs": 0
+}

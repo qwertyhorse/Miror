@@ -9,37 +9,68 @@ export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, tit
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const inFlight = useRef(false);
+  const [optimisticId, setOptimisticId] = useState<string | null>(null);
+  const intent = useRef<string | null>(null);
+  const requests = useRef({ epoch: 0, latest: 0, acknowledged: 0, count: 0 });
+  const current = useRef({ looks, selectedId, disabled, passive, onSelect });
+  current.current = { looks, selectedId, disabled, passive, onSelect };
   const alive = useRef(true);
   const toggle = useRef<HTMLButtonElement>(null);
   const selected = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; onBusyChange(false); };
+    return () => { alive.current = false; requests.current.epoch++; onBusyChange(false); };
   }, [onBusyChange]);
   useEffect(() => {
     if (open) selected.current?.scrollIntoView?.({ block: 'nearest' });
-  }, [open, selectedId]);
+  }, [open, selectedId, optimisticId]);
+  useEffect(() => {
+    if (!disabled && !passive) return;
+    requests.current.epoch++; requests.current.count = 0;
+    intent.current = null; setOptimisticId(null); setBusy(false); onBusyChange(false);
+  }, [disabled, passive, onBusyChange]);
+  useEffect(() => {
+    if (intent.current && ((requests.current.acknowledged === requests.current.latest && selectedId === intent.current)
+      || !looks.some(look => look.id === intent.current))) {
+      intent.current = null; setOptimisticId(null);
+    }
+  }, [selectedId, looks]);
   async function choose(id: string) {
-    if (disabled || passive || inFlight.current || id === selectedId || !looks.some(look => look.id === id)) return;
-    inFlight.current = true; setBusy(true); onBusyChange(true);
-    try { await onSelect(id); }
+    const latest = current.current;
+    if (latest.disabled || latest.passive || id === (intent.current ?? latest.selectedId) || !latest.looks.some(look => look.id === id)) return;
+    const epoch = requests.current.epoch;
+    const request = ++requests.current.latest;
+    requests.current.count++;
+    intent.current = id; setOptimisticId(id); setBusy(true); onBusyChange(true);
+    let accepted = false;
+    try { accepted = await latest.onSelect(id); }
     catch { /* The controller displays command failures. */ }
-    finally { inFlight.current = false; if (alive.current) { setBusy(false); onBusyChange(false); } }
+    finally {
+      if (alive.current && requests.current.epoch === epoch) {
+        requests.current.count--;
+        const pending = requests.current.count > 0;
+        setBusy(pending); onBusyChange(pending);
+        if (request === requests.current.latest) {
+          if (accepted) requests.current.acknowledged = request;
+          if (!accepted || current.current.selectedId === id) { intent.current = null; setOptimisticId(null); }
+        }
+      }
+    }
   }
+  const highlightedId = optimisticId ?? selectedId;
   return <div className={`ex-mirror-drawer${open ? ' is-open' : ''}`} onKeyDown={event => {
     if (event.key === 'Escape' && open) { event.preventDefault(); setOpen(false); toggle.current?.focus(); }
   }}>
     {open && <div id={panelId} className="ex-mirror-drawer-panel">
       <strong>{title}</strong>
       <div className="ex-mirror-drawer-grid" role="group" aria-label={title} aria-busy={busy}>
-        {looks.map(look => <button key={look.id} ref={look.id === selectedId ? selected : undefined} type="button"
-          className={`ex-mirror-drawer-item${look.id === selectedId ? ' is-selected' : ''}`} title={look.name}
-          aria-label={`选择${look.name}`} aria-pressed={look.id === selectedId} disabled={disabled || passive || busy}
+        {looks.map(look => <button key={look.id} ref={look.id === highlightedId ? selected : undefined} type="button"
+          className={`ex-mirror-drawer-item${look.id === highlightedId ? ' is-selected' : ''}`} title={look.name}
+          aria-label={`选择${look.name}`} aria-pressed={look.id === highlightedId} disabled={disabled || passive}
           onClick={() => void choose(look.id)}>
           <img src={appUrl(look.image)} alt="" draggable={false} loading="lazy" />
-          {look.id === selectedId && <span className="ex-mirror-drawer-check" aria-hidden="true"><Check /></span>}
+          {look.id === highlightedId && <span className="ex-mirror-drawer-check" aria-hidden="true"><Check /></span>}
         </button>)}
       </div>
     </div>}

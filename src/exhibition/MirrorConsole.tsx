@@ -108,6 +108,8 @@ function DeviceSettings({ controller, live, mirrorId }: { controller: Exhibition
   const configurable = !!state && ['select', 'idle'].includes(state.phase) && !state.live;
   const disabled = pending || controller.stopPending || !connected || !configurable;
   const screenUrl = exhibitionCameraUrl(mirrorId);
+  const controlUrl = new URL(exhibitionUrl('/exhibition/control', mirrorId),
+    typeof window !== 'undefined' && window.location.protocol === 'http:' ? window.location.href : 'http://xuminghong.local:10200/').toString();
   return <div className="ex-device-settings">
     <div className="ex-settings-title"><Settings size={17} /><h3>设备设置</h3>{!configurable && <small>{isExhibitionLocallyEnded(state!) ? '云端状态待确认' : '结束体验后可修改'}</small>}</div>
     <div className="ex-device-setting-grid">
@@ -118,7 +120,7 @@ function DeviceSettings({ controller, live, mirrorId }: { controller: Exhibition
     <MirrorUiSkinSettings key={`skin-${mirrorId}`} controller={controller} />
     <details className="ex-device-details"><summary>素材上传限制<span>文件大小与图片尺寸</span></summary><UploadLimitsSettings controller={controller} /></details>
     <details className="ex-device-details"><summary>设备入口<span>镜端与后台地址</span></summary><div className="ex-device-links">
-      {[{ name: '镜端入口', url: screenUrl }, { name: '工作人员后台', url: `http://xuminghong.local:10200${exhibitionUrl('/exhibition/control', mirrorId)}` }].map(entry => <div key={entry.name}><strong>{entry.name}</strong><a href={entry.url} target="_blank" rel="noreferrer">{entry.url}<ExternalLink size={14} /></a></div>)}
+      {[{ name: '镜端入口', url: screenUrl }, { name: '工作人员后台', url: controlUrl }].map(entry => <div key={entry.name}><strong>{entry.name}</strong><a href={entry.url} target="_blank" rel="noreferrer">{entry.url}<ExternalLink size={14} /></a></div>)}
     </div></details>
   </div>;
 }

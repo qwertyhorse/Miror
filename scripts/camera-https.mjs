@@ -5,7 +5,7 @@ import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CAMERA_PORT, HOSTNAME, WEB_PORT, isPrivateAddress, proxyHeaders, proxyRequest, proxyUpgrade, reject, requestPath } from './gateway-shared.mjs';
+import { CAMERA_PORT, HOSTNAME, WEB_PORT, HTTP_PORT, HTTP_COMPAT_PORT, EXHIBITION_PORT, isPrivateAddress, proxyHeaders, proxyRequest, proxyUpgrade, reject, requestPath } from './gateway-shared.mjs';
 
 export { CAMERA_PORT, isPrivateAddress, proxyHeaders };
 export const CAMERA_URL = `https://${HOSTNAME}:${CAMERA_PORT}/v1.1/exhibition/screen`;
@@ -32,7 +32,7 @@ export function validateCameraRequest(request, { port = CAMERA_PORT, websocket =
   if ((!['GET', 'HEAD'].includes(request.method ?? '') || websocket) && (!origin || request.headers['sec-fetch-site'] === 'cross-site')) return { code: 403, message: '写入与 WebSocket 请求必须来自同源 HTTPS 页面。' };
   const parsed = requestPath(request, `https://${host}`);
   if (!parsed) return { code: 400, message: '无效请求路径。' };
-  if (parsed.path !== '/' && parsed.path !== '/__camera_health' && (!/^\/v1\.1(?:\/|$)/.test(parsed.path) || !/^\/v1\.1(?:\/|$)/.test(parsed.rawPath))) return { code: 404, message: '摄像头入口仅提供 V1.1 智能镜页面。' };
+  if (!['/', '/__camera_health', '/openbuy-local-ca.crt'].includes(parsed.path) && (!/^\/v1\.1(?:\/|$)/.test(parsed.path) || !/^\/v1\.1(?:\/|$)/.test(parsed.rawPath))) return { code: 404, message: '摄像头入口仅提供 V1.1 智能镜页面。' };
   // The standalone API has no main-site API-key route.
   if (/^\/v1\.1\/api\/(?!exhibition(?:\/|$))/.test(parsed.path)) return { code: 404, message: '未找到智能镜接口。' };
   return null;
@@ -51,17 +51,25 @@ export function createCameraRequestHandler({ port = CAMERA_PORT, targetPort = WE
       response.end(JSON.stringify({ gateway: 'camera-https', protocol: 'https', cameraUrl: CAMERA_URL, cameraIpUrls: [...allowedHosts].filter(host => isIP(host) && host !== '127.0.0.1').map(host => `https://${host}:${port}/v1.1/exhibition/screen`) })); return;
     }
     const credentials = /^\/v1\.1\/api\/exhibition\/mirrors\/[a-z0-9][a-z0-9-]{0,63}\/credentials$/.test(decodeURIComponent(url.pathname));
-    proxyRequest(request, response, { targetPort: credentials ? credentialsPort : targetPort, protocol: 'https', camera: true });
+    const credentialForm = url.pathname === '/v1.1/exhibition/control' && url.searchParams.get('credentialForm') === '1';
+    const responseHeaders = credentialForm ? { 'content-security-policy': `frame-ancestors 'self' ${[HTTP_PORT, HTTP_COMPAT_PORT, EXHIBITION_PORT].map(httpPort => `http://${url.hostname}:${httpPort}`).join(' ')}` } : {};
+    proxyRequest(request, response, { targetPort: credentials ? credentialsPort : targetPort, protocol: 'https', camera: true, responseHeaders });
   };
 }
 
 export async function tlsOptions() {
   const directory = resolve(root, '.data/lan-tls');
-  const [key, cert, ca] = await Promise.all(['server.key', 'server.crt', 'root-ca.crt'].map(name => readFile(resolve(directory, name))));
-  const certificate = new X509Certificate(cert);
-  const authority = new X509Certificate(ca);
-  if (!certificate.checkHost(HOSTNAME) || !certificate.checkPrivateKey(createPrivateKey(key)) || !certificate.verify(authority.publicKey) || Date.parse(certificate.validFrom) > Date.now() || Date.parse(certificate.validTo) <= Date.now()) throw new Error('局域网证书无效、过期或与私钥不匹配。请运行 npm run camera:certificate；未修改系统信任。');
-  return { key, cert, ca, minVersion: 'TLSv1.2', certificate };
+  let key, cert, ca;
+  try { [key, cert, ca] = await Promise.all(['server.key', 'server.crt', 'root-ca.crt'].map(name => readFile(resolve(directory, name)))); }
+  catch (error) { if (error.code === 'ENOENT') throw new Error('本机摄像头 HTTPS 证书尚未配置。请先运行 npm run setup，再运行 npm start。'); throw error; }
+  try {
+    const certificate = new X509Certificate(cert);
+    const authority = new X509Certificate(ca);
+    if (!certificate.checkHost(HOSTNAME) || !certificate.checkPrivateKey(createPrivateKey(key)) || !certificate.verify(authority.publicKey)
+      || Date.parse(certificate.validFrom) > Date.now() || Date.parse(certificate.validTo) <= Date.now()
+      || Date.parse(authority.validFrom) > Date.now() || Date.parse(authority.validTo) <= Date.now()) throw new Error('invalid certificate');
+    return { key, cert, ca, minVersion: 'TLSv1.2', certificate };
+  } catch { throw new Error('局域网证书无效、过期或与私钥不匹配。请运行 npm run setup；未修改系统信任。'); }
 }
 
 async function serve() {

@@ -14,6 +14,7 @@ import { MirrorDeviceBinding } from './MirrorDeviceBinding';
 import { OutfitSwitchSettings } from './OutfitSwitchSettings';
 import { MirrorUiSkinSettings } from './MirrorUiSkinSettings';
 import { MirrorCredentialSettings } from './MirrorCredentialSettings';
+import { GestureRecognitionSettings } from './GestureRecognitionSettings';
 import { CustomSelect } from '../components/SelectionControls';
 
 function useModal() {
@@ -82,13 +83,13 @@ function CopyDialog({ mirror, registry, controller, close }: {
       {confirming ? <>
         <div className="ex-copy-summary"><span>来源设备<strong>{source?.name}</strong></span><span>目标设备<strong>{mirror.name}</strong></span></div>
         <p className="ex-mirror-help">将替换「{mirror.name}」的以下内容：</p>
-        <ul className="ex-copy-ranges">{copyLooks && <li>素材资料：全部素材、图片、所属模式、Free 提示词、排列顺序与启用状态。</li>}{copySettings && <li>设备设置：当前体验模式、换装方式与间隔、待机时间、运行方式与上传限制。</li>}</ul>
+        <ul className="ex-copy-ranges">{copyLooks && <li>素材资料：全部素材、图片、所属模式、Free 提示词、排列顺序与启用状态。</li>}{copySettings && <li>设备设置：当前体验模式、换装方式与间隔、待机时间、运行方式、上传限制、手势识别与参数。</li>}</ul>
         <p className="ex-mirror-help">{!copyLooks ? '目标素材资料保留。' : !copySettings ? '目标当前体验模式及设备设置保留。' : ''}复制后两台独立修改，目标设备回到待机。当前模式没有启用素材时，大屏显示待补充素材。设备名称、身份、日志和实时会话不会复制。</p>
       </> : <>
         <label className="ex-mirror-field">从哪台设备复制<select value={sourceId} onChange={event => setSourceId(event.target.value)} disabled={busy} required>{sources.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <fieldset className="ex-copy-options" disabled={busy}><legend>替换「{mirror.name}」的内容</legend>
           <label><input type="checkbox" checked={copyLooks} onChange={event => setCopyLooks(event.target.checked)} /><span><strong>素材资料</strong><small>素材、图片、所属模式、Free 提示词、排列顺序与启用状态</small></span></label>
-          <label><input type="checkbox" checked={copySettings} onChange={event => setCopySettings(event.target.checked)} /><span><strong>设备设置</strong><small>当前体验模式、换装方式与间隔、待机时间、运行方式与上传限制</small></span></label>
+          <label><input type="checkbox" checked={copySettings} onChange={event => setCopySettings(event.target.checked)} /><span><strong>设备设置</strong><small>当前体验模式、换装方式与间隔、待机时间、运行方式、上传限制、手势识别与参数</small></span></label>
         </fieldset>
         <p className="ex-mirror-help">所选内容将完整替换目标数据。复制是一次性快照，之后两台设备独立修改。</p>
       </>}
@@ -116,6 +117,7 @@ function DeviceSettings({ controller, live, mirrorId }: { controller: Exhibition
       <div className="ex-device-setting"><span className="ex-device-setting-label">无操作返回待机</span><div className="ex-form-row"><CustomSelect className="ex-device-select" label="无操作返回待机" value={timeout} disabled={disabled} onChange={value => { if (baseline === undefined) setBaseline(state!.revision); setTimeoutValue(value); setSaved(false); }} options={[{ value: '0', label: '关闭自动返回' }, ...[30, 60, 90, 180, 300, ...(![0, 30, 60, 90, 180, 300].includes(Number(timeout)) ? [Number(timeout)] : [])].sort((a, b) => a - b).map(seconds => ({ value: String(seconds), label: seconds < 180 ? `${seconds} 秒` : `${seconds / 60} 分钟` }))]} /><button className="ex-button" disabled={disabled} onClick={async () => { if (await send({ action: 'configure', autoReturnSeconds: Number(timeout), expectedRevision: baseline })) { setBaseline(undefined); setSaved(true); } }}>保存</button>{saved && <span className="ex-saved" role="status"><Check size={14} />已保存</span>}</div>{baseline !== undefined && <button type="button" className="ex-reset-setting" disabled={pending} onClick={() => { setBaseline(undefined); setTimeoutValue(String(state!.settings.autoReturnSeconds)); setSaved(false); controller.clearError(); }}>放弃修改，读取最新设置</button>}</div>
       <div className="ex-device-setting"><span className="ex-device-setting-label">运行方式</span><CustomSelect className="ex-device-select" label="运行方式" value={state!.providerMode} disabled={disabled} onChange={value => void send({ action: 'configure', providerMode: value as 'demo' | 'xmax' })} options={[{ value: 'demo', label: '交互演示' }, { value: 'xmax', label: 'XMAX 实时生成' }]} /></div>
     </div>
+    <GestureRecognitionSettings key={`gestures-${mirrorId}`} controller={controller} />
     <MirrorCredentialSettings key={`credentials-${mirrorId}`} controller={controller} live={live} />
     <MirrorUiSkinSettings key={`skin-${mirrorId}`} controller={controller} />
     <details className="ex-device-details"><summary>素材上传限制<span>文件大小与图片尺寸</span></summary><UploadLimitsSettings controller={controller} /></details>

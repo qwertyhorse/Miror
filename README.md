@@ -69,3 +69,13 @@ npm run test:package
 Ubuntu 可使用上述 Node 前台启动流程；Linux 的 systemd 开机自启、进程守护、防闲置睡眠与 Avahi 域名广播需由技术补充，本次未进行 Ubuntu 实机验收。挥手识别在浏览器本地 Worker 中复用当前摄像头，不上传识别帧；模型与 WASM 随源码提供。现场摄像头、光线和距离仍需实机联调。
 
 本次验证结果见 `docs/verification-20261013.json`。验证使用模拟供应商，XMAX 调用为 0；此前交付的生产依赖安装验收保留在 `docs/verification.json`。
+
+## 手掌识别与后台参数
+
+后台“控制与设置 → 设备设置 → 手势识别”可多选手掌识别、左右挥手，默认仅启用手掌。五指自然并拢也可识别，默认确认时间 300 ms；持续举掌只切换一次。全部取消勾选即可关闭。每台镜子独立保存，修改后点击“保存识别设置”，恢复默认也需保存。
+
+“识别参数”提供 MediaPipe 手检测/存在置信度、框跟踪阈值、手掌确认时间、收手间隔、帧率上限和输入分辨率。网页采用浏览器摄像头与 Canvas 取帧，没有 OpenCV 运行时。完整范围和请求格式见 [API 文档](docs/API.md)。后台仅在体验结束、实时会话停止后允许保存。
+
+镜端 URL 加 `diagnostics=1` 打开诊断，支持导出和清空。记录仅在页面内存中保留最多 10,000 条，不包含密钥、图像和原始关键点。“已看到新衣服”是人工观察值，SDK 提交成功和会话首帧不能替代逐套服装确认。现场识别准确率、重复率及生成画面仍需真人验收。
+
+本轮源码与测试结果见 [手势设置验收](docs/verification-gesture-settings-20261013.json)。可选 Mac 浏览器回归脚本为 `scripts/check-exhibition-gestures.mjs` 和 `scripts/check-exhibition-gesture-settings.mjs`，需先安装 `@playwright/test` 并有 Google Chrome；构建后使用 `GESTURE_CHECK_DIST="$PWD/dist" node scripts/check-exhibition-gesture-settings.mjs`。脚本使用假摄像头和隔离 API，不启动真实 XMAX。

@@ -1,4 +1,5 @@
 import type { XmaxRegion } from './xmax.ts';
+import type { ExhibitionGestureSettings } from './exhibitionGestures.ts';
 
 export const EXHIBITION_LOOK_IDS = ['commute', 'city', 'evening'] as const;
 export const EXHIBITION_EXPERIENCE_MODES = ['free', 'charx', 'clothx', 'vibex', 'dimx', 'mox'] as const;
@@ -92,6 +93,8 @@ export interface ExhibitionCommand {
   experienceMode?: ExhibitionExperienceMode;
   /** Selecting a built-in skin replaces any uploaded custom image. */
   uiSkinPreset?: ExhibitionUiSkinPreset;
+  /** Complete local gesture-recognition settings; an empty list disables recognition. */
+  gestureRecognition?: ExhibitionGestureSettings;
   expectedRevision?: number;
 }
 
@@ -115,7 +118,7 @@ export interface ExhibitionState {
   generationReadyAt: number | null;
   /** Server deadline; null outside an automatic result display. */
   autoSwitchAt?: number | null;
-  settings: { autoReturnSeconds: number; uploadLimits: ExhibitionUploadLimits; switchMode?: ExhibitionSwitchMode; autoSwitchSeconds?: number; uiSkinPreset?: ExhibitionUiSkinPreset; uiSkin?: ExhibitionUiSkin | null };
+  settings: { autoReturnSeconds: number; uploadLimits: ExhibitionUploadLimits; switchMode?: ExhibitionSwitchMode; autoSwitchSeconds?: number; uiSkinPreset?: ExhibitionUiSkinPreset; uiSkin?: ExhibitionUiSkin | null; gestureRecognition?: ExhibitionGestureSettings };
   providerMode: 'demo' | 'xmax';
   live: ExhibitionLiveState | null;
   /** Newest first. Only an explicitly enabled live mode can allocate XMAX credentials. */

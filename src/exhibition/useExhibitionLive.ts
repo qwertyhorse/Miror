@@ -10,6 +10,8 @@ import { exhibitionPromptForLook, type ExhibitionExperienceMode, type Exhibition
 import { isXmaxRegion, type XmaxRegion } from '../../shared/xmax';
 import type { RealtimePresentationState } from '@xmaxai/sdk-global';
 import type { MoXInteraction } from './MoXDragSurface';
+import type { DiagnosticEventInput } from './diagnostics';
+import { exhibitionSdk, prepareExhibitionEntry } from './sdkPreparation';
 
 export type ExhibitionCameraStatus = 'off' | 'opening' | 'preview' | 'preparing' | 'connecting' | 'running' | 'stopping' | 'error' | 'other-device';
 type LiveSession = CreatedSession & { exhibition: { mirrorId?: string; lookId: string; deviceId: string; sessionNumber: number; generationNumber: number; mode?: ExhibitionExperienceMode; prompt?: string } };
@@ -25,7 +27,9 @@ interface ExhibitionConnectOptions extends Omit<ConnectOptions, 'onError' | 'onD
   onDisconnect: (reason?: unknown, details?: unknown) => void;
   onPresentationChange?: (state: Readonly<RealtimePresentationState>) => void;
 }
-interface ConnectionEvents { status: (status: ExhibitionCameraStatus, message?: string) => void; stream: (stream: MediaStream | null) => void; refresh: () => void; updateError?: (message: string) => void; interaction?: (value: MoXInteraction | null) => void; presentation?: (value: Readonly<RealtimePresentationState> | null) => void; }
+interface ConnectionEvents { status: (status: ExhibitionCameraStatus, message?: string) => void; stream: (stream: MediaStream | null) => void; refresh: () => void; updateError?: (message: string) => void; interaction?: (value: MoXInteraction | null) => void; presentation?: (value: Readonly<RealtimePresentationState> | null) => void; diagnostic?: (event: DiagnosticEventInput) => void; }
+interface DiagnosticOperation { input: LiveInput; operationId: string; context: DiagnosticEventInput['context']; }
+let diagnosticConnectionSequence = 0;
 export interface ExhibitionLiveDeps {
   create: (input: LiveInput) => Promise<LiveSession>;
   reference: (input: LiveInput, signal: AbortSignal) => Promise<File>;
@@ -43,12 +47,16 @@ export interface ExhibitionLiveDeps {
   now: () => number;
   prepare: (region?: XmaxRegion) => Promise<unknown>;
 }
-function exhibitionSdk(region: XmaxRegion = 'global') {
-  return region === 'cn' ? import('@xmaxai/sdk') : import('@xmaxai/sdk-global');
-}
 function liveDefaults(mirrorId: string): ExhibitionLiveDeps {
   const path = (suffix: string) => exhibitionApiPath(suffix, mirrorId);
   const sessionPath = (id: string, action: string) => path(`sessions/${encodeURIComponent(id)}/${action}`);
+  const createFilesClient = async (token: string, region: XmaxRegion) => {
+    const { createXmaxClient } = await exhibitionSdk(region);
+    return createXmaxClient({ apiKey: token, locale: 'zh-CN', telemetry: false }).files;
+  };
+  // Keep the SDK's upload authorization cache within this connection and credential.
+  // The realtime client remains independent of this files-only client.
+  let cachedFiles: { token: string; region: XmaxRegion; promise: ReturnType<typeof createFilesClient> } | undefined;
   return {
   create: ({ deviceId, lookId, generationNumber, expectedRevision, terminalId, terminalToken }) => api(path('live/session'), 'POST', { deviceId, lookId, generationNumber, expectedRevision, terminalId, terminalToken }),
   reference: async (input, signal) => {
@@ -59,10 +67,14 @@ function liveDefaults(mirrorId: string): ExhibitionLiveDeps {
       throw new Error('参考图不可用，请重新上传有效图片。');
     return new File([blob], `garment.${blob.type.split('/')[1]}`, { type: blob.type });
   },
-  upload: async (file, token, signal, region) => {
-    const { createXmaxClient } = await exhibitionSdk(region);
-    const client = createXmaxClient({ apiKey: token, locale: 'zh-CN', telemetry: false });
-    return (await client.files.uploadAndCheckImage(file, { signal })).url;
+  upload: async (file, token, signal, region = 'global') => {
+    if (!cachedFiles || cachedFiles.token !== token || cachedFiles.region !== region) {
+      const entry = { token, region, promise: createFilesClient(token, region) };
+      cachedFiles = entry;
+      void entry.promise.catch(() => { if (cachedFiles === entry) cachedFiles = undefined; });
+    }
+    const files = await cachedFiles.promise;
+    return (await files.uploadAndCheckImage(file, { signal })).url;
   },
   bind: (id, input, signal) => api(path(`live/session/${encodeURIComponent(id)}/reference`), 'POST', input, signal),
   updateCondition: (id, input, signal) => api(path(`live/session/${encodeURIComponent(id)}/condition`), 'POST', input, signal),
@@ -113,6 +125,7 @@ export class ExhibitionLiveConnection {
   private updateController?: AbortController;
   private references = new Map<string, Promise<string>>();
   private warming = false;
+  private pendingWarmInput?: LiveInput;
   private startedAt = 0;
   private controller = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
@@ -124,6 +137,10 @@ export class ExhibitionLiveConnection {
   private credentialStopped = false;
   private stopAttemptedSdk?: ExhibitionSdkSession;
   private stopAttemptedSession?: string;
+  private diagnosticPrefix = `live-${++diagnosticConnectionSequence}`;
+  private initialOperation?: DiagnosticOperation;
+  private updateOperation?: DiagnosticOperation;
+  private activeOperation?: DiagnosticOperation;
   constructor(private input: LiveInput, private events: ConnectionEvents, deps: Partial<ExhibitionLiveDeps> = {}) {
     const mirrorId = input.mirrorId ?? 'default';
     this.input = { ...input, mirrorId };
@@ -132,6 +149,19 @@ export class ExhibitionLiveConnection {
   get sessionId() { return this.local?.id ?? null; }
   get stopped() { return this.closed; }
   start() { return this.starting ??= this.closed ? Promise.resolve() : this.run(); }
+  private operation(suffix: string, input: LiveInput): DiagnosticOperation {
+    return { input: { ...input }, operationId: `${this.diagnosticPrefix}:${suffix}`, context: {
+      mirrorId: input.mirrorId ?? 'default', sessionNumber: input.sessionNumber, generationNumber: input.generationNumber,
+      lookId: input.lookId, ...(this.local ? { sessionId: this.local.id, referenceVersion: this.local.referenceVersion } : {}),
+    } };
+  }
+  private emitDiagnostic(type: DiagnosticEventInput['type'], operation = this.activeOperation, reason?: DiagnosticEventInput['reason']) {
+    const receive = this.events.diagnostic;
+    if (!receive || !operation || (this.closed && type !== 'stopped')) return;
+    try {
+      receive({ type, at: this.deps.now(), operationId: operation.operationId, context: { ...operation.context }, ...(reason ? { reason } : {}) });
+    } catch { /* Diagnostics must never affect generation or cleanup. */ }
+  }
   private async heartbeat() {
     if (this.closed || !this.local) return;
     try {
@@ -140,27 +170,33 @@ export class ExhibitionLiveConnection {
     } catch { if (!this.closed) await this.fail('大屏与后台连接中断，已停止本次换装。'); }
   }
   private async run() {
+    const operation = this.operation('start', this.input);
+    const input = operation.input;
+    this.initialOperation = operation; this.activeOperation = operation;
     this.events.status('preparing');
     this.timer = setTimeout(() => void this.fail('换装连接超时，请检查网络后由工作人员重新开始。', `client_stage=${this.failureStage}`), 45000);
     try {
-      const mode = this.input.mode ?? 'clothx';
-      const hasReference = this.input.referenceKind !== 'none';
+      const mode = input.mode ?? 'clothx';
+      const hasReference = input.referenceKind !== 'none';
       if (!hasReference && mode !== 'free') throw new Error('仅提示词素材只支持 Free 模式，请检查素材设置。');
-      if (mode !== 'mox' && !this.input.stream?.getVideoTracks().some(track => track.readyState === 'live')) throw new Error('摄像头已断开，请重新开启。');
+      if (mode !== 'mox' && !input.stream?.getVideoTracks().some(track => track.readyState === 'live')) throw new Error('摄像头已断开，请重新开启。');
       // A prompt-only cover is for display and must never become a supplier reference.
-      const file = hasReference ? await this.deps.reference(this.input, this.controller.signal) : undefined;
+      if (hasReference) this.emitDiagnostic('reference_started', operation);
+      const file = hasReference ? await this.deps.reference(input, this.controller.signal) : undefined;
       if (this.closed) return;
+      if (hasReference) this.emitDiagnostic('reference_ready', operation);
       this.failureStage = 'create_session';
-      const local = await this.deps.create(this.input);
+      const local = await this.deps.create(input);
       this.local = local;
+      operation.context = { ...operation.context, sessionId: local.id, referenceVersion: local.referenceVersion };
       // A request may settle after end/pause/navigation; dispose its late credential.
       if (this.closed) { await this.stop(); if (!this.credentialStopped && this.stopAttemptedSession !== local.id) await this.stop(); return; }
       const meta = local.exhibition;
-      const prompt = exhibitionPromptForLook({ mode, prompt: this.input.prompt });
-      const referenceMatches = hasReference ? appUrl(local.referenceAsset ?? '') === appUrl(this.input.image)
+      const prompt = exhibitionPromptForLook({ mode, prompt: input.prompt });
+      const referenceMatches = hasReference ? appUrl(local.referenceAsset ?? '') === appUrl(input.image)
         : !local.referenceAsset && !local.refImageUrl && local.referenceVersion === 0;
-      if (local.sourceKind !== (mode === 'mox' ? 'photo' : 'camera') || !meta || (meta.mirrorId ?? 'default') !== this.input.mirrorId || meta.deviceId !== this.input.deviceId || meta.lookId !== this.input.lookId
-        || meta.sessionNumber !== this.input.sessionNumber || meta.generationNumber !== this.input.generationNumber || !referenceMatches
+      if (local.sourceKind !== (mode === 'mox' ? 'photo' : 'camera') || !meta || (meta.mirrorId ?? 'default') !== input.mirrorId || meta.deviceId !== input.deviceId || meta.lookId !== input.lookId
+        || meta.sessionNumber !== input.sessionNumber || meta.generationNumber !== input.generationNumber || !referenceMatches
         || (meta.mode ?? 'clothx') !== mode || (meta.prompt ?? (mode === 'clothx' ? prompt : '')) !== prompt)
         throw new Error('服务返回的服装或设备不匹配，请重新开始。');
       if (local.providerRegion !== undefined && !isXmaxRegion(local.providerRegion))
@@ -178,19 +214,24 @@ export class ExhibitionLiveConnection {
       let refImageUrl: string | undefined;
       if (hasReference) {
         this.failureStage = 'upload_reference';
+        this.emitDiagnostic('upload_started', operation);
         refImageUrl = await this.deps.upload(file!, local.token, this.controller.signal, providerRegion);
         if (this.closed) return;
-        this.references.set(this.referenceKey(this.input.image), Promise.resolve(refImageUrl));
+        this.emitDiagnostic('upload_ready', operation);
+        this.references.set(this.referenceKey(input.image), Promise.resolve(refImageUrl));
         this.failureStage = 'bind_reference';
-        const bound = await this.deps.bind(local.id, { deviceId: this.input.deviceId, lookId: this.input.lookId, refImageUrl }, this.controller.signal);
+        this.emitDiagnostic('bind_started', operation);
+        const bound = await this.deps.bind(local.id, { deviceId: input.deviceId, lookId: input.lookId, refImageUrl }, this.controller.signal);
         if (this.closed) return;
         if (bound.id !== local.id || bound.refImageUrl !== refImageUrl || bound.referenceVersion !== 1) throw new Error('服装参考绑定失败，请重新开始。');
         this.local = { ...local, ...bound, providerRegion };
+        operation.context = { ...operation.context, referenceVersion: bound.referenceVersion };
+        this.emitDiagnostic('bind_ready', operation);
       }
       this.events.status('connecting');
       this.failureStage = 'connect_sdk';
       if (mode !== 'mox') {
-        this.inputStream = this.deps.clone(this.input.stream!);
+        this.inputStream = this.deps.clone(input.stream!);
         this.inputStream.getVideoTracks().forEach(track => { track.onended = () => { if (!this.closed) void this.fail('摄像头已断开，已停止本次体验。'); }; });
       }
       const sdk = await this.deps.connect(mode === 'mox' ? file! : this.inputStream!, this.local, {
@@ -222,7 +263,9 @@ export class ExhibitionLiveConnection {
       if (this.remoteStream) this.events.stream(this.remoteStream);
       // autoStart is off. Exactly this one set() creates the generation after linking.
       this.failureStage = 'start_generation';
+      this.emitDiagnostic('sdk_set_started', operation);
       await sdk.set({ prompt, ...(hasReference ? { refImageUrl } : {}) });
+      this.emitDiagnostic('sdk_set_resolved', operation);
       this.failureStage = 'wait_first_frame';
       if (!this.closed && mode === 'mox') {
         if (!sdk.beginDrag || !sdk.endDrag || !sdk.sendTracks || !sdk.media?.streamSetting.width || !sdk.media.streamSetting.height) throw new Error('当前 SDK 无法启动动作交互，请更新客户端。');
@@ -232,7 +275,7 @@ export class ExhibitionLiveConnection {
         });
       }
     } catch (cause) {
-      if (!this.closed) await this.failSdk(cause, cause instanceof Error ? safeExhibitionErrorMessage(cause.message) : '换装连接失败，请重新开始。');
+      if (!this.closed) await this.failSdk(cause, cause instanceof Error ? safeExhibitionErrorMessage(cause.message) : '换装连接失败，请重新开始。', operation);
     }
   }
   /** Only call from a decoded remote video frame, never from the local preview. */
@@ -242,6 +285,7 @@ export class ExhibitionLiveConnection {
   reportFirstFrame = () => {
     if (this.closed || !this.begun || this.firstFrameSent || !this.local) return;
     this.firstFrameSent = true;
+    this.emitDiagnostic('session_first_frame', this.initialOperation);
     void deadline(this.deps.firstFrame(this.local.id, Math.max(0, this.deps.now() - this.startedAt))).then(() => {
       if (this.closed) return;
       this.firstFrameConfirmed = true; this.appliedKey = this.key;
@@ -263,6 +307,7 @@ export class ExhibitionLiveConnection {
     if (key === this.key && !retry) { await this.updating; return !this.closed && this.appliedKey === key; }
     this.input = { ...input, mirrorId: this.input.mirrorId };
     this.updateSequence++;
+    this.updateOperation = this.operation(`update-${this.updateSequence}`, this.input);
     this.events.updateError?.(''); this.events.status('preparing');
     await this.ensureUpdates();
     // A newer request may arrive after a drain resolves but before its finally callback.
@@ -274,7 +319,7 @@ export class ExhibitionLiveConnection {
     return this.updating ??= this.runUpdates().finally(() => { this.updating = undefined; });
   }
   private referenceKey(image: string) { return `${this.local?.providerRegion ?? 'global'}:${appUrl(image)}`; }
-  private uploadReference(input: LiveInput) {
+  private uploadReference(input: LiveInput, operation?: DiagnosticOperation) {
     const key = this.referenceKey(input.image);
     let upload = this.references.get(key);
     if (!upload) {
@@ -283,9 +328,13 @@ export class ExhibitionLiveConnection {
         const abort = () => controller.abort();
         this.controller.signal.addEventListener('abort', abort, { once: true });
         try {
+          if (operation) this.emitDiagnostic('reference_started', operation);
           const file = await deadline(this.deps.reference(input, controller.signal), 15_000);
           if (this.closed || !this.local) throw new Error('本次体验已结束。');
-          return await deadline(this.deps.upload(file, this.local.token, controller.signal, this.local.providerRegion), 20_000);
+          if (operation) { this.emitDiagnostic('reference_ready', operation); this.emitDiagnostic('upload_started', operation); }
+          const uploaded = await deadline(this.deps.upload(file, this.local.token, controller.signal, this.local.providerRegion), 20_000);
+          if (operation) this.emitDiagnostic('upload_ready', operation);
+          return uploaded;
         } finally { controller.abort(); this.controller.signal.removeEventListener('abort', abort); }
       })();
       this.references.set(key, upload);
@@ -296,13 +345,24 @@ export class ExhibitionLiveConnection {
     return upload;
   }
   private async warmReferences() {
-    if (this.warming || this.closed || !this.firstFrameConfirmed) return;
+    if (this.closed || !this.firstFrameConfirmed) return;
+    this.pendingWarmInput = { ...this.input, prefetchImages: this.input.prefetchImages?.slice(0, 2) };
+    if (this.warming) return;
     this.warming = true;
+    const attempted = new Set<string>();
     try {
-      for (const image of this.input.prefetchImages?.slice(0, 2) ?? []) {
-        if (this.closed) break;
-        // Preparing neighbours does not change the active generation or allocate another credential.
-        try { await this.uploadReference({ ...this.input, image, referenceKind: 'image' }); } catch { /* A foreground selection can retry an unavailable reference. */ }
+      while (this.pendingWarmInput && !this.closed) {
+        const input = this.pendingWarmInput;
+        this.pendingWarmInput = undefined;
+        for (const image of input.prefetchImages ?? []) {
+          if (this.closed || this.pendingWarmInput) break;
+          const key = this.referenceKey(image);
+          // A newer selection can replace this batch, but failed URLs get only one
+          // attempt per drain. A later foreground selection can explicitly retry.
+          if (attempted.has(key)) continue;
+          attempted.add(key);
+          try { await this.uploadReference({ ...input, image, referenceKind: 'image' }); } catch { /* Prefetch never interrupts the active generation. */ }
+        }
       }
     } finally { this.warming = false; }
   }
@@ -313,7 +373,9 @@ export class ExhibitionLiveConnection {
     if (this.closed) return;
     while (!this.closed && this.attemptedSequence < this.updateSequence) {
       const sequence = this.updateSequence;
-      const input = { ...this.input };
+      const operation = this.updateOperation!;
+      const input = operation.input;
+      this.activeOperation = operation;
       this.attemptedSequence = sequence;
       const controller = new AbortController(); this.updateController = controller;
       const stale = () => this.closed || sequence !== this.updateSequence;
@@ -321,10 +383,11 @@ export class ExhibitionLiveConnection {
         const local = this.local!;
         const hasReference = input.referenceKind !== 'none';
         if (!hasReference && input.mode !== 'free') throw new Error('仅提示词素材只支持 Free 模式，请检查素材设置。');
-        const refImageUrl = hasReference ? await this.uploadReference(input) : undefined;
+        const refImageUrl = hasReference ? await this.uploadReference(input, operation) : undefined;
         if (stale()) continue;
         const intent: ConditionInput = { deviceId: input.deviceId, lookId: input.lookId, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber,
           ...(hasReference ? { refImageUrl } : {}) };
+        this.emitDiagnostic('bind_started', operation);
         const bound = await deadline(this.deps.updateCondition!(local.id, intent, controller.signal), 12_000) as SessionData & { exhibition?: LiveSession['exhibition'] };
         const meta = bound.exhibition;
         const prompt = exhibitionPromptForLook({ mode: input.mode ?? 'clothx', prompt: input.prompt });
@@ -333,36 +396,43 @@ export class ExhibitionLiveConnection {
         if (bound.id !== local.id || bound.status !== 'active' || bound.providerSessionId !== local.providerSessionId || !referenceMatches
           || !Number.isSafeInteger(bound.referenceVersion) || bound.referenceVersion < local.referenceVersion
           || (bound.referenceVersion === local.referenceVersion && (local.exhibition.lookId !== input.lookId || local.exhibition.generationNumber !== input.generationNumber))
-          || !meta || (meta.mirrorId ?? 'default') !== this.input.mirrorId
+          || !meta || (meta.mirrorId ?? 'default') !== input.mirrorId
           || meta.deviceId !== input.deviceId || meta.lookId !== input.lookId || meta.sessionNumber !== input.sessionNumber
           || meta.generationNumber !== input.generationNumber || (meta.mode ?? 'clothx') !== (input.mode ?? 'clothx') || meta.prompt !== prompt)
           throw new Error('换装条件校验失败，请重新选择素材。');
         // Store the accepted version before set(), so a rejected set can be retried idempotently.
         this.local = { ...local, ...bound, exhibition: meta };
+        operation.context = { ...operation.context, sessionId: bound.id, referenceVersion: bound.referenceVersion };
+        this.emitDiagnostic('bind_ready', operation);
         if (stale()) continue;
         // null explicitly clears the previous reference; omission would merge and retain it in the SDK.
         // Do not time out and overlap an unresolved set: expiry/stop aborts the whole connection.
+        this.emitDiagnostic('sdk_set_started', operation);
         await this.sdk!.set({ prompt, refImageUrl: hasReference ? refImageUrl : null });
+        this.emitDiagnostic('sdk_set_resolved', operation);
         if (stale()) continue;
         await deadline(this.deps.conditionApplied!(local.id, { ...intent, referenceVersion: bound.referenceVersion }, controller.signal));
         if (stale()) continue;
+        this.emitDiagnostic('condition_committed', operation);
         this.appliedKey = liveInputKey(input);
         this.events.updateError?.(''); this.events.status('running'); this.events.refresh();
         void this.warmReferences();
       } catch (cause) {
         if (stale()) continue;
+        this.emitDiagnostic('failed', operation, 'update_error');
         const message = cause instanceof Error ? safeExhibitionErrorMessage(cause.message) : '素材切换失败，请重试。';
         // A failed upload or condition request leaves the existing RTC output and lease intact.
         this.events.updateError?.(message); this.events.status('running'); this.events.refresh();
       } finally { controller.abort(); if (this.updateController === controller) this.updateController = undefined; }
     }
   }
-  private failSdk(cause: unknown, fallbackMessage: string) {
+  private failSdk(cause: unknown, fallbackMessage: string, operation = this.activeOperation) {
     const failure = exhibitionLiveFailure(cause, fallbackMessage);
-    return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '');
+    return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '', operation);
   }
-  private async fail(message: string, diagnostic = '') {
+  private async fail(message: string, diagnostic = '', operation = this.activeOperation) {
     if (this.closed) return;
+    this.emitDiagnostic('failed', operation, 'provider_error');
     const payload = { deviceId: this.input.deviceId, sessionId: this.local?.id, lookId: this.input.lookId, sessionNumber: this.input.sessionNumber, generationNumber: this.input.generationNumber,
       message: safeExhibitionErrorMessage(diagnostic ? `${message} ${diagnostic}` : message) };
     this.events.status('error', message);
@@ -373,8 +443,11 @@ export class ExhibitionLiveConnection {
   }
   stop() {
     if (this.stopping) return this.stopping;
-    this.closed = true; this.controller.abort();
-    this.updateController?.abort(); this.references.clear();
+    const firstStop = !this.closed;
+    this.closed = true;
+    if (firstStop) this.emitDiagnostic('stopped', this.activeOperation, 'stopped');
+    this.controller.abort();
+    this.updateController?.abort(); this.references.clear(); this.pendingWarmInput = undefined;
     clearTimeout(this.timer); clearTimeout(this.heartbeatTimer); clearTimeout(this.expiryTimer);
     this.inputStream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     this.inputStream = undefined; this.events.stream(null); this.events.interaction?.(null); this.events.presentation?.(null);
@@ -415,7 +488,9 @@ function cameraError(cause: unknown) {
   }
   return cause instanceof Error ? cause.message : '摄像头开启失败，请检查设备后重试。';
 }
-export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean }) {
+export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false, onDiagnostic }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean; onDiagnostic?: (event: DiagnosticEventInput) => void }) {
+  const diagnosticCallback = useRef(onDiagnostic);
+  diagnosticCallback.current = onDiagnostic;
   // Per mounted page instance: duplicate tabs must not inherit another screen's lease.
   const [deviceId] = useState(() => `screen-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
@@ -522,6 +597,11 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     return () => clearInterval(timer);
   }, [refreshStatus]);
   useEffect(() => {
+    if (!active || !secure || state?.providerMode !== 'xmax' || !liveStatus?.configured
+      || !isXmaxRegion(liveStatus.providerRegion)) return;
+    return prepareExhibitionEntry(liveStatus.providerRegion);
+  }, [identity, active, secure, state?.providerMode, liveStatus?.configured, liveStatus?.providerRegion]);
+  useEffect(() => {
     if (!active || (previousMode.current === 'xmax' && state?.providerMode !== 'xmax') || previousExperience.current !== state?.experienceMode) stopCamera();
     previousMode.current = state?.providerMode; previousExperience.current = state?.experienceMode;
   }, [active, state?.providerMode, state?.experienceMode, stopCamera]);
@@ -553,13 +633,17 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     const occupied = !!currentState.live && currentState.live.deviceId !== deviceId;
     const existing = connection.current;
     const look = currentState.looks.find(item => item.id === currentState.selectedLookId);
-    const selectedIndex = currentState.enabledLookIds.indexOf(currentState.selectedLookId ?? '');
-    const neighbourIds = [1, 2].map(offset => currentState.enabledLookIds[(Math.max(selectedIndex, 0) + offset) % currentState.enabledLookIds.length]);
+    const modeLooks = currentState.enabledLookIds.flatMap(id => {
+      const item = currentState.looks.find(candidate => candidate.id === id);
+      return item && (item.mode ?? 'clothx') === (look?.mode ?? 'clothx') ? [item] : [];
+    });
+    const selectedIndex = modeLooks.findIndex(item => item.id === look?.id);
+    const neighbours = [...modeLooks.slice(selectedIndex + 1), ...modeLooks.slice(0, Math.max(selectedIndex, 0))]
+      .filter(item => item.referenceKind !== 'none' && item.id !== look?.id).slice(0, 2);
     const input: LiveInput | null = look ? { mirrorId: identity.mirrorId, terminalId: terminal?.terminalId, terminalToken: terminal?.token, deviceId, lookId: look.id,
       sessionNumber: currentState.sessionNumber, generationNumber: currentState.generationNumber, expectedRevision: currentState.revision,
       image: look.image, referenceKind: look.referenceKind, mode: look.mode ?? 'clothx', prompt: look.prompt, stream: cameraStream ?? undefined,
-      prefetchImages: neighbourIds.map(id => currentState.looks.find(item => item.id === id))
-        .filter(item => item && (item.mode ?? 'clothx') === (look.mode ?? 'clothx') && item.referenceKind !== 'none' && item.id !== look.id).map(item => item!.image),
+      prefetchImages: neighbours.map(item => item.image),
     } : null;
     const reusable = !!input && !!existing?.canReuse(input);
     if (existing && (!wantsLive || occupied || (existing.key !== desiredKey && !reusable) || (!mox && !cameraStream))) {
@@ -597,6 +681,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       interaction: value => { if (mounted.current && current.current.identity === identity && connection.current === next) setInteraction(value); },
       presentation: value => { if (mounted.current && current.current.identity === identity && connection.current === next) setPresentation(value); },
       refresh: () => { if (mounted.current && current.current.identity === identity) { void current.current.refresh(); void refreshStatus(); } },
+      get diagnostic() { return diagnosticCallback.current ? (event: DiagnosticEventInput) => diagnosticCallback.current?.(event) : undefined; },
     });
     connection.current = next; void next.start();
   }, [identity, active, selectionPending, state?.phase, state?.providerMode, state?.experienceMode, state?.selectedLookId, state?.sessionNumber, state?.generationNumber, state?.live?.deviceId, state?.live?.sessionId, cameraStream, deviceId, refreshStatus, retryEpoch, terminal?.terminalId, terminal?.token]);

@@ -24,12 +24,13 @@ let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(async () => { await host?.close(); host = undefined; await flushReact(); vi.unstubAllGlobals(); });
 
-async function fixture(initial = state(), renderKiosk = false) {
+async function fixture(initial = state(), renderKiosk = false, initialSelectionPending = false) {
   host = await createReactHost();
   const media = { getUserMedia: vi.fn(), enumerateDevices: vi.fn(async () => []) };
   vi.stubGlobal('navigator', { mediaDevices: media });
   vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob(['fixture'], { type: 'image/png' }))));
   let snapshot = initial;
+  let selectionPending = initialSelectionPending;
   let result!: ExhibitionLiveController;
   let update!: (next: ExhibitionState) => void;
   const callbacks: any[] = [];
@@ -57,14 +58,27 @@ async function fixture(initial = state(), renderKiosk = false) {
   function Harness() {
     const [current, setCurrent] = useState(snapshot);
     update = next => { snapshot = next; flushSync(() => setCurrent(next)); };
-    result = useExhibitionLive({ state: current, active: true, refresh });
+    result = useExhibitionLive({ state: current, active: true, refresh, selectionPending });
     return renderKiosk ? createElement(Kiosk, { state: current, live: result, send }) : null;
   }
   await host.render(createElement(Harness)); await flushReact();
-  return { get live() { return result; }, update: (next: ExhibitionState) => update(next), sdk, connect, create, callbacks, media, refresh, send, upload };
+  return { get live() { return result; }, update: (next: ExhibitionState) => update(next),
+    updateSelection: (next: ExhibitionState, pending: boolean) => { selectionPending = pending; update(next); }, sdk, connect, create, callbacks, media, refresh, send, upload };
 }
 
 describe('live hook effects for MoX and mode changes', () => {
+  it('allocates only the final generation after continuous selections finish', async () => {
+    const initial = state();
+    const f = await fixture(initial, false, true);
+    expect(f.create).not.toHaveBeenCalled();
+    await act(async () => { f.updateSelection({ ...initial, revision: 5, generationNumber: 2 }, true); }); await flushReact();
+    expect(f.create).not.toHaveBeenCalled();
+    await act(async () => { f.updateSelection({ ...initial, revision: 6, generationNumber: 3 }, false); }); await flushReact();
+    expect(f.create).toHaveBeenCalledOnce();
+    expect(f.create).toHaveBeenCalledWith(expect.objectContaining({ generationNumber: 3, expectedRevision: 6 }));
+    expect(f.sdk.set).toHaveBeenCalledOnce();
+  });
+
   it('passes a prompt-only Free look through camera connection without uploading its display cover', async () => {
     const initial = state('free');
     initial.looks[0] = { ...initial.looks[0], prompt: '保持动作，背景变成童话森林', referenceKind: 'none' };

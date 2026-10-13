@@ -94,7 +94,7 @@
 | `categories`, `tags` | 平面分类和标签 |
 | `sessionNumber`, `generationNumber` | 体验轮次与生成代数 |
 | `generationReadyAt`, `autoSwitchAt` | 服务器截止时间，未启用时为 null |
-| `settings` | 上传限制、自动返回、轮播和皮肤设置 |
+| `settings` | 上传限制、自动返回、轮播、皮肤和手势识别设置 |
 | `live` | 当前实时占用信息，无会话时为 null |
 | `logs` | 最近 40 条日志，最新在前 |
 
@@ -156,6 +156,26 @@ if (!response.ok) throw new Error(next.message);
 | `autoReturnSeconds` | 0 关闭，或 15–600 整数秒 |
 | `uiSkinPreset` | `crystal` / `brand`，选择后替换自定义皮肤 |
 | `uploadLimits` | 下面的完整限制对象 |
+| `gestureRecognition` | 下面的完整识别对象；仅待机/选材且 `live=null` 时可改 |
+
+手势识别默认值（`configure` 更新此项时必须提交完整对象）：
+
+```json
+{
+  "gestures": ["open_palm"],
+  "minHandDetectionConfidence": 0.35,
+  "minHandPresenceConfidence": 0.35,
+  "minTrackingConfidence": 0.5,
+  "palmConfirmMs": 300,
+  "palmReleaseMs": 500,
+  "maxFps": 15,
+  "inputLongEdge": 720
+}
+```
+
+`gestures` 可选 `open_palm`、`wave`，支持多选，不允许重复；空数组关闭识别。三项置信度为 0.1–0.9；确认时间为 150–1000 整数毫秒；收手间隔为 300–1500 整数毫秒；帧率为 5–30 整数；输入长边为 480/720/960。非法配置返回 `EXHIBITION_INVALID_SETTINGS`，不会部分写入。已有设备缺少此字段时补入默认值；复制设备设置包含此项。配置范围由 `shared/exhibitionGestures.ts` 统一校验。
+
+手掌允许自然五指并拢，默认连续可见约 300 ms 确认，持续展示只触发一次；收手后才能再次展掌。仅勾选挥手时静止展示手掌不触发。镜端复用摄像头，只重建需要更新模型阈值的识别 Worker，不会因此启动新的 XMAX 生成。
 
 默认上传限制：
 

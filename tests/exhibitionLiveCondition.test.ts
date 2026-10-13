@@ -4,7 +4,7 @@ import { exhibitionPromptForLook } from '../shared/exhibition';
 
 type Input = Parameters<ExhibitionLiveDeps['create']>[0];
 const connections: ExhibitionLiveConnection[] = [];
-function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
+function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function flush() { for (let index = 0; index < 30; index++) await Promise.resolve(); }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
 afterEach(async () => { for (const connection of connections.splice(0)) await connection.stop(); vi.clearAllTimers(); vi.useRealTimers(); });
@@ -84,6 +84,42 @@ describe('same-session exhibition condition changes', () => {
     const updating = f.controller.update(f.next('second')); await flush(); expect(f.deps.upload).toHaveBeenCalledTimes(2);
     pending.resolve('https://reference.fixture/second.png'); expect(await updating).toBe(true);
     expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a busy prefetch batch with the latest committed selection neighbours', async () => {
+    const f = fixture('clothx', ['/assets/second.png', '/assets/obsolete.png']); const pending = deferred<string>();
+    f.deps.upload.mockImplementationOnce(async file => `https://reference.fixture/${file.name}`).mockImplementationOnce(() => pending.promise);
+    await f.ready();
+    expect(await f.controller.update({ ...f.next('third'), prefetchImages: ['/assets/fourth.png', '/assets/fifth.png'] })).toBe(true);
+    pending.resolve('https://reference.fixture/second.png'); await flush();
+    expect(f.deps.upload.mock.calls.map(([file]) => file.name)).toEqual(['first.png', 'second.png', 'third.png', 'fourth.png', 'fifth.png']);
+    expect(f.sdk.set).toHaveBeenCalledTimes(2); expect(f.deps.create).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry a failed URL in the pending prefetch drain but allows a later foreground retry', async () => {
+    const f = fixture('clothx', ['/assets/second.png']); const pending = deferred<string>();
+    f.deps.upload.mockImplementation(async file => {
+      if (file.name === 'second.png') return pending.promise;
+      if (file.name === 'fourth.png') throw new Error('Unavailable fixture');
+      return `https://reference.fixture/${file.name}`;
+    });
+    await f.ready();
+    expect(await f.controller.update({ ...f.next('third'), prefetchImages: ['/assets/second.png', '/assets/fourth.png'] })).toBe(true);
+    pending.reject(new Error('Unavailable fixture')); await flush(); await vi.advanceTimersByTimeAsync(1000);
+    expect(f.deps.upload.mock.calls.map(([file]) => file.name)).toEqual(['first.png', 'second.png', 'third.png', 'fourth.png']);
+    expect(f.events.updateError).not.toHaveBeenCalledWith(expect.stringContaining('Unavailable'));
+    f.deps.upload.mockImplementation(async file => `https://reference.fixture/${file.name}`);
+    expect(await f.controller.update({ ...f.next('second', 3), prefetchImages: [] })).toBe(true);
+    expect(f.deps.upload.mock.calls.map(([file]) => file.name)).toEqual(['first.png', 'second.png', 'third.png', 'fourth.png', 'second.png']);
+  });
+
+  it('drops queued neighbours when stopped during an in-flight prefetch', async () => {
+    const f = fixture('clothx', ['/assets/second.png', '/assets/obsolete.png']); const pending = deferred<string>();
+    f.deps.upload.mockImplementationOnce(async file => `https://reference.fixture/${file.name}`).mockImplementationOnce(() => pending.promise);
+    await f.ready();
+    expect(await f.controller.update({ ...f.next('third'), prefetchImages: ['/assets/fourth.png'] })).toBe(true);
+    await f.controller.stop(); pending.resolve('https://reference.fixture/second.png'); await flush();
+    expect(f.deps.upload.mock.calls.map(([file]) => file.name)).toEqual(['first.png', 'second.png', 'third.png']);
   });
 
   it('explicitly clears the previous image when Free mode changes to a prompt-only material', async () => {

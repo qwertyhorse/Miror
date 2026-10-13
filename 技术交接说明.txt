@@ -48,3 +48,7 @@ Windows：附启动展会.cmd，本次未做 Windows 实机验收。
 本次源码包含挥手切换素材、同一实时会话内换装、失败保留本地取景与主动重试；当前验收记录见 docs/verification-20261013.json。
 MediaPipe 挥手识别已接入本地 Worker，复用当前摄像头；public/assets/exhibition-gestures 与 body-scan/wasm 资源需随前端一同提供。现场识别参数及双摄像头路由仍需实机联调。
 本次同步前后端源码到 GitHub，未发布或部署站点。
+
+手势配置更新
+默认仅手掌识别，五指自然并拢可用，确认时间 300 ms。后台设备设置支持手掌/左右挥手多选及 7 项识别参数；全部取消关闭识别，恢复默认后需保存。镜端 URL 加 diagnostics=1 可打开联调诊断。
+本轮源码及验证：docs/verification-gesture-settings-20261013.json。真人命中率、重复率、逐套衣服可见和两小时稳定性仍未验收。

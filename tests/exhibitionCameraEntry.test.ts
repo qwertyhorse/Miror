@@ -7,10 +7,14 @@ import type { ExhibitionState } from '../shared/exhibition';
 import { createReactHost, flushReact } from './support/reactHost';
 import { scopedStorageKey } from '../src/versionScope';
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), registry: vi.fn(), terminal: vi.fn() }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), registry: vi.fn(), terminal: vi.fn(), prepare: vi.fn(), release: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
 vi.mock('../src/exhibition/useMirrors', () => ({ useMirrors: mocks.registry }));
 vi.mock('../src/exhibition/useTerminalBinding', () => ({ useTerminalBinding: mocks.terminal }));
+vi.mock('../src/exhibition/sdkPreparation', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/exhibition/sdkPreparation')>(),
+  prepareExhibitionEntry: mocks.prepare,
+}));
 
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -24,7 +28,7 @@ const snapshot = (overrides: Partial<ExhibitionState> = {}): ExhibitionState => 
   ...overrides,
 });
 
-async function cameraFixture(initial = snapshot(), options: { active?: boolean; denied?: boolean; pending?: Promise<MediaStream>; strict?: boolean; preference?: unknown } = {}) {
+async function cameraFixture(initial = snapshot(), options: { active?: boolean; denied?: boolean; pending?: Promise<MediaStream>; strict?: boolean; preference?: unknown; region?: string; configured?: boolean } = {}) {
   host = await createReactHost();
   const getItem = vi.fn(() => options.preference === undefined ? null : JSON.stringify(options.preference));
   vi.stubGlobal('localStorage', { getItem });
@@ -32,7 +36,8 @@ async function cameraFixture(initial = snapshot(), options: { active?: boolean; 
   const stream = { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream;
   const getUserMedia = vi.fn((_constraints: MediaStreamConstraints) => options.pending ?? (options.denied ? Promise.reject(new DOMException('denied', 'NotAllowedError')) : Promise.resolve(stream)));
   vi.stubGlobal('navigator', { mediaDevices: { getUserMedia, enumerateDevices: vi.fn(async () => []) } });
-  mocks.api.mockResolvedValue({ configured: true, remainingCredits: 0, perSessionLimit: 30 });
+  mocks.api.mockResolvedValue({ configured: options.configured ?? true, providerRegion: options.region, remainingCredits: 0, perSessionLimit: 30 });
+  mocks.prepare.mockReturnValue(mocks.release);
   const refresh = vi.fn();
   let live!: ExhibitionLiveController;
   let update!: (state: ExhibitionState, active?: boolean) => void;
@@ -47,6 +52,20 @@ async function cameraFixture(initial = snapshot(), options: { active?: boolean; 
 }
 
 describe('default mirror camera entry', () => {
+  it('prepares the configured SDK during local preview without allocating or uploading, then releases on leaving', async () => {
+    const f = await cameraFixture(snapshot(), { region: 'cn' });
+    expect(mocks.prepare).toHaveBeenCalledExactlyOnceWith('cn');
+    expect(mocks.api.mock.calls.every(([path]) => String(path).endsWith('/live/status'))).toBe(true);
+    await act(async () => f.update(snapshot({ revision: 2 }))); await flushReact();
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    await act(async () => f.update(snapshot(), false)); await flushReact();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+  it.each([
+    { active: false, region: 'cn' }, { region: 'cn', configured: false }, { region: 'bad' }, {},
+  ])('does not speculate about an inactive or unconfigured SDK: %j', async options => {
+    await cameraFixture(snapshot(), options); expect(mocks.prepare).not.toHaveBeenCalled();
+  });
   it('links directly to the same host camera origin and the selected mirror', () => {
     const url = new URL(exhibitionCameraUrl('east/2', 'http://192.168.63.102:10200/v1.1/exhibition/control'));
     expect(url.origin).toBe('https://192.168.63.102:10202');
@@ -60,6 +79,11 @@ describe('default mirror camera entry', () => {
       expect(defaultMirrorCameraEntry(`http://xuminghong.local:10200${path}`)).toBeNull();
     }
     expect(defaultMirrorCameraEntry('https://xuminghong.local:10202/v1.1/exhibition/screen?mirror=east')).toBeNull();
+  });
+
+  it('preserves the diagnostics flag through the secure camera redirect', () => {
+    expect(defaultMirrorCameraEntry('http://xuminghong.local:10200/v1.1/exhibition/screen?mirror=default&diagnostics=1'))
+      .toBe('https://xuminghong.local:10202/v1.1/exhibition/screen?mirror=default&diagnostics=1');
   });
 
   it('replaces the HTTP URL before mounting any mirror or terminal clients', async () => {

@@ -1,5 +1,5 @@
-export type ExhibitionGesture = 'wave' | 'swipe_left' | 'swipe_right';
-export type ExhibitionGestureMode = 'wave' | 'swipe' | 'both';
+export type ExhibitionGesture = 'wave' | 'swipe_left' | 'swipe_right' | 'raise_hand' | 'open_palm';
+export type ExhibitionGestureMode = 'wave' | 'swipe' | 'both' | 'raise' | 'palm_wave';
 
 export interface ExhibitionGestureLandmark {
   x: number;
@@ -25,10 +25,12 @@ interface Sample {
 const HISTORY_MS = 1_800;
 const MAX_FRAME_GAP_MS = 320;
 const COOLDOWN_MS = 1_000;
-const RELEASE_MS = 180;
+const RELEASE_MS = 450;
 const REARM_STILL_MS = 300;
 const REARM_RADIUS = 0.018;
 const TURN_DISTANCE = 0.055;
+const RAISE_HISTORY_MS = 900;
+const RAISE_MIN_MS = 120;
 
 function distance(a: ExhibitionGestureLandmark, b: ExhibitionGestureLandmark): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -63,7 +65,10 @@ function openPalmSample(hand: ExhibitionGestureHand, time: number): Sample | nul
 
 /** Coordinates follow the supplied landmarks. Mirror x before update when the preview is mirrored. */
 export class ExhibitionGestureDetector {
+  constructor(private readonly options: { waveReversals?: 1 | 2 } = {}) {}
   private samples: Sample[] = [];
+  private raiseSamples: Sample[] = [];
+  private raisedAt: Sample | null = null;
   private previous: Sample | null = null;
   private previousTime: number | null = null;
   private mode: ExhibitionGestureMode | null = null;
@@ -72,8 +77,12 @@ export class ExhibitionGestureDetector {
   private releaseSince: number | null = null;
   private stillAnchor: Sample | null = null;
 
+  /** Preparation only: a raised hand never emits a gesture or consumes its cooldown. */
+  get handRaised(): boolean { return this.raisedAt !== null; }
+
   reset(): void {
     this.clearMotion();
+    this.clearRaise();
     this.previousTime = null;
     this.mode = null;
     this.cooldownUntil = 0;
@@ -83,6 +92,8 @@ export class ExhibitionGestureDetector {
   }
 
   update(hand: ExhibitionGestureHand | null, timestampMs: number, mode: ExhibitionGestureMode = 'both'): ExhibitionGesture | null {
+    // Body-relative raises use ExhibitionRaiseGestureDetector, never the palm trajectory rules.
+    if (mode === 'raise' || mode === 'palm_wave') { this.reset(); return null; }
     if (!Number.isFinite(timestampMs)) return null;
     if (this.previousTime !== null && timestampMs <= this.previousTime) {
       if (timestampMs < this.previousTime) this.reset();
@@ -91,29 +102,45 @@ export class ExhibitionGestureDetector {
     this.previousTime = timestampMs;
     if (this.mode !== mode) {
       this.clearMotion();
+      this.clearRaise();
       this.mode = mode;
     }
 
     const sample = hand ? openPalmSample(hand, timestampMs) : null;
     if (!sample) {
       this.clearMotion();
+      this.raiseSamples = [];
       this.stillAnchor = null;
       this.releaseSince ??= timestampMs;
-      if (timestampMs - this.releaseSince >= RELEASE_MS) this.latched = false;
+      if (timestampMs - this.releaseSince >= RELEASE_MS) {
+        this.latched = false;
+        this.clearRaise();
+      }
       return null;
     }
-    if (this.releaseSince !== null && timestampMs - this.releaseSince >= RELEASE_MS) this.latched = false;
+    if (this.releaseSince !== null && timestampMs - this.releaseSince >= RELEASE_MS) {
+      this.latched = false;
+      this.clearRaise();
+    }
     this.releaseSince = null;
 
-    if (this.previous && (sample.time - this.previous.time > MAX_FRAME_GAP_MS
-      || (sample.handedness && this.previous.handedness && sample.handedness !== this.previous.handedness)
-      || motionDistance(sample, this.previous) > Math.max(0.22, (sample.time - this.previous.time) * 0.0015)
-      || sample.palmSize / this.previous.palmSize > 1.8
-      || this.previous.palmSize / sample.palmSize > 1.8)) {
-      this.clearMotion();
-      this.stillAnchor = null;
+    if (this.raisedAt?.handedness && sample.handedness && this.raisedAt.handedness !== sample.handedness) this.clearRaise();
+    if (this.previous) {
+      const gap = sample.time - this.previous.time;
+      const trackingChanged = !!(sample.handedness && this.previous.handedness && sample.handedness !== this.previous.handedness)
+        || motionDistance(sample, this.previous) > Math.max(0.22, gap * 0.0015)
+        || sample.palmSize / this.previous.palmSize > 1.8
+        || this.previous.palmSize / sample.palmSize > 1.8;
+      if (gap > MAX_FRAME_GAP_MS || trackingChanged) {
+        this.clearMotion();
+        this.raiseSamples = [];
+        // A brief capture gap breaks trajectories, but not a confirmed raised hand.
+        if (gap > RAISE_HISTORY_MS || trackingChanged) this.clearRaise();
+        this.stillAnchor = null;
+      }
     }
     this.previous = sample;
+    this.observeRaise(sample);
 
     // A long, uninterrupted wave is one action even after its cooldown expires.
     if (this.latched) {
@@ -145,6 +172,27 @@ export class ExhibitionGestureDetector {
   private clearMotion(): void {
     this.samples = [];
     this.previous = null;
+  }
+
+  private clearRaise(): void {
+    this.raiseSamples = [];
+    this.raisedAt = null;
+  }
+
+  private observeRaise(sample: Sample): void {
+    const distance = Math.max(0.04, sample.palmSize * 0.8);
+    if (this.raisedAt && sample.y - this.raisedAt.y >= distance) this.clearRaise();
+    else if (this.raisedAt && sample.y < this.raisedAt.y) this.raisedAt = sample;
+    this.raiseSamples.push(sample);
+    this.raiseSamples = this.raiseSamples.filter(point => sample.time - point.time <= RAISE_HISTORY_MS);
+    const anchor = this.raiseSamples.reduce((lowest, point) => point.y > lowest.y ? point : lowest, sample);
+    if (sample.time - anchor.time < RAISE_MIN_MS || anchor.y - sample.y < distance
+      || Math.abs(sample.x - anchor.x) > Math.max(0.06, sample.palmSize)) return;
+    this.raisedAt = sample;
+    this.raiseSamples = [sample];
+    // Discard the upward segment so it cannot delay the next horizontal wave.
+    // Keep the existing latch and cooldown: another lift is still the same action.
+    this.samples = [];
   }
 
   private detect(mode: ExhibitionGestureMode): ExhibitionGesture | null {
@@ -187,8 +235,9 @@ export class ExhibitionGestureDetector {
       }
     }
     const travelled = completedDistance + Math.abs(extreme - pivot);
-    if (wave && reversals >= 2 && xRange >= Math.max(0.045, palmSize * 0.9)
-      && travelled >= Math.max(0.11, palmSize * 2.25)) return 'wave';
+    const requiredReversals = this.options.waveReversals ?? 2;
+    if (wave && reversals >= requiredReversals && xRange >= Math.max(0.045, palmSize * 0.9)
+      && travelled >= Math.max(0.11, palmSize * (requiredReversals === 1 ? 1.7 : 2.25))) return 'wave';
 
     // The live screen uses a single mode. A longer pause is required if both are enabled.
     const stillMs = mode === 'both' ? 650 : 300;

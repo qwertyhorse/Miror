@@ -6,6 +6,7 @@ import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECO
 import { ApiError, type SessionRecord } from './types.ts';
 import type { TryOnService } from './service.ts';
 import { ExhibitionSkinStore } from './exhibitionSkin.ts';
+import { isExhibitionGestureSettings, resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
 
 const GENERATION_DELAY_MS = 2_200;
 const HEARTBEAT_TIMEOUT_MS = 15_000;
@@ -97,6 +98,8 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     if (state.settings.autoSwitchSeconds === undefined) state.settings.autoSwitchSeconds = EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS;
     if (state.settings.uiSkinPreset === undefined) state.settings.uiSkinPreset = 'crystal';
     if (state.settings.uiSkin === undefined) state.settings.uiSkin = null;
+    // Repair only this optional field, preserving an older mirror's catalog and settings.
+    state.settings.gestureRecognition = resolveExhibitionGestureSettings(state.settings.gestureRecognition);
   }
   if (isRecord(state.live) && state.live.generationNumber === undefined) state.live.generationNumber = state.generationNumber;
   try {
@@ -171,7 +174,7 @@ export class ExhibitionService {
         revision: 0, phase: 'select', experienceMode: 'clothx', selectedLookId: 'commute', displayedLookId: null,
         enabledLookIds: [...EXHIBITION_LOOK_IDS], looks: structuredClone(SAMPLE_LOOKS), categories: ['通勤', '休闲', '礼服'], tags: ['简约', '日常', '优雅'],
         sessionNumber: 0, generationNumber: 0, updatedAt: time, generationReadyAt: null, autoSwitchAt: null,
-        settings: { autoReturnSeconds: 90, uploadLimits: { ...DEFAULT_LIMITS }, switchMode: 'manual', autoSwitchSeconds: EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, uiSkinPreset: 'crystal', uiSkin: null }, providerMode: 'demo', live: null, logs: [],
+        settings: { autoReturnSeconds: 90, uploadLimits: { ...DEFAULT_LIMITS }, switchMode: 'manual', autoSwitchSeconds: EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, uiSkinPreset: 'crystal', uiSkin: null, gestureRecognition: resolveExhibitionGestureSettings() }, providerMode: 'demo', live: null, logs: [],
       }, lastCommandAt: time, pausedPhase: null, pausedRemainingMs: 0,
     };
     let loaded: unknown;
@@ -758,9 +761,14 @@ export class ExhibitionService {
         message = '素材顺序已保存，大屏选择和自动换装按此顺序播放。'; break;
       }
       case 'configure': {
-        const otherSettings = input.enabledLookIds !== undefined || input.autoReturnSeconds !== undefined || input.uploadLimits !== undefined || input.providerMode !== undefined || input.experienceMode !== undefined || input.uiSkinPreset !== undefined;
+        const otherSettings = input.enabledLookIds !== undefined || input.autoReturnSeconds !== undefined || input.uploadLimits !== undefined || input.providerMode !== undefined || input.experienceMode !== undefined || input.uiSkinPreset !== undefined || input.gestureRecognition !== undefined;
         if (otherSettings) requirePhase('select', 'idle');
         if (!otherSettings && input.switchMode === undefined && input.autoSwitchSeconds === undefined) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请提供要更新的展会设置。');
+        if (input.gestureRecognition !== undefined) {
+          if (!isExhibitionGestureSettings(input.gestureRecognition)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '手势识别设置无效，请检查所选手势和参数范围。');
+          if (state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再修改手势识别设置。', 409);
+          state.settings.gestureRecognition = resolveExhibitionGestureSettings(input.gestureRecognition);
+        }
         if (input.switchMode !== undefined) {
           if (!isSwitchMode(input.switchMode)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请选择手动换装或自动换装。');
           if (state.settings.switchMode !== input.switchMode) state.autoSwitchAt = null;

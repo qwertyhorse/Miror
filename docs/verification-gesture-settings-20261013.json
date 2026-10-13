@@ -1,0 +1,85 @@
+{
+  "verifiedAt": "2026-10-13T15:56:07.602751+00:00",
+  "scope": "V1.1 palm recognition, diagnostics, per-mirror gesture choices and tuning",
+  "baseCommit": "f2f4f8918266eb2a442e9a7f6aa895c00d3d4e11",
+  "defaults": {
+    "gestures": [
+      "open_palm"
+    ],
+    "minHandDetectionConfidence": 0.35,
+    "minHandPresenceConfidence": 0.35,
+    "minTrackingConfidence": 0.5,
+    "palmConfirmMs": 300,
+    "palmReleaseMs": 500,
+    "maxFps": 15,
+    "inputLongEdge": 720
+  },
+  "unitTests": {
+    "passed": true,
+    "tests": 1235,
+    "failed": 0,
+    "files": 66
+  },
+  "build": {
+    "passed": true,
+    "frontendTypecheck": true,
+    "backendTypecheck": true
+  },
+  "runtimeTests": {
+    "passed": true,
+    "tests": 4
+  },
+  "packageSmoke": {
+    "passed": true,
+    "temporaryListenersOnly": true,
+    "providerCalls": 0,
+    "importsChecked": 133,
+    "httpPorts": [
+      10200,
+      10201,
+      10601
+    ],
+    "deepLinks": 3,
+    "bundleAssets": 13,
+    "materialAssets": 99,
+    "securityChecks": 10,
+    "durationMs": 623
+  },
+  "browserChecks": {
+    "existingScenarios": 7,
+    "settingsChecks": 9,
+    "passed": true,
+    "isolatedApi": true,
+    "fakeCamera": true,
+    "realXmaxCalls": 0,
+    "getUserMediaCallsDuringSettingsChanges": 1,
+    "cameraStopCallsDuringSettingsChanges": 0
+  },
+  "localPreview": {
+    "verified": true,
+    "origins": [
+      "http://xuminghong.local:10200",
+      "http://xuminghong.local:10601",
+      "https://xuminghong.local:10202"
+    ],
+    "defaultGestureAndParametersVerified": true,
+    "rollbackSavedLocally": true
+  },
+  "exclusions": [
+    "runtime data",
+    "credentials",
+    "session logs",
+    "personal images and videos",
+    "TLS private keys",
+    "node_modules",
+    "dist",
+    "V1.0",
+    "local test evidence and rollback builds"
+  ],
+  "limitations": [
+    "Human gesture accuracy and false-trigger rate not accepted",
+    "Per-outfit visible cloud result not accepted",
+    "Two-hour stability and exhibition installation not accepted",
+    "No public site deployment"
+  ]
+}

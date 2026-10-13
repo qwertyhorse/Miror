@@ -25,14 +25,14 @@ function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
 function track() { const value = { readyState: 'live', onended: null, getSettings: () => ({ deviceId: 'camera-fixture' }), clone: () => track(),
   stop: vi.fn(() => { value.readyState = 'ended'; }) }; return value; }
 class FixtureStream { constructor(private tracks: ReturnType<typeof track>[]) {} getTracks() { return this.tracks; } getVideoTracks() { return this.tracks; } }
-async function fixture() {
+async function fixture(initialState = snapshot()) {
   host = await createReactHost(); vi.stubGlobal('MediaStream', FixtureStream); vi.stubGlobal('localStorage', { getItem: () => null });
   const cameraTrack = track(); const camera = new FixtureStream([cameraTrack]) as unknown as MediaStream;
   const output = new FixtureStream([track()]) as unknown as MediaStream;
   const getUserMedia = vi.fn(async () => camera); vi.stubGlobal('navigator', { mediaDevices: { getUserMedia, enumerateDevices: async () => [] } });
   vi.stubGlobal('fetch', vi.fn(async () => new Response('reference', { headers: { 'Content-Type': 'image/png' } })));
   mocks.connect.mockImplementation(async (_stream, options: Parameters<ExhibitionLiveDeps['connect']>[2]) => { options.onRemoteStream(output); return mocks.sdk; });
-  let value = { state: snapshot(), active: true, selectionPending: false };
+  let value = { state: initialState, active: true, selectionPending: false };
   let live!: ExhibitionLiveController; let update!: (state: ExhibitionState, selectionPending?: boolean) => void;
   let record: any;
   mocks.api.mockImplementation(async (path: string, _method?: string, input?: Record<string, any>) => {
@@ -66,13 +66,37 @@ async function fixture() {
   await host.render(createElement(Harness)); await flushReact();
   await act(async () => live.reportFirstFrame(output)); await flushReact();
   const lease = { deviceId: live.deviceId, generationNumber: 1, sessionId: 'same-session', lookId: 'first', status: 'running', heartbeatAt: Date.now(), firstFrameMs: 100 } as ExhibitionState['live'];
-  await act(async () => update(snapshot({ phase: 'showcase', displayedLookId: 'first', live: lease, revision: 2 }))); await flushReact();
+  await act(async () => update({ ...initialState, phase: 'showcase', displayedLookId: 'first', live: lease, revision: 2 })); await flushReact();
   return { get live() { return live; }, update, camera, output, cameraTrack, getUserMedia, lease,
     allocations: () => mocks.api.mock.calls.filter(([path]) => String(path).endsWith('/live/session')).length,
     calls: (suffix: string) => mocks.api.mock.calls.filter(([path]) => String(path).endsWith(suffix)) };
 }
 
 describe('exhibition hook preserves generated output while the selected outfit changes', () => {
+  it.each([
+    ['first', 'free-fixture', 'mox-fixture', 'second', 'third'],
+    ['second', 'free-fixture', 'third', 'mox-fixture', 'first'],
+  ])('prefetches the next two same-mode enabled images in catalog order %j', async (...enabledLookIds) => {
+    const state = snapshot();
+    state.looks.push({ ...state.looks[0], id: 'free-fixture', mode: 'free', image: '/assets/free.png' },
+      { ...state.looks[0], id: 'mox-fixture', mode: 'mox', image: '/assets/mox.png' });
+    state.enabledLookIds = enabledLookIds;
+    await fixture(state);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringMatching(/\/assets\/first\.png$/), expect.stringMatching(/\/assets\/second\.png$/), expect.stringMatching(/\/assets\/third\.png$/),
+    ]);
+    expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(3); expect(mocks.createXmaxClient).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not duplicate the only eligible neighbouring reference or upload prompt-only materials', async () => {
+    const state = snapshot(); state.looks[1].referenceKind = 'none';
+    await fixture(state);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringMatching(/\/assets\/first\.png$/), expect.stringMatching(/\/assets\/third\.png$/),
+    ]);
+    expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the camera, remote stream, SDK and credential while the server still displays the preceding outfit', async () => {
     const f = await fixture(); expect(f.live.outputStream).toBe(f.output);
     await act(async () => f.update(snapshot({ phase: 'generating', generationNumber: 2, selectedLookId: 'second', displayedLookId: 'first', live: f.lease, revision: 3 })));

@@ -7,7 +7,7 @@ const sdkMocks = vi.hoisted(() => {
     stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const makeRegion = (region: string) => {
     const uploadAndCheckImage = vi.fn(async () => ({ url: `https://${region}.fixture.test/reference.png` }));
-    const connect = vi.fn(async () => sdk);
+    const connect = vi.fn(async (_source: MediaStream | File, _options: Parameters<ExhibitionLiveDeps['connect']>[2]) => sdk);
     return { uploadAndCheckImage, connect, models: { realtime: vi.fn((name: string) => ({ name })) },
       createXmaxClient: vi.fn((_options: { apiKey: string; locale: string; telemetry: boolean }) => ({ files: { uploadAndCheckImage }, realtime: { connect, connectMedia: connect } })) };
   };
@@ -24,7 +24,7 @@ afterEach(async () => {
   vi.clearAllTimers(); vi.useRealTimers();
 });
 
-function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion) {
+function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion, prefetchImages?: string[]) {
   const originalTrack = { readyState: 'live', stop: vi.fn() };
   const clonedTrack = { readyState: 'live', stop: vi.fn(), onended: null };
   const stream = { getVideoTracks: () => [originalTrack], getTracks: () => [originalTrack] } as unknown as MediaStream;
@@ -45,12 +45,56 @@ function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion) {
   } satisfies Partial<ExhibitionLiveDeps>;
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn() };
   const connection = new ExhibitionLiveConnection({ deviceId: 'device-fixture', lookId: 'look-fixture', sessionNumber: 1,
-    generationNumber: 1, expectedRevision: 1, image: '/reference.png', stream }, events, deps);
+    generationNumber: 1, expectedRevision: 1, image: '/reference.png', stream, prefetchImages }, events, deps);
   connections.push(connection);
-  return { connection, deps, events, cloned, originalTrack, created };
+  const ready = async () => {
+    await connection.start();
+    const output = { id: 'remote-fixture' } as MediaStream;
+    sdkMocks[providerRegion ?? 'global'].connect.mock.calls.at(-1)![1].onRemoteStream(output);
+    connection.reportRenderedFrame(output);
+    for (let index = 0; index < 40; index++) await Promise.resolve();
+  };
+  return { connection, deps, events, cloned, originalTrack, created, ready };
 }
 
 describe('exhibition session SDK region', () => {
+  it.each(['cn', 'global'] as const)('reuses one %s files client for multiple images while keeping realtime separate', async region => {
+    const f = fixture(region, region, ['/second.png', '/third.png']); await f.ready();
+    expect(sdkMocks[region].uploadAndCheckImage).toHaveBeenCalledTimes(3);
+    expect(sdkMocks[region].createXmaxClient).toHaveBeenCalledTimes(2);
+    expect(sdkMocks[region].connect).toHaveBeenCalledOnce();
+    expect(f.deps.create).toHaveBeenCalledOnce();
+  });
+
+  it('does not share the files client between connections even with the same token', async () => {
+    await fixture('global', 'global', ['/second.png']).ready();
+    await fixture('global', 'global', ['/second.png']).ready();
+    expect(sdkMocks.global.uploadAndCheckImage).toHaveBeenCalledTimes(4);
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledTimes(4);
+    expect(sdkMocks.global.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('creates a new files client after a temporary-token replacement', async () => {
+    const f = fixture('global', 'global', ['/second.png', '/third.png']);
+    f.deps.link.mockResolvedValueOnce({ ...f.created, token: 'replacement-fixture', providerSessionId: 'provider-fixture', referenceVersion: 1 });
+    await f.ready();
+    expect(sdkMocks.global.uploadAndCheckImage).toHaveBeenCalledTimes(3);
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledTimes(3);
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenLastCalledWith(expect.objectContaining({ apiKey: 'replacement-fixture' }));
+    expect(sdkMocks.global.connect).toHaveBeenCalledOnce();
+  });
+
+  it('creates a regional files client if the same token is later paired with another region', async () => {
+    const f = fixture('cn', 'cn', ['/second.png', '/third.png']);
+    f.deps.link.mockResolvedValueOnce({ ...f.created, providerRegion: 'global', providerSessionId: 'provider-fixture', referenceVersion: 1 });
+    await f.ready();
+    expect(sdkMocks.cn.uploadAndCheckImage).toHaveBeenCalledOnce();
+    expect(sdkMocks.cn.createXmaxClient).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.global.uploadAndCheckImage).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledOnce();
+    expect(sdkMocks.global.connect).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['cn', 'cn'], ['global', 'global'], [undefined, 'global'],
   ] as const)('uses the %s session region for both upload and realtime connection', async (providerRegion, expectedRegion) => {

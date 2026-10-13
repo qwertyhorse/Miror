@@ -1,4 +1,4 @@
-# Local exhibition hand recognition assets
+# Local exhibition gesture recognition assets
 
 Downloaded 2026-10-13. Camera frames are processed on this device in a dedicated Web Worker; the implementation sends no camera frames or model requests to Google or another external origin.
 
@@ -9,5 +9,7 @@ Downloaded 2026-10-13. Camera frames are processed on this device in a dedicated
 - Copyright Google LLC / The MediaPipe Authors. Apache License 2.0 is preserved in `LICENSE`.
 - Model card: https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Hand%20Tracking%20%28Lite_Full%29%20with%20Fairness%20Oct%202021.pdf
 - Official integration guide: https://developers.google.com/edge/mediapipe/solutions/vision/hand_landmarker/web_js
+
+The mirror's default raise-hand flow uses `pose-landmarker.worker.js` and the existing Pose Landmarker Full model in `../body-scan/pose_landmarker_full.task`; attribution and the official model source are in `../body-scan/THIRD_PARTY_NOTICES.md`. It runs VIDEO mode with two poses and no segmentation masks. Application geometry associates a single central participant across frames; only a visible lowered-to-raised arm sequence can select a material. Multi-person ambiguity and tracking discontinuities clear readiness. This is positional association, not persistent identity recognition. The hand model remains available for the original wave modes and is not loaded alongside the default pose flow.
 
 The application adds a motion detector over the returned hand landmarks. It recognizes one wave after multiple horizontal direction changes and requires the hand to pause or leave before another wave can trigger. Recognition is sampled at no more than 15 FPS with a 720-pixel maximum input edge; only one frame can be in flight. Detection/presence/tracking confidence use the documented default of 0.5. The worker uses the CPU delegate. Local hand-presence, decoded-frame progress and inference timing are returned to the interface, without uploading pixels or landmarks. Detector confidence and motion thresholds need to be validated against the exhibition's actual camera, lighting, distance and participants. A gesture is an input action, not biometric identification.

@@ -31,3 +31,6 @@ local.properties
 # Handoff metadata and optional local tooling
 MANIFEST.sha256
 tools/npm/
+
+# Local browser diagnostics and test evidence
+artifacts/

@@ -5,6 +5,7 @@ import type { XmaxRegion } from '../shared/xmax';
 export interface SessionData {
   id: string;
   providerRegion?: XmaxRegion;
+  referenceScope?: string;
   status: string;
   sourceKind: 'photo' | 'video' | 'camera';
   providerSessionId?: string;

@@ -28,6 +28,7 @@
 | POST | `/v1.1/api/exhibition/mirrors` | `{ "name": "右侧智能镜" }` | 201 `ExhibitionMirrorSummary` |
 | PATCH | `M` | `{ "name": "入口智能镜" }` | 200 `ExhibitionMirrorSummary` |
 | GET | `M` | — | 200 `ExhibitionState` |
+| GET | `M/changes?after={revision}` | — | 200 最新 `ExhibitionState`；相同版本等待变化，最多 8 秒 |
 | POST | `M/copy` | `{ "sourceMirrorId": "default", "copyLooks": true, "copySettings": true, "expectedRevision": 12 }` | 200 目标镜状态 |
 | GET | `/v1.1/api/exhibition/native-identity` | — | 200 `{ "native": false }` |
 | POST | `/v1.1/api/exhibition/terminals/connect` | 见下例 | 200 `ExhibitionDeviceConnection` |
@@ -301,7 +302,7 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 1. 进入镜端仅准备本地取景，用户点击开始后提交 `command.begin`；确认镜状态为 `generating`。
 2. 下载当前素材，再调用 `live/session` 申请临时凭证；同一生成代数仅创建一次。
 3. 通过对应区域官方 SDK 上传参考图，将云端 HTTPS 链接提交给 `live/session/{id}/reference`。Free 的 `referenceKind=none` 跳过参考图上传和绑定；MoX 使用图片输入。
-4. SDK 建立 RTC 后，调用 `S/link` 关联真实供应商会话；收到真实远端首帧后调用 `S/first-frame`。仅上报首帧才进入 `showcase`，`firstFrameMs` 范围 0–120000。
+4. SDK 建立 RTC 后，调用 `S/link` 关联真实供应商会话；收到真实远端首帧后调用 `S/first-frame`。仅上报首帧才进入 `showcase`，`firstFrameMs` 范围 0–120000，从客户端开始准备本次体验计时，包含素材、凭证和 RTC 建连；不等于某次换装可见延迟。
 5. 每 5 秒提交本地 `live/heartbeat`。超过 15 秒未收到心跳、有效期结束或达到单次上限时，服务端尝试停止并释放占用。
 6. 正在运行的兼容摄像头会话切换素材时，先提交 `command.switch`，在原会话调用 `condition`，用返回的参考图和提示词更新 SDK 条件；SDK 确认成功后提交 `condition/applied`。两次请求均带当前 `deviceId`、`lookId`、`sessionNumber`、`generationNumber`，确认请求再带 `referenceVersion`。旧素材的迟到请求返回 409，不替换最新选择；保持原 RTC、摄像头和临时凭证。MoX、模式改变或未连接会话继续走停止与重建流程。
 7. 停止或离开时释放 SDK 和摄像头，提交 `command.end` 或 `command.idle`，并对已创建会话调用 `S/stop`；以服务端停止确认完成为准。
@@ -337,3 +338,11 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 | 500 / 502 / 503 | 存储、供应商、服务或凭证不可用 | 保留当前输入，显示简短反馈；不要自动重复签发 |
 
 HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应类型，避免把网关错误当成成功 JSON。
+
+## 提前准备参考素材
+
+- `GET M/references/{lookId}` 只读查询，返回 `{ reference: null }` 或 `{ reference: { url, sha256, scope, freshUntil } }`。`scope` 为账号与区域的不可逆摘要；`freshUntil` 为 Unix 毫秒。查询不会签发临时 key 或发起云端上传。
+- `POST M/references/{lookId}`，JSON 请求体 `{}`，准备指定素材并返回同一结构。仅使用该镜当前永久凭据向对应区域上传原始图片并执行 SDK 同等的安全检查，不创建 RTC 或生成任务。原图仍保存在原素材目录。
+- 后台启动后自动串行准备空闲镜的素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。有效记录保留 1 小时，临近到期以 HEAD 检查续期，明确不存在才重新上传；网络不确定时冷却 60 秒。
+- 创建体验会话新增可选字段 `referenceScope`。客户端仅在它与准备结果 `scope` 相同且仍新鲜时复用 URL；缺字段、区域/账号变化、查找超时或未准备均回退普通 SDK 上传。现有 reference 绑定、session 关联和条件版本校验继续执行。
+- 同时最多 2 个准备任务（自动任务最多 1 个）；变更等待最多 128 个连接，超额返回 429。断开请求自动清理订阅。

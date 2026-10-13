@@ -70,6 +70,16 @@ class ExhibitionApi(
 
     suspend fun state(mirrorId: String): JSONObject = json(mirrorPath(mirrorId))
 
+    private var changesSupported = true
+    suspend fun changes(mirrorId: String, after: Long): JSONObject {
+        if (!changesSupported) return state(mirrorId)
+        return try { json("${mirrorPath(mirrorId)}/changes?after=$after", timeoutMs = 10_000) }
+        catch (error: ExhibitionApiException) {
+            if (error.code != "NOT_FOUND") throw error
+            changesSupported = false; state(mirrorId)
+        }
+    }
+
     suspend fun liveStatus(mirrorId: String): JSONObject = json("${mirrorPath(mirrorId)}/live/status")
 
     suspend fun command(
@@ -104,6 +114,17 @@ class ExhibitionApi(
         refImageUrl: String,
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/reference", "POST",
         JSONObject().put("deviceId", deviceId).put("lookId", lookId).put("refImageUrl", refImageUrl), 20_000)
+
+    suspend fun readyReference(mirrorId: String, lookId: String): JSONObject? {
+        require(Regex("[A-Za-z0-9_-]{1,100}").matches(lookId)) { "素材编号无效。" }
+        return json("${mirrorPath(mirrorId)}/references/$lookId", timeoutMs = 1_500).optJSONObject("reference")
+    }
+
+    suspend fun condition(mirrorId: String, sessionId: String, input: JSONObject): JSONObject =
+        json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/condition", "POST", input, 12_000)
+
+    suspend fun conditionApplied(mirrorId: String, sessionId: String, input: JSONObject): JSONObject =
+        json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/condition/applied", "POST", input)
 
     suspend fun link(mirrorId: String, sessionId: String, providerSessionId: String): JSONObject = json(
         "${sessionPath(mirrorId, sessionId)}/link", "POST",

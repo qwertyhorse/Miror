@@ -1,3 +1,4 @@
+import { ReferenceAssets } from './referenceAssets.ts';
 import { chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -21,6 +22,7 @@ const provider = new XmaxProvider(process.env.XMAX_API_KEY ?? '');
 if (provider.configured) store.activateApiKeyBudget(process.env.XMAX_API_KEY!);
 const service = new TryOnService({
   provider, store, secrets, resolveHost: resolveMediaHost,
+  referenceAssets: new ReferenceAssets(dataDirectory),
   mirrorCredentials: new MirrorCredentialStore(dataDirectory, secrets),
   perSessionLimit: Number(process.env.XMAX_SESSION_CREDITS ?? 30),
   expireSeconds: Number(process.env.XMAX_TOKEN_EXPIRE_SECONDS ?? 120),
@@ -40,6 +42,32 @@ await service.recover();
 server.listen(port, '127.0.0.1', () => {
   console.log(`Mirror internal API listening on port ${port} (XMAX ${provider.configured ? 'configured' : 'not configured'})`);
 });
+// One background upload at a time, round-robin across configured mirrors/materials.
+// No RTC or temporary generation credential is allocated by preparation.
+let preparing = false;
+let preparationCursor = 0;
+const preparationInterval = setInterval(async () => {
+  if (preparing || closing) return;
+  preparing = true;
+  try {
+    const candidates = exhibition.list().mirrors.flatMap(mirror => {
+      const current = exhibition.getMirror(mirror.id);
+      const state = current.get();
+      return service.status(mirror.id).configured && !state.live
+        ? state.looks.filter(look => look.referenceKind !== 'none').map(look => ({ current, look })) : [];
+    });
+    if (!candidates.length) return;
+    for (let scanned = 0; scanned < Math.min(candidates.length, 4); scanned++) {
+      const candidate = candidates[preparationCursor++ % candidates.length];
+      const ready = candidate.current.readyReference(candidate.look.id);
+      if (ready && ready.freshUntil > Date.now() + 5 * 60_000) continue;
+      await candidate.current.prepareReference(candidate.look.id);
+      break;
+    }
+  } catch { /* Retain originals; failed entries cool down and foreground has its upload fallback. */ }
+  finally { preparing = false; }
+}, 1_000);
+preparationInterval.unref();
 let sweeping = false;
 const interval = setInterval(async () => {
   if (sweeping) return;
@@ -61,6 +89,7 @@ async function shutdown() {
   if (closing) return;
   closing = true;
   clearInterval(interval);
+  clearInterval(preparationInterval);
   server.close();
   await Promise.allSettled(store.list().filter(row => row.tokenCipher && row.status !== 'stopped').map(row => service.stop(row.id)));
   store.close();

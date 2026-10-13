@@ -186,7 +186,7 @@ class NativeExhibitionActivity : Activity() {
                 }
                 val id = mirrorId
                 if (id != null) {
-                    val fresh = owner.state(id)
+                    val fresh = state?.let { owner.changes(id, it.optLong("revision", 0)) } ?: owner.state(id)
                     if (owner !== api || id != mirrorId) continue
                     if (!stopBusy) adoptState(fresh)
                     if (now - lastProvider >= 10_000) {
@@ -197,7 +197,7 @@ class NativeExhibitionActivity : Activity() {
                 if (!healthy && error.startsWith("后台")) error = ""
                 healthy = true
                 render()
-                delay(if (id == null) 10_000 else 850)
+                delay(if (id == null) 10_000 else 100)
             } catch (cancel: CancellationException) { throw cancel }
             catch (cause: Exception) {
                 if (owner === api) {
@@ -219,9 +219,11 @@ class NativeExhibitionActivity : Activity() {
                 val latest = state
                 val id = mirrorId
                 val activeKey = if (id != null && latest != null) generationKey(id, latest) else null
+                val currentSelection = selectedLook(latest)
+                val reusable = latest != null && currentSelection != null && round?.canReuse(latest, currentSelection) == true
                 val valid = healthy && latest?.string("providerMode") == "xmax" &&
                     latest.string("phase") in listOf("generating", "showcase") &&
-                    runningApi === api && runningMirror == id && round?.key == activeKey && currentPosition == position
+                    runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position
                 if (roundJob != null && (!valid || roundJob?.isCompleted == true)) {
                     roundJob?.cancelAndJoin()
                     roundJob = null
@@ -231,7 +233,11 @@ class NativeExhibitionActivity : Activity() {
                     render()
                     continue // Cleanup can advance the backend revision and replace the selection.
                 }
-                val look = selectedLook(latest)
+                if (valid && reusable && round?.key != activeKey) {
+                    activeKey?.let(attempted::add)
+                    round?.update(latest, currentSelection)
+                }
+                val look = currentSelection
                 val live = latest?.optJSONObject("live")
                 val needsCamera = latest?.string("experienceMode") != "mox"
                 if (roundJob == null && !needsCamera && cameraReady) {
@@ -267,7 +273,7 @@ class NativeExhibitionActivity : Activity() {
                     currentPosition = position
                     val instance = NativeGenerationRound(owner, id, deviceId, JSONObject(current.toString()),
                         JSONObject(currentLook.toString()), controller,
-                        onStatus = { text -> runOnUiThread { generationStatus = text; render() } },
+                        onStatus = { text -> runOnUiThread { generationStatus = text; if (text == "实时生成") error = ""; render() } },
                         onError = { text -> runOnUiThread { error = text; render() } },
                         onFirstFrame = { runOnUiThread { generationStatus = "实时生成"; error = ""; render() } },
                         cameraPosition = position)
@@ -425,7 +431,7 @@ class NativeExhibitionActivity : Activity() {
         status = label("连接后台…", 12, MUTED, false).apply {
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             setOnClickListener {
-                if (round != null) return@setOnClickListener
+                if (round != null) { if (round?.retryUpdate() == true) { error = ""; render() }; return@setOnClickListener }
                 previewFailed = false; cameraReady = false; error = ""
                 if (!hasCameraPermission()) requestPermissions(arrayOf(Manifest.permission.CAMERA), 41)
                 restartWork()

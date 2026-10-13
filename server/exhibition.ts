@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -142,8 +143,10 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
   return migrated as unknown as StoredExhibition;
 }
 
-/** Shared LAN exhibition state; garments are local assets and never invoke XMAX or a camera. */
+/** Shared LAN state and local source materials; live operations are delegated to TryOnService. */
 export class ExhibitionService {
+  private readonly changes = new Set<() => void>();
+  subscribe(listener: () => void) { this.changes.add(listener); return () => { this.changes.delete(listener); }; }
   readonly mirrorId: string;
   private readonly filename: string;
   private readonly assetsDirectory: string;
@@ -203,6 +206,23 @@ export class ExhibitionService {
 
   attachLiveService(service: TryOnService) { this.liveService = service; }
 
+  private referenceSource(lookId: string) {
+    const look = this.stored.state.looks.find(item => item.id === lookId);
+    if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
+    if (look.referenceKind === 'none') return null;
+    if (look.source === 'upload') return this.asset(look.id);
+    if (!/^\/assets\/exhibition\/(commute|city|evening)-cutout\.png$/.test(look.image)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '参考素材无效。');
+    return { data: readFileSync(fileURLToPath(new URL('../public' + look.image, import.meta.url))), mime: 'image/png' };
+  }
+  readyReference(lookId: string) {
+    const source = this.referenceSource(lookId);
+    return source ? this.liveService?.readyReference(this.mirrorId, source.data, source.mime) ?? null : null;
+  }
+  async prepareReference(lookId: string) {
+    const source = this.referenceSource(lookId);
+    if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime);
+    return this.readyReference(lookId); // Re-read after await: removal/replacement must win.
+  }
   liveStatus(): ExhibitionLiveStatus {
     const status = this.liveService?.status(this.mirrorId);
     return { configured: status?.configured ?? false, mode: this.stored.state.providerMode, model: status?.model ?? 'x2.0',
@@ -887,5 +907,6 @@ export class ExhibitionService {
     const temporary = `${this.filename}.${process.pid}.${randomUUID()}.tmp`;
     try { writeFileSync(temporary, JSON.stringify(draft), { mode: 0o600, flag: 'wx' }); renameSync(temporary, this.filename); this.stored = draft; }
     finally { rmSync(temporary, { force: true }); }
+    for (const listener of this.changes) listener();
   }
 }

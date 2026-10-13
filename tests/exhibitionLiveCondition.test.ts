@@ -138,6 +138,18 @@ describe('same-session exhibition condition changes', () => {
     expect(f.sdk.set).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenLastCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.fixture/third.png' }));
   });
 
+  it('applies the latest choice without waiting for an obsolete upload', async () => {
+    const f = fixture(); await f.ready(); const obsolete = deferred<string>();
+    f.deps.upload.mockImplementationOnce(() => obsolete.promise);
+    const second = f.controller.update(f.next('second')); await flush();
+    const third = f.controller.update(f.next('third', 3)); await flush();
+    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+    expect(f.deps.conditionApplied.mock.calls[0][1].lookId).toBe('third');
+    expect(await third).toBe(true); expect(await second).toBe(false);
+    obsolete.resolve('https://reference.fixture/second.png'); await flush();
+    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+  });
+
   it('records an accepted stale bind without applying it, then validates the next reference version', async () => {
     const f = fixture(); await f.ready(); const pending = deferred<void>();
     f.deps.updateCondition.mockImplementationOnce(async (id, input) => { const result = await f.condition(id, input); await pending.promise; return result; });

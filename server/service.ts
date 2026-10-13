@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { ApiError, type Provider, type SessionRecord, type SessionRequest } from './types.ts';
@@ -8,9 +8,14 @@ import { MirrorCredentialStore } from './mirrorCredentials.ts';
 import { XmaxProvider } from './provider.ts';
 import { EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibitionPromptForLook, type ExhibitionExperienceMode, type ExhibitionReferenceKind, type ExhibitionCredentialsStatus } from '../shared/exhibition.ts';
 
+import { ReferenceAssets, type ReferenceStorage } from './referenceAssets.ts';
+import { referenceStorage } from './referenceStorage.ts';
+
 export interface ServiceOptions {
   provider: Provider; store: SessionStore; secrets: SecretBox;
   perSessionLimit?: number; expireSeconds?: number;
+  referenceAssets?: ReferenceAssets;
+  referenceStorage?: (key: string, region: XmaxRegion) => ReferenceStorage;
   resolveHost?: (host: string) => Promise<string[]>;
   mirrorCredentials?: MirrorCredentialStore;
   providerForApiKey?: (apiKey: string, region?: XmaxRegion) => Provider;
@@ -38,6 +43,7 @@ function boundedText(value: unknown, name: string, max = 150): string {
   return value.trim();
 }
 export class TryOnService {
+  private readonly referenceProviders = new Map<string, ReferenceStorage>();
   readonly perSessionLimit: number; readonly expireSeconds: number;
   private readonly stoppingSessions = new Map<string, Promise<Omit<SessionRecord, 'tokenCipher' | 'providerKeyCipher'>>>();
   constructor(readonly options: ServiceOptions) {
@@ -57,6 +63,27 @@ export class TryOnService {
     const key = override ?? this.options.provider.credentialSnapshot?.();
     if (key && /^uk-[A-Za-z0-9_-]+$/u.test(key)) return { provider: override === undefined ? this.options.provider : this.providerForApiKey(key, region), scope: apiKeyBudgetScope(key), region, key };
     return { provider: this.options.provider, scope: this.options.store.currentBudgetScope(), region };
+  }
+  private referenceContext(mirrorId: string) {
+    const context = this.credentialContext(mirrorId);
+    const scope = createHash('sha256').update(`${context.region}:${context.scope}`).digest('hex');
+    return { ...context, scope };
+  }
+  readyReference(mirrorId: string, bytes: Buffer, mime: string) {
+    const context = this.referenceContext(mirrorId);
+    return context.provider.configured ? this.options.referenceAssets?.ready({ scope: context.scope, bytes, mime }) ?? null : null;
+  }
+  async prepareReference(mirrorId: string, bytes: Buffer, mime: string) {
+    const context = this.referenceContext(mirrorId);
+    if (!context.key || !context.provider.configured || !this.options.referenceAssets) return null;
+    let provider = this.referenceProviders.get(context.scope);
+    if (!provider) {
+      provider = this.options.referenceStorage?.(context.key, context.region) ?? referenceStorage(context.key, context.region);
+      this.referenceProviders.set(context.scope, provider);
+      while (this.referenceProviders.size > 16) this.referenceProviders.delete(this.referenceProviders.keys().next().value!);
+    }
+    const prepared = await this.options.referenceAssets.prepare({ scope: context.scope, bytes, mime }, provider);
+    return this.referenceContext(mirrorId).scope === prepared.scope ? prepared : null;
   }
   private sessionProvider(record: SessionRecord): Provider {
     const region = record.providerRegion ?? 'global';
@@ -142,6 +169,7 @@ export class TryOnService {
     const now = new Date().toISOString();
     const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: this.perSessionLimit,
       refImageUrl: reference, referenceAsset, referenceVersion: 0, consumedCredits: 0, resultAvailable: false, verification: 'none', createdAt: now, updatedAt: now,
+      referenceScope: createHash('sha256').update(`${context.region}:${context.scope}`).digest('hex'),
       providerRegion: context.region, ...(context.key ? { providerKeyCipher: this.options.secrets.encrypt(context.key) } : {}) };
     // Keep ambiguous issuance records for cancellation and revocation. No local cumulative budget.
     this.options.store.reserve(record, undefined, context.scope); hooks?.onReserved?.(record.id);

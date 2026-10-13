@@ -24,6 +24,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
   exhibition?.attachLiveService(service);
   const mirrors = exhibition && 'getMirror' in exhibition ? exhibition : undefined;
   const defaultExhibition = () => mirrors ? mirrors.getMirror() : exhibition as ExhibitionService | undefined;
+  let waitingForChanges = 0;
   const server = createServer(async (request, response) => {
     try {
       const host = request.headers.host ?? '';
@@ -65,6 +66,26 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (mirrorRoute && path === '/binding' && request.method === 'DELETE') {
           await mirrors!.unbindDevice(mirrorId, await body(request));
           return json(response, 200, { binding: null });
+        }
+        if (request.method === 'GET' && path === '/changes') {
+          const after = Number(url.searchParams.get('after'));
+          if (!url.searchParams.has('after') || !Number.isSafeInteger(after) || after < 0) throw new ApiError('INVALID_REVISION', '状态版本无效。');
+          const state = current.get();
+          if (state.revision !== after) return json(response, 200, state);
+          if (waitingForChanges >= 128) throw new ApiError('TOO_MANY_REQUESTS', '连接繁忙，请稍后重试。', 429);
+          waitingForChanges++;
+          let done = false;
+          const finish = () => { if (!done) { done = true; json(response, 200, current.get()); } };
+          const unsubscribe = current.subscribe(finish);
+          const timer = setTimeout(finish, 8_000);
+          response.once('close', () => { done = true; clearTimeout(timer); unsubscribe(); waitingForChanges--; });
+          return;
+        }
+        const preparedReference = /^\/references\/([^/]+)$/.exec(path);
+        if (preparedReference && request.method === 'GET') return json(response, 200, { reference: current.readyReference(preparedReference[1]) });
+        if (preparedReference && request.method === 'POST') {
+          await body(request);
+          return json(response, 200, { reference: await current.prepareReference(preparedReference[1]) });
         }
         if (request.method === 'GET' && !path) { void current.sweepLive().catch(() => undefined); return json(response, 200, current.get()); }
         if (request.method === 'POST' && path === '/skin') return json(response, 200, await current.uploadUiSkin(await body(request, Infinity)));

@@ -50,6 +50,39 @@ function fixture() {
   return { deps, controller, events, created, sdk, stream, originalStop, cloneStop, cloned, callbacks: () => callbacks };
 }
 describe('exhibition live client lifecycle', () => {
+  it('starts from a prepared account-scoped reference without downloading or uploading the image', async () => {
+    const f = fixture();
+    const input = { deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1,
+      expectedRevision: 3, image: f.created.referenceAsset, stream: f.stream };
+    const controller = new ExhibitionLiveConnection(input, f.events, { ...f.deps,
+      create: async () => ({ ...f.created, referenceScope: 'account-scope' }),
+      preparedReference: async () => ({ url: 'https://reference.example/ready.webp', scope: 'account-scope', freshUntil: Date.now() + 60000 }),
+    });
+    controllers.push(controller);
+    await controller.start();
+    expect(f.deps.reference).not.toHaveBeenCalled();
+    expect(f.deps.upload).not.toHaveBeenCalled();
+    expect(f.sdk.set).toHaveBeenCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.example/ready.webp' }));
+  });
+  it.each(['different-account', 'expired'])('falls back to a scoped upload for %s preparation', async reason => {
+    const f = fixture();
+    const controller = new ExhibitionLiveConnection({ deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1,
+      expectedRevision: 3, image: f.created.referenceAsset, stream: f.stream }, f.events, { ...f.deps,
+      create: async () => ({ ...f.created, referenceScope: 'current-account' }),
+      preparedReference: async () => ({ url: 'https://reference.example/stale.png', scope: reason === 'expired' ? 'current-account' : 'old-account',
+        freshUntil: Date.now() + (reason === 'expired' ? -1 : 60000) }),
+    });
+    controllers.push(controller); await controller.start();
+    expect(f.deps.reference).toHaveBeenCalledOnce(); expect(f.deps.upload).toHaveBeenCalledOnce();
+    expect(f.sdk.set).toHaveBeenCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.example/garment.png' }));
+  });
+  it('measures first-frame latency from preparation before credential allocation', async () => {
+    const f = fixture(); let now = 1000; f.deps.now.mockImplementation(() => now);
+    f.deps.reference.mockImplementationOnce(async () => { now += 700; return new File(['image'], 'a.png'); });
+    await f.controller.start(); now += 300;
+    f.controller.reportFirstFrame(); await flush();
+    expect(f.deps.firstFrame).toHaveBeenCalledWith('local-1', 1000);
+  });
   it('preflights before allocating, binds/links before one generation, reports only a remote frame', async () => {
     const f = fixture();
     await f.controller.start();

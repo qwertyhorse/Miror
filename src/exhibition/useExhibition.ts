@@ -3,7 +3,7 @@ import { appUrl } from '../versionScope';
 import { exhibitionApiPath } from './mirrorApi';
 import { isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionLookInput, type ExhibitionUploadInput, type ExhibitionTaxonomyInput } from '../../shared/exhibition';
 
-interface RequestScope { epoch: number; controller: AbortController; busy: boolean; }
+interface RequestScope { epoch: number; controller: AbortController; busy: boolean; changes?: boolean; }
 interface ExhibitionSnapshot { state: ExhibitionState | null; pending: boolean; selectionPending: boolean; stopPending: boolean; connected: boolean; error: string; }
 export interface ExhibitionCommandObservation {
   type: 'sent' | 'accepted' | 'rejected' | 'cancelled';
@@ -85,10 +85,16 @@ export class ExhibitionMirrorClient {
       ...(acceptsState ? { state: next } : {}) });
     this.refreshError = '';
   }
-  private async refreshScope(scope: RequestScope) {
+  private async refreshScope(scope: RequestScope, waitForChange = false): Promise<void> {
     if (!this.current(scope)) return;
     try {
-      const { ok, result } = await timedJson(this.url(), scope, { cache: 'no-store' });
+      const revision = this.snapshot.state?.revision;
+      const waiting = waitForChange && scope.changes !== false && revision !== undefined;
+      const { ok, result } = await timedJson(waiting ? this.url(`changes?after=${revision}`) : this.url(), scope, { cache: 'no-store' }, waiting ? 10_000 : 5_000);
+      if (waiting && !ok && (result.code === 'NOT_FOUND' || result.error?.code === 'NOT_FOUND')) {
+        scope.changes = false; return this.refreshScope(scope);
+      }
+      if (waiting && ok) scope.changes = true;
       if (!ok) throw new Error(result.message ?? '后台暂时未连接');
       this.adopt(result as ExhibitionState, scope);
     } catch (cause) {
@@ -105,8 +111,8 @@ export class ExhibitionMirrorClient {
     this.scope = scope;
     this.publish({ pending: false, selectionPending: false, stopPending: false, connected: false, error: '' });
     const poll = async () => {
-      await this.refreshScope(scope);
-      if (this.current(scope)) this.timer = setTimeout(poll, 850);
+      await this.refreshScope(scope, true);
+      if (this.current(scope)) this.timer = setTimeout(poll, scope.changes && this.snapshot.connected ? 25 : 850);
     };
     void poll();
   }

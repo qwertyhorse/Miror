@@ -1,0 +1,37 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ReferenceAssets } from '../server/referenceAssets';
+const directories: string[] = [];
+afterEach(() => directories.splice(0).forEach(p => rmSync(p, { recursive: true, force: true })));
+it('reuses an exact prepared reference across experiences and process reopen, isolated by account and region', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mirror-reference-')); directories.push(directory);
+  const upload = vi.fn(async () => 'https://fixture-123.cos.ap-test.myqcloud.com/image.webp');
+  const provider = { upload, check: vi.fn(async () => true) };
+  const input = { scope: 'account-cn', bytes: Buffer.from('original-image'), mime: 'image/webp' };
+  const assets = new ReferenceAssets(directory, { now: () => 1_000 });
+  await Promise.all([assets.prepare(input, provider), assets.prepare(input, provider)]);
+  expect(upload).toHaveBeenCalledTimes(1);
+  const reopened = new ReferenceAssets(directory, { now: () => 2_000 });
+  expect(reopened.ready(input)).toMatchObject({ url: 'https://fixture-123.cos.ap-test.myqcloud.com/image.webp' });
+  expect(reopened.ready({ ...input, scope: 'another-account' })).toBeNull();
+  expect(reopened.ready({ ...input, bytes: Buffer.from('changed-image') })).toBeNull();
+  expect(new ReferenceAssets(directory, { now: () => 100_000_000 }).ready(input)).toBeNull();
+});
+it('revalidates stale copies, backs off uncertain failures, and only reuploads a confirmed missing copy', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mirror-reference-')); directories.push(directory);
+  let now = 1_000;
+  const assets = new ReferenceAssets(directory, { now: () => now });
+  const input = { scope: 'cn-account', bytes: Buffer.from('original'), mime: 'image/png' };
+  const provider = { upload: vi.fn(async () => 'https://fixture-123.cos.ap-test.myqcloud.com/a.png'), check: vi.fn(async () => true) };
+  await assets.prepare(input, provider); now += 3_600_001;
+  provider.check.mockRejectedValueOnce(new Error('network uncertain'));
+  await expect(assets.prepare(input, provider)).rejects.toThrow('network uncertain');
+  await expect(assets.prepare(input, provider)).rejects.toThrow('cooling down');
+  expect(provider.upload).toHaveBeenCalledOnce(); expect(assets.ready(input)).toBeNull();
+  now += 60_001; await assets.prepare(input, provider);
+  expect(provider.upload).toHaveBeenCalledOnce(); expect(assets.ready(input)).not.toBeNull();
+  now += 3_600_001; provider.check.mockResolvedValueOnce(false); await assets.prepare(input, provider);
+  expect(provider.upload).toHaveBeenCalledTimes(2);
+});

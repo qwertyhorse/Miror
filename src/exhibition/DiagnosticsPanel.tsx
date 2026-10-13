@@ -4,6 +4,8 @@ import type { DiagnosticEventType, DiagnosticMetrics, ExhibitionDiagnostics } fr
 import './diagnostics.css';
 
 const stageLabels: Record<DiagnosticEventType, string> = {
+  experience_started: '开始连接体验', credential_started: '申请临时凭证', credential_ready: '凭证就绪',
+  rtc_started: '建立实时连接', rtc_ready: '实时连接就绪', reference_cache_hit: '复用已准备素材',
   gesture_threshold: '越过抬手阈值', gesture_confirmed: '动作确认', gesture_ignored: '动作未提交',
   command_sent: '命令提交', command_accepted: '命令接受', command_rejected: '命令失败', command_cancelled: '命令已取消',
   reference_started: '准备素材', reference_ready: '素材就绪', upload_started: '上传素材', upload_ready: '上传完成',

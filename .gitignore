@@ -21,6 +21,7 @@ playwright-report/
 *.keystore
 *.apk
 .gradle/
+.kotlin/
 .idea/
 **/build/
 local.properties

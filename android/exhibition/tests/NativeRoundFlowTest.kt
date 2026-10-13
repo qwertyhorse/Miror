@@ -80,6 +80,87 @@ fun main() = runBlocking {
             }
         }
 
+        for (ready in listOf(false, true)) {
+            RoundFixture("clothx", ready = ready).use { fixture ->
+                val controller = NativeXmaxController(fixture.events)
+                val running = startRound(fixture, controller)
+                try {
+                    withTimeout(5_000) { running.firstFrame.await() }
+                    if (ready) verify(fixture.events.none { it == "upload" || it == "image" }, "Prepared reference still uploaded")
+                    val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
+                    withTimeout(5_000) { while (!running.round.canReuse(next, fixture.look)) delay(5) }
+                    running.round.update(next, fixture.look)
+                    withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
+                    verify(fixture.allocations.get() == 1 && fixture.events.count { it == "connect" } == 1, "Continuous update reallocated/reconnected")
+                    verify(fixture.events.count { it == "generate" } == 2, "Continuous update was not sent")
+                    verify(fixture.events.count { it == "report-first" } == 1, "Condition update reported a second first frame")
+                    verify(fixture.stoppedIds.isEmpty(), "Selection stopped the active connection")
+                    verify(!running.round.canReuse(JSONObject(next.toString()).put("sessionNumber", 3), fixture.look), "New experience reused old lease")
+                    verify(!running.round.canReuse(JSONObject(next.toString()).put("experienceMode", "mox"), JSONObject(fixture.look.toString()).put("mode", "mox")), "Mode change reused old RTC")
+                    fixture.checkHandler()
+                } finally { running.job.cancelAndJoin() }
+                verify(fixture.stoppedIds.size == 1, "Continuous experience did not stop exactly once")
+            }
+        }
+
+        RoundFixture("clothx").use { fixture ->
+            val controller = NativeXmaxController(fixture.events)
+            val running = startRound(fixture, controller)
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
+                val secondLook = JSONObject(fixture.look.toString()).put("image", "/assets/exhibition/second.png")
+                withTimeout(5_000) { while (!running.round.canReuse(next, secondLook)) delay(5) }
+                controller.failUpload = true
+                fixture.referenceAsset(secondLook.getString("image"))
+                running.round.update(next, secondLook)
+                withTimeout(5_000) { while (running.errors.isEmpty()) delay(5) }
+                verify(fixture.stoppedIds.isEmpty() && !running.failure.isCompleted, "Upload failure tore down RTC")
+                controller.failUpload = false
+                verify(running.round.retryUpdate(), "Failed selection was not retryable")
+                withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
+                verify(fixture.allocations.get() == 1, "Retry allocated a new temporary credential")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
+        RoundFixture("clothx").use { fixture ->
+            val controller = NativeXmaxController(fixture.events)
+            val running = startRound(fixture, controller)
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
+                val pendingLook = JSONObject(fixture.look.toString()).put("image", "/assets/exhibition/second.png")
+                withTimeout(5_000) { while (!running.round.canReuse(next, pendingLook)) delay(5) }
+                controller.holdUpload = true
+                running.round.update(next, pendingLook)
+                withTimeout(5_000) { controller.uploadEntered.await() }
+                running.round.update(JSONObject(next.toString()).put("generationNumber", 5), fixture.look)
+                withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
+                verify(fixture.events.count { it == "generate" } == 2, "Obsolete upload generated an extra outfit")
+                verify(controller.uploadCancelled, "Obsolete upload was not cancelled")
+                verify(fixture.stoppedIds.isEmpty() && running.errors.isEmpty(), "Superseded upload stopped or failed experience")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
+
+        RoundFixture("free").use { fixture ->
+            val controller = NativeXmaxController(fixture.events)
+            val running = startRound(fixture, controller)
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
+                val promptOnly = JSONObject(fixture.look.toString()).put("referenceKind", "none")
+                withTimeout(5_000) { while (!running.round.canReuse(next, promptOnly)) delay(5) }
+                fixture.referenceAsset("")
+                running.round.update(next, promptOnly)
+                withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
+                verify(controller.generatedReference == null, "Free prompt-only selection retained previous reference")
+                verify(fixture.events.count { it == "upload" } == 1, "Free prompt-only selection uploaded its cover")
+                verify(fixture.allocations.get() == 1, "Free condition change allocated a new key")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
+
         // A server-side allocation can exist even though the create reply never reaches run().
         for (otherOwner in listOf(false, true)) {
             RoundFixture("clothx", holdCreate = true, recoveryOtherOwner = otherOwner).use { fixture ->
@@ -134,7 +215,7 @@ fun main() = runBlocking {
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
-        println("Native round flow passed: 7 isolated flows, $assertions assertions; no supplier SDK or live service calls.")
+        println("Native round flow passed: 12 isolated flows, $assertions assertions; no supplier SDK or live service calls.")
     } finally { FixtureMainDispatcher.close() }
 }
 
@@ -174,6 +255,7 @@ private class RoundFixture(
     private val holdCreate: Boolean = false,
     private val recoveryOtherOwner: Boolean = false,
     private val stopConfirmed: Boolean = true,
+    private val ready: Boolean = false,
 ) : AutoCloseable {
     val events = CopyOnWriteArrayList<String>()
     val allocations = AtomicInteger()
@@ -193,7 +275,7 @@ private class RoundFixture(
     private val record = JSONObject().put("id", SESSION_ID).put("status", "active")
         .put("sourceKind", if (mode == "mox") "photo" else "camera")
         .put("referenceAsset", if (noReference) "" else look.getString("image"))
-        .put("referenceVersion", 0).put("refImageUrl", "").put("providerRegion", "cn")
+        .put("referenceScope", "fixture-scope").put("referenceVersion", 0).put("refImageUrl", "").put("providerRegion", "cn")
         .put("expiresAt", Instant.now().plusSeconds(120).toString())
         .put("exhibition", JSONObject().put("mirrorId", "default").put("deviceId", "device-fixture")
             .put("lookId", "commute").put("mode", mode).put("prompt", NativeRoundMetadata.prompt(look))
@@ -214,13 +296,14 @@ private class RoundFixture(
     }
     val api = ExhibitionApi("http://127.0.0.1:${server.address.port}/v1.1/exhibition/screen?mirror=default",
         "terminal-fixture", "fixture-terminal-credential", "隔离测试智能镜")
+    fun referenceAsset(path: String) = synchronized(lock) { record.put("referenceAsset", path) }
     fun snapshot() = synchronized(lock) { JSONObject(state.toString()) }
     fun checkHandler() { failure.get()?.let { throw AssertionError("Local fixture handler failed", it) } }
 
     private fun handle(exchange: HttpExchange) {
         val path = exchange.requestURI.path
         when {
-            path == "/v1.1/assets/exhibition/commute-cutout.png" -> {
+            path.startsWith("/v1.1/assets/exhibition/") -> {
                 events.add("image"); exchange.bytes(imageBytes, "image/png")
             }
             path == "$MIRROR/live/session" -> {
@@ -239,6 +322,23 @@ private class RoundFixture(
                 val created = synchronized(lock) { JSONObject(record.toString()).put("token", "tk-fixture").put("model", "x2.0") }
                 // A cancelled request intentionally discards this reply after allocation.
                 try { exchange.json(created, 201) } catch (error: Exception) { if (!holdCreate) throw error }
+            }
+            path == "$MIRROR/references/commute" -> exchange.json(JSONObject().put("reference", if (ready)
+                JSONObject().put("url", REFERENCE_URL).put("scope", "fixture-scope").put("freshUntil", System.currentTimeMillis() + 60_000)
+                else JSONObject.NULL))
+            path == "$MIRROR/live/session/$SESSION_ID/condition" -> {
+                val body = exchange.body()
+                check(body.getLong("generationNumber") in 4L..5L && body.optString("refImageUrl", REFERENCE_URL) == REFERENCE_URL)
+                val bound = synchronized(lock) {
+                    record.put("refImageUrl", body.optString("refImageUrl"))
+                    record.getJSONObject("exhibition").put("generationNumber", body.getLong("generationNumber"))
+                    record.put("referenceVersion", 2); JSONObject(record.toString())
+                }
+                events.add("condition"); exchange.json(bound)
+            }
+            path == "$MIRROR/live/session/$SESSION_ID/condition/applied" -> {
+                check(exchange.body().getLong("referenceVersion") == 2L)
+                events.add("condition-applied"); exchange.json(snapshot())
             }
             path == "$MIRROR/live/heartbeat" -> { events.add("heartbeat"); exchange.json(snapshot()) }
             path == "$MIRROR/live/session/$SESSION_ID/reference" -> {

@@ -7,18 +7,22 @@ import java.net.URI
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
-/** One immutable selection, one local reservation, and one native XMAX session. */
+/** One experience owns one reservation/RTC connection; same-mode choices update its conditions. */
 class NativeGenerationRound(
     private val api: ExhibitionApi,
     private val mirrorId: String,
@@ -31,14 +35,43 @@ class NativeGenerationRound(
     private val onFirstFrame: () -> Unit,
     private val cameraPosition: CameraPosition = CameraPosition.BACK,
 ) {
-    private val snapshot = JSONObject(state.toString())
-    private val selection = JSONObject(look.toString())
+    private var snapshot = JSONObject(state.toString())
+    private var selection = JSONObject(look.toString())
     private val sessionNumber = snapshot.optLong("sessionNumber", -1)
-    private val generationNumber = snapshot.optLong("generationNumber", -1)
+    private val generationNumber get() = snapshot.optLong("generationNumber", -1)
     private val revision = snapshot.optLong("revision", -1)
-    private val lookId = selection.optString("id")
+    private val lookId get() = selection.optString("id")
     private val mode = selection.optString("mode", "clothx")
-    val key: String = "$mirrorId:$sessionNumber:$generationNumber:$lookId:$mode"
+    private fun selectionKey(state: JSONObject, look: JSONObject) = "$mirrorId:$sessionNumber:${state.optLong("generationNumber")}:${look.optString("id")}:$mode"
+    var key: String = selectionKey(snapshot, selection)
+        private set
+    private val updates = Channel<Pair<JSONObject, JSONObject>>(Channel.CONFLATED)
+    private var connected = false
+    private var retryable = false
+    private var referencePreparation: Deferred<String?>? = null
+
+    fun canReuse(state: JSONObject, look: JSONObject): Boolean = connected && mode != "mox"
+        && state.optString("providerMode") == "xmax" && state.optString("phase") in listOf("generating", "showcase")
+        && state.optLong("sessionNumber", -1) == sessionNumber && state.optString("experienceMode") == mode
+        && look.optString("mode", "clothx") == mode
+        && state.optJSONObject("live")?.let { it.optString("sessionId") == localSessionId && it.optString("deviceId") == deviceId } == true
+
+    fun update(state: JSONObject, look: JSONObject) {
+        if (!canReuse(state, look)) return
+        val nextKey = selectionKey(state, look)
+        if (key == nextKey) return
+        key = nextKey
+        retryable = false
+        referencePreparation?.cancel()
+        updates.trySend(JSONObject(state.toString()) to JSONObject(look.toString()))
+    }
+
+    fun retryUpdate(): Boolean {
+        if (!connected || !retryable) return false
+        retryable = false
+        updates.trySend(JSONObject(snapshot.toString()) to JSONObject(selection.toString()))
+        return true
+    }
 
     private var localSessionId: String? = null
     private var providerRegion: String? = null
@@ -51,6 +84,7 @@ class NativeGenerationRound(
     suspend fun run(): Nothing {
         check(!hasRun) { "本轮体验已经启动。" }
         hasRun = true
+        val experienceStartedAt = SystemClock.elapsedRealtime()
         try {
             coroutineScope {
                 NativeRoundMetadata.validateSnapshot(snapshot, selection, mirrorId, deviceId)
@@ -58,7 +92,8 @@ class NativeGenerationRound(
                 val prompt = NativeRoundMetadata.prompt(selection)
                 status("准备素材")
                 // A bad or missing local asset must fail before requesting a paid credential.
-                val image = if (noReference) null else api.image(selection.getString("image"))
+                val prepared = if (noReference || mode == "mox") null else preparedReference(selection)
+                var image = if (noReference || prepared != null) null else api.image(selection.getString("image"))
                 val mime = image?.let(NativeRoundMetadata::imageMime)
 
                 status("连接中")
@@ -91,8 +126,13 @@ class NativeGenerationRound(
                 }
                 launch { throw NativeRoundException(controllerFailure.await()) }
 
-                val reference = if (image != null) {
-                    val uploaded = controller.uploadReference(token, region, image, mime!!)
+                val scope = created.optString("referenceScope")
+                val reference = if (!noReference) {
+                    val uploaded = if (prepared != null && scope.isNotEmpty() && prepared.optString("scope") == scope
+                        && prepared.optLong("freshUntil") > System.currentTimeMillis()) prepared.getString("url") else {
+                        if (image == null) image = api.image(selection.getString("image"))
+                        controller.uploadReference(token, region, image, mime ?: NativeRoundMetadata.imageMime(image))
+                    }
                     NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(uploaded), "参考图上传结果无效。")
                     val bound = api.bindReference(mirrorId, id, deviceId, lookId, uploaded)
                     validateRecord(bound, false, prompt, 1, uploaded, null)
@@ -110,20 +150,81 @@ class NativeGenerationRound(
                 val linked = api.link(mirrorId, id, providerId)
                 validateRecord(linked, noReference, prompt, if (noReference) 0 else 1, reference.orEmpty(), providerId)
 
-                val generationStartedAt = SystemClock.elapsedRealtime()
+                val firstReceipt = CompletableDeferred<Unit>()
                 launch {
                     if (withTimeoutOrNull(45_000) { remoteFirstFrame.await() } == null) {
                         throw NativeRoundException("生成画面超时，请重试。")
                     }
-                    val receipt = api.firstFrame(mirrorId, id, SystemClock.elapsedRealtime() - generationStartedAt)
+                    val receipt = api.firstFrame(mirrorId, id, SystemClock.elapsedRealtime() - experienceStartedAt)
                     validateRecord(receipt, noReference, prompt, if (noReference) 0 else 1, reference.orEmpty(), providerId)
                     NativeRoundMetadata.requireValid((NativeRoundMetadata.integer(receipt, "firstFrameMs") ?: -1)
                         in 0L..120_000L, "首帧确认失败，请重试。")
                     withContext(Dispatchers.Main.immediate) { onFirstFrame() }
+                    firstReceipt.complete(Unit)
                 }
                 status("正在生成")
                 controller.generate(prompt, reference)
-                awaitCancellation()
+                firstReceipt.await()
+                connected = true
+                var version = if (noReference) 0L else 1L
+                var boundGeneration = generationNumber
+                val references = mutableMapOf<String, String>()
+                if (reference != null) references[selection.getString("image")] = reference
+                for ((next, nextLook) in updates) {
+                    snapshot = next; selection = nextLook
+                    val operationKey = selectionKey(next, nextLook)
+                    try {
+                        NativeRoundMetadata.validateSnapshot(snapshot, selection, mirrorId, deviceId)
+                        val none = selection.optString("referenceKind", "image") == "none"
+                        val nextPrompt = NativeRoundMetadata.prompt(selection)
+                        status("准备素材")
+                        val url = supervisorScope {
+                            // Only independent image preparation is cancelled by a newer choice.
+                            // Backend binding and SDK condition updates remain serialized.
+                            val preparing = async {
+                                if (none) null else references[selection.getString("image")] ?: run {
+                                    val ready = preparedReference(selection)
+                                    val uploaded = if (ready != null && scope.isNotEmpty() && ready.optString("scope") == scope) ready.getString("url") else {
+                                        val bytes = api.image(selection.getString("image"))
+                                        controller.uploadReference(token, region, bytes, NativeRoundMetadata.imageMime(bytes))
+                                    }
+                                    NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(uploaded), "参考图上传结果无效。")
+                                    if (references.size >= 32) references.remove(references.keys.first())
+                                    references[selection.getString("image")] = uploaded
+                                    uploaded
+                                }
+                            }
+                            referencePreparation = preparing
+                            try { preparing.await() } finally { referencePreparation = null }
+                        }
+                        if (operationKey != key) continue
+                        val intent = JSONObject().put("deviceId", deviceId).put("lookId", lookId)
+                            .put("sessionNumber", sessionNumber).put("generationNumber", generationNumber)
+                        if (url != null) intent.put("refImageUrl", url)
+                        val bound = api.condition(mirrorId, id, intent)
+                        val nextVersion = NativeRoundMetadata.integer(bound, "referenceVersion") ?: -1
+                        NativeRoundMetadata.requireValid(nextVersion > version || (nextVersion == version && boundGeneration == generationNumber), "素材版本未更新。")
+                        validateRecord(bound, none, nextPrompt, nextVersion, url.orEmpty(), providerId)
+                        version = nextVersion
+                        boundGeneration = generationNumber
+                        if (operationKey != key) continue
+                        status("正在生成")
+                        controller.generate(nextPrompt, url)
+                        if (operationKey != key) continue
+                        api.conditionApplied(mirrorId, id, intent.put("referenceVersion", version))
+                        if (operationKey == key) status("实时生成")
+                    } catch (cancelled: CancellationException) {
+                        currentCoroutineContext().ensureActive()
+                        if (operationKey == key) throw cancelled
+                    }
+                    catch (error: Exception) {
+                        if (operationKey == key) withContext(Dispatchers.Main.immediate) {
+                            retryable = true
+                            onError(NativeRoundMetadata.safeMessage(error.message.orEmpty()))
+                        }
+                    }
+                }
+                throw CancellationException("Experience stopped")
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -139,6 +240,8 @@ class NativeGenerationRound(
             }
             throw failure
         } finally {
+            connected = false
+            updates.close()
             withContext(NonCancellable) {
                 withContext(Dispatchers.Main.immediate) {
                     controller.onFirstFrame = null
@@ -158,6 +261,14 @@ class NativeGenerationRound(
             }
         }
     }
+
+    private suspend fun preparedReference(look: JSONObject): JSONObject? = try {
+        api.readyReference(mirrorId, look.getString("id"))?.takeIf {
+            NativeRoundMetadata.isRemoteImage(it.optString("url")) && it.optString("scope").isNotEmpty()
+                && it.optLong("freshUntil") > System.currentTimeMillis()
+        }
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) { null } // Older/offline preparation falls back to the ordinary SDK upload.
 
     private suspend fun status(value: String) = withContext(Dispatchers.Main.immediate) { onStatus(value) }
 

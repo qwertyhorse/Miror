@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ExternalLink, Link2, Maximize2, Monitor, Play, RotateCcw, Sparkles, Square, WifiOff, X } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Hand, Link2, Maximize2, Monitor, Play, RotateCcw, Sparkles, Square, WifiOff, X } from 'lucide-react';
 import { EXHIBITION_MODE_LABELS, isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionMirrorSummary } from '../../shared/exhibition';
 import { appUrl } from '../versionScope';
 import { enabledLooksForMode, phaseLabel } from './catalog';
@@ -11,6 +11,7 @@ import { useTerminalBinding, type TerminalBinding } from './useTerminalBinding';
 import { TerminalPairingScreen } from './TerminalPairingScreen';
 import { useExhibitionLive, type ExhibitionLiveController } from './useExhibitionLive';
 import { StreamVideo } from './LiveCameraPanel';
+import { useExhibitionGestures } from './useExhibitionGestures';
 import { useExhibition, type ExhibitionController } from './useExhibition';
 import { MirrorMaterialDrawer } from './MirrorMaterialDrawer';
 import { MoXDragSurface } from './MoXDragSurface';
@@ -43,6 +44,9 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const [beginPending, setBeginPending] = useState(false);
   const [beginError, setBeginError] = useState('');
   const [localStopPending, setLocalStopPending] = useState(false);
+  const [gesturesOn, setGesturesOn] = useState(true);
+  const [gestureReset, setGestureReset] = useState(0);
+  const gesturePending = useRef(false);
   const starting = useRef(false);
   const beginIntent = useRef(0);
   const stopping = useRef(false);
@@ -54,18 +58,20 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const realtime = state.providerMode === 'xmax';
   useEffect(() => { setBeginError(''); }, [state.phase, state.providerMode, state.experienceMode, state.selectedLookId, state.sessionNumber, state.generationNumber]);
   const otherDevice = remote || (!!state.live && !!live && state.live.deviceId !== live.deviceId);
-  const stream = otherDevice ? null : live?.outputStream ?? live?.cameraStream ?? null;
   const serverError = state.live?.status === 'error' && state.live.generationNumber === state.generationNumber
     && state.live.lookId === state.selectedLookId;
   const needsRetry = realtime && !welcome && !passive && !otherDevice && (!!live?.error || serverError);
+  const cameraFallback = needsRetry && !mox && !!live?.cameraStream?.getVideoTracks?.().some(track => track.readyState === 'live');
+  const stream = otherDevice ? null : needsRetry ? cameraFallback ? live?.cameraStream ?? null : null : live?.outputStream ?? live?.cameraStream ?? null;
   const localView = realtime && !passive && !otherDevice && !needsRetry;
   const showingInputImage = mox && (!live?.outputStream || live.presentation?.showInputImage);
-  // A stream can precede its first frame or belong to the round being replaced.
+  // Keep the generated stream visible while its reference condition changes.
   const visualSource = !localView || welcome ? null : showingInputImage ? '素材预览'
-    : live?.outputStream ? live.status === 'running' && state.phase === 'showcase' ? '生成结果' : null
+    : live?.outputStream ? (live.status === 'running' && state.phase === 'showcase') || (state.live?.status === 'running' && state.phase === 'generating') ? '生成结果' : null
       : null;
   const generationPending = localView && state.phase === 'generating' && live?.status !== 'stopping' && live?.status !== 'error';
-  const preparationLabel = live?.status === 'opening' ? '开启摄像头'
+  const preparationLabel = live?.outputStream && state.live?.status === 'running' ? '正在换装'
+    : live?.status === 'opening' ? '开启摄像头'
     : live?.status === 'preparing' ? '准备素材'
       : live?.status === 'connecting' ? '连接实时服务' : live?.status === 'running' ? '等待生成画面' : '等待连接';
   const outputLabel = visualSource === '生成结果' ? '生成结果' : paused ? '已暂停的生成画面' : showingInputImage ? '素材预览' : '生成画面准备中';
@@ -77,6 +83,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
     if (input.action === 'end' || input.action === 'idle') {
       if (stopping.current || stopPending) return false;
       stopping.current = true; ++beginIntent.current; starting.current = false;
+      setGestureReset(value => value + 1);
       setBeginPending(false); setBeginError(''); setLocalStopPending(true);
       try {
         const results = await Promise.allSettled([
@@ -127,18 +134,50 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
     && (!commandPending || selectionPending) && !needsRetry && !serverError && !live?.opening
     && ((welcome && !state.live) || state.phase === 'generating' || state.phase === 'showcase');
   currentRound.current.canChoose = canChoose;
+  const gestureCamera = !!live?.cameraStream?.getVideoTracks?.().some(track => track.readyState === 'live');
+  const gestureAvailable = realtime && !mox && !remote && !passive && !otherDevice && canControl && !!live?.secure && !locallyEnded && gestureCamera;
+  const gestures = useExhibitionGestures({
+    stream: live?.cameraStream ?? null, enabled: gesturesOn && gestureAvailable,
+    // Material/generation changes keep a continuous wave latched; stop and phase boundaries discard old frames.
+    mode: 'wave', mirrored: live?.mirrored ?? true,
+    resetKey: `${state.mirrorId ?? 'default'}:${mode}:${welcome}:${paused}:${stopPending || localStopPending}:${needsRetry || serverError}:${gestureReset}`,
+    onGesture: gesture => {
+      const latest = currentRound.current;
+      if (gesture !== 'wave' || !gesturesOn || !gestureAvailable || !latest.canChoose || carouselBusy || commandPending || selectionPending || gesturePending.current) return;
+      const ordered = enabledLooksForMode(latest.state);
+      if (ordered.length < 2) return;
+      const index = ordered.findIndex(item => item.id === latest.state.selectedLookId);
+      const next = ordered[(index + 1) % ordered.length];
+      gesturePending.current = true;
+      // Use the same selection path as the material drawer, including stop and lease guards.
+      void command({ action: ['idle', 'select'].includes(latest.state.phase) ? 'select' : 'switch', lookId: next.id })
+        .catch(() => { setBeginError('素材切换未完成，请重试。'); })
+        .finally(() => { gesturePending.current = false; });
+    },
+  });
+  const gestureBlocked = !canChoose || carouselBusy || commandPending || selectionPending;
+  const gestureCapturing = gestures.captureStatus === 'active';
+  const gestureSeeingHand = gesturesOn && gestureAvailable && !gestureBlocked && gestureCapturing && gestures.handDetected;
+  const gestureLabel = !gestureAvailable ? '等待摄像头' : !gesturesOn ? '挥手已关闭'
+    : gestures.status === 'error' ? '重试挥手' : gestures.status === 'loading' ? '加载挥手…'
+      : gestureBlocked ? '挥手已暂停'
+        : gestures.captureStatus === 'stalled' ? '取景未更新'
+          : ['disabled', 'muted', 'hidden'].includes(gestures.captureStatus) ? '取景已暂停'
+            : !gestureCapturing ? '等待取景'
+              : gestureSeeingHand ? '已看到手 · 挥手切换' : '挥手换素材 · 未看到手';
   if (!look || !visualLook || !enabled.length) return <section className="ex-kiosk ex-mirror-minimal ex-empty-mode" style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className="ex-mirror-stage ex-mirror-empty"><Sparkles aria-hidden="true" /><span>暂无可用素材</span><div className="ex-mirror-stage-actions">{recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>}</div></div>
   </section>;
-  const feedback = !locallyEnded && !passive && !otherDevice ? beginError || (realtime ? live?.error || (serverError ? '换装连接状态未确认，请联系工作人员。' : '') : '') : '';
+  const feedback = !locallyEnded && !passive && !otherDevice ? beginError || (realtime ? live?.error || live?.updateError || (serverError ? '换装连接状态未确认，请联系工作人员。' : '') : '') : '';
   return <section className={`ex-kiosk ex-mirror-minimal ex-phase-${state.phase}${welcome ? ' ex-welcome' : ''}${passive ? ' ex-passive' : ''}`} style={skinStyle} aria-label={kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className="ex-mirror-stage">
       {welcome ? (live?.cameraStream && !passive && !otherDevice && !mox ? <StreamVideo stream={live.cameraStream} mirrored={live?.mirrored} label="本地取景" /> : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={visualLook.name} />)
         : realtime && mox && !passive && !otherDevice && !needsRetry ? <MoXDragSurface interaction={live?.interaction ?? null} disabled={disabled || paused || !live?.interaction} imageUrl={!live?.outputStream || live?.presentation?.showInputImage ? live?.presentation?.inputImageUrl ?? appUrl(visualLook.image) : undefined}>
           {live?.outputStream && <StreamVideo stream={live.outputStream} mirrored={false} label={outputLabel} onFirstFrame={live.reportFirstFrame} />}
-        </MoXDragSurface> : realtime ? (stream && !passive && !needsRetry ? <StreamVideo key={live?.outputStream ? 'output' : 'camera'} stream={stream} mirrored={live?.mirrored} label={live?.outputStream ? outputLabel : '本地取景'} onFirstFrame={live?.outputStream ? live.reportFirstFrame : undefined} /> : <div className="ex-mirror-placeholder"><Sparkles aria-hidden="true" /><span>{livePlaceholder}</span>{passive ? <small>仅同步状态，未回传镜端视频</small> : otherDevice ? <small>当前页面未接收镜端视频</small> : needsRetry && !serverError && <button type="button" className="ex-kiosk-retry" disabled={disabled || live?.opening} onClick={() => void retryExperience()}><RotateCcw />重试</button>}</div>) : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={`${visualLook.name}素材预览`} />}
+        </MoXDragSurface> : realtime ? (stream && !passive && (!needsRetry || cameraFallback) ? <StreamVideo key={!cameraFallback && live?.outputStream ? 'output' : 'camera'} stream={stream} mirrored={live?.mirrored} label={!cameraFallback && live?.outputStream ? outputLabel : '本地取景'} onFirstFrame={!cameraFallback && live?.outputStream ? live.reportFirstFrame : undefined} /> : <div className="ex-mirror-placeholder"><Sparkles aria-hidden="true" /><span>{livePlaceholder}</span>{passive ? <small>仅同步状态，未回传镜端视频</small> : otherDevice ? <small>当前页面未接收镜端视频</small> : needsRetry && !serverError && <button type="button" className="ex-kiosk-retry" disabled={disabled || live?.opening} onClick={() => void retryExperience()}><RotateCcw />重试</button>}</div>) : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={`${visualLook.name}素材预览`} />}
+      {cameraFallback && <div className="ex-visual-status" role="status"><span>本地取景</span></div>}
       {localView && (visualSource || generationPending) && <div className="ex-visual-status" role="status" aria-live="polite">
         {visualSource && <span>{visualSource}</span>}
         {generationPending && <span className="ex-visual-generating"><Sparkles aria-hidden="true" />{preparationLabel}</span>}
@@ -152,7 +191,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
           if (latest.state.phase === 'showcase' || latest.state.phase === 'generating') return command({ action: 'switch', lookId });
           return Promise.resolve(false);
         }} />
-      {feedback && <div className="ex-mirror-feedback" role="alert"><span>{feedback}</span>{welcome && realtime && !mox && live?.secure && live.error && !state.live && <><button type="button" className="ex-kiosk-retry" disabled={disabled || live.opening} onClick={() => { setBeginError(''); void live.startCamera(); }}><RotateCcw aria-hidden="true" />重试摄像头</button><a className="ex-kiosk-retry" href={appUrl(`/camera-check.html?mirror=${encodeURIComponent(state.mirrorId ?? 'default')}`)}>选择摄像头</a></>}</div>}
+      {feedback && <div className="ex-mirror-feedback" role="alert"><span>{feedback}</span>{live?.updateError && !live.error && <button type="button" className="ex-kiosk-retry" disabled={disabled || stopPending || localStopPending} onClick={() => void live.retryUpdate()}><RotateCcw aria-hidden="true" />重试换装</button>}{welcome && realtime && !mox && live?.secure && live.error && !state.live && <><button type="button" className="ex-kiosk-retry" disabled={disabled || live.opening} onClick={() => { setBeginError(''); void live.startCamera(); }}><RotateCcw aria-hidden="true" />重试摄像头</button><a className="ex-kiosk-retry" href={appUrl(`/camera-check.html?mirror=${encodeURIComponent(state.mirrorId ?? 'default')}`)}>选择摄像头</a></>}</div>}
       {locallyEnded && !passive && <div className="ex-mirror-feedback" role="status"><span>本地体验已结束，云端凭证状态待确认。</span></div>}
       <div className="ex-mirror-stage-actions">
         {recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled={disabled || passive || carouselBusy || beginPending || live?.opening || !!state.live} onClick={() => void command({ action: 'begin' })}><Play fill="currentColor" />{beginPending || live?.opening ? '等待摄像头…' : '开始体验'}</button>}
@@ -161,6 +200,14 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
     </div>
     <footer className="ex-mirror-footer">
       {!welcome && <button type="button" className="ex-mirror-home" aria-label="返回首页" disabled={passive || !canControl || stopPending || localStopPending} onClick={() => void command({ action: 'idle' })}><ArrowLeft /></button>}
+      {realtime && !mox && !remote && !passive && !otherDevice && canControl && <button type="button" className="ex-mirror-gesture" data-status={gestures.status}
+        data-detection={gestureSeeingHand ? 'hand' : gestureBlocked ? 'paused' : 'waiting'} data-capture={gestures.captureStatus}
+        data-hand-detected={!!gestures.handDetected} data-inference-fps={gestures.fps}
+        disabled={!gestureAvailable} aria-pressed={gesturesOn} aria-busy={gestures.status === 'loading'}
+        aria-label={gestures.status === 'error' ? '重新开启挥手换素材' : gesturesOn ? '关闭挥手换素材' : '开启挥手换素材'}
+        title={gestures.error || '张开手掌，左右挥动切换素材'} onClick={() => { if (gestures.status === 'error') gestures.retry(); else setGesturesOn(value => !value); }}>
+        <Hand aria-hidden="true" /><span aria-live="polite">{gestureLabel}</span><i aria-hidden="true" />
+      </button>}
     </footer>
   </section>;
 }

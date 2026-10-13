@@ -30,6 +30,16 @@ describe('exhibition live failure', () => {
       .toBe(fallback);
   });
 
+  it('identifies the observed supplier system error even while RTC is connected', () => {
+    const failure = exhibitionLiveFailure({ code: 'API_ERROR', message: '系统异常', details: {
+      reason_code: 'remote_bind_failed', failure_stage: 'remote_bind', business_code: 500,
+      http_status: 200, connection_state: 'CONNECTION_STATE_CONNECTED', network_online: true,
+    } }, fallback);
+    expect(failure.message).toBe('XMAX 生成服务暂时异常，请稍后重试。');
+    expect(failure.diagnostic).toContain('business_code=500');
+    expect(failure.diagnostic).toContain('network_online=true');
+  });
+
   it('keeps ordinary errors and unstructured failures on their supplied fallback', () => {
     for (const cause of [new Error('request timeout'), null, undefined, 'request timeout', { message: 'request timeout' }]) {
       expect(exhibitionLiveFailure(cause, fallback)).toEqual({ message: fallback, diagnostic: '' });
@@ -49,7 +59,7 @@ describe('exhibition live failure', () => {
     };
 
     expect(exhibitionLiveFailure(cause, fallback)).toEqual({
-      message: fallback,
+      message: 'XMAX 生成服务暂时异常，请稍后重试。',
       diagnostic: 'code=API_ERROR; failure_stage=session_api; business_code=46007; http_status=502; rtc_error_code=1091; network_online=false; message=supplier unavailable',
     });
   });

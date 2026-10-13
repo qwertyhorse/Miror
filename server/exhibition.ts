@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, 
 import { join } from 'node:path';
 import sharp, { type OutputInfo } from 'sharp';
 import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECONDS, EXHIBITION_AUTO_SWITCH_MIN_SECONDS, EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, EXHIBITION_LOOK_IDS, EXHIBITION_UI_SKIN_PRESETS, exhibitionPromptForLook, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionPhase, type ExhibitionState, type ExhibitionUploadLimits, type ExhibitionLiveStatus, type ExhibitionUiSkin, type ExhibitionUiSkinPreset } from '../shared/exhibition.ts';
-import { ApiError } from './types.ts';
+import { ApiError, type SessionRecord } from './types.ts';
 import type { TryOnService } from './service.ts';
 import { ExhibitionSkinStore } from './exhibitionSkin.ts';
 
@@ -286,6 +286,73 @@ export class ExhibitionService {
     return this.liveService.bindExhibitionReference(id, { mirrorId: this.mirrorId, deviceId: input.deviceId as string, lookId: input.lookId as string, refImageUrl: input.refImageUrl as string });
   }
 
+  /** Upload/bind a new condition without replacing the running camera lease. */
+  async updateLiveCondition(id: string, input: unknown) {
+    this.tick(); await this.reconcileLive();
+    const { state, look, service } = this.currentConditionIntent(id, input);
+    if (look.source === 'upload') this.asset(look.id);
+    const intent = input as Record<string, unknown>;
+    return service.updateExhibitionCondition(id, {
+      mirrorId: this.mirrorId, deviceId: state.live!.deviceId, lookId: look.id,
+      sessionNumber: state.sessionNumber, generationNumber: state.generationNumber,
+      referenceAsset: look.referenceKind === 'none' ? '' : look.image,
+      referenceKind: look.referenceKind, mode: state.experienceMode,
+      prompt: exhibitionPromptForLook(look), refImageUrl: intent.refImageUrl as string | undefined,
+    }, () => this.conditionIntentIsCurrent(id, intent));
+  }
+
+  /** A successful SDK condition update is distinct from the stream's first frame. */
+  async liveConditionApplied(id: string, input: unknown): Promise<ExhibitionState> {
+    this.tick(); await this.reconcileLive();
+    const { service } = this.currentConditionIntent(id, input);
+    const session = await service.get(id, false);
+    const { state, look } = this.currentConditionIntent(id, input);
+    const intent = input as Record<string, unknown>;
+    if (!isNonnegativeInteger(intent.referenceVersion) || intent.referenceVersion < 1 || session.referenceVersion !== intent.referenceVersion
+      || session.status !== 'active' || !this.keepsLiveConnection(state, session)
+      || session.exhibition?.generationNumber !== state.generationNumber || session.exhibition.lookId !== look.id) {
+      throw new ApiError('EXHIBITION_STALE_GENERATION', '素材版本已更新，请等待当前换装完成。', 409);
+    }
+    // A duplicate acknowledgement must not reset an automatic display interval.
+    if (state.phase === 'showcase' && state.displayedLookId === look.id && state.live!.generationNumber === state.generationNumber) return this.get();
+    const draft = structuredClone(this.stored);
+    draft.state.live!.lookId = look.id; draft.state.live!.generationNumber = state.generationNumber;
+    draft.state.live!.status = 'running'; draft.state.live!.updatedAt = this.now();
+    draft.state.phase = 'showcase'; draft.state.displayedLookId = look.id; draft.state.generationReadyAt = null;
+    this.commit(draft, `${look.name}已更新至当前 XMAX 实时会话。`, this.now());
+    return this.get();
+  }
+
+  private conditionIntentIsCurrent(id: string, input: Record<string, unknown>): boolean {
+    const state = this.stored.state;
+    return this.keepsLiveConnection(state) && state.live!.sessionId === id && state.live!.deviceId === input.deviceId
+      && state.sessionNumber === input.sessionNumber && state.generationNumber === input.generationNumber
+      && state.selectedLookId === input.lookId && activeLookIds(state).includes(String(input.lookId));
+  }
+
+  private currentConditionIntent(id: string, input: unknown) {
+    const state = this.stored.state; const service = this.liveService;
+    if (!isRecord(input) || !service || !this.keepsLiveConnection(state) || state.live!.sessionId !== id
+      || state.live!.deviceId !== input.deviceId || input.sessionNumber !== state.sessionNumber) {
+      throw new ApiError('EXHIBITION_OWNER_MISMATCH', '设备或当前体验与实时会话不匹配。', 409);
+    }
+    if (!this.conditionIntentIsCurrent(id, input)) throw new ApiError('EXHIBITION_STALE_GENERATION', '素材选择已更新，请使用当前素材。', 409);
+    const look = state.looks.find(item => item.id === state.selectedLookId)!;
+    return { state, look, service };
+  }
+
+  private keepsLiveConnection(state: ExhibitionState, session?: Pick<SessionRecord, 'sourceKind' | 'providerSessionId' | 'exhibition'>): boolean {
+    const live = state.live;
+    if (!live?.sessionId || live.status !== 'running' || state.providerMode !== 'xmax' || state.experienceMode === 'mox'
+      || !['generating', 'showcase'].includes(state.phase) || live.generationNumber > state.generationNumber
+      || !state.looks.some(look => look.id === live.lookId && look.mode === state.experienceMode)) return false;
+    if (!session) return this.liveService?.canUpdateExhibitionCondition?.(live.sessionId, this.mirrorId) === true;
+    return session.sourceKind === 'camera' && !!session.providerSessionId && !!session.exhibition
+      && (session.exhibition.mirrorId ?? 'default') === this.mirrorId && session.exhibition.deviceId === live.deviceId
+      && session.exhibition.sessionNumber === state.sessionNumber && (session.exhibition.mode ?? 'clothx') === state.experienceMode
+      && session.exhibition.generationNumber >= live.generationNumber && session.exhibition.generationNumber <= state.generationNumber;
+  }
+
   liveFirstFrame(id: string, firstFrameMs: number) {
     const live = this.stored.state.live;
     if (!live || !['connecting', 'running'].includes(live.status) || live.generationNumber !== this.stored.state.generationNumber || live.sessionId !== id || this.stored.state.providerMode !== 'xmax' || this.stored.state.phase !== 'generating' || live.lookId !== this.stored.state.selectedLookId) return;
@@ -331,7 +398,9 @@ export class ExhibitionService {
       this.advanceAutomatic(this.now());
       state = this.stored.state;
     }
-    const interrupted = live.generationNumber !== state.generationNumber || state.providerMode !== 'xmax' || !['generating', 'showcase'].includes(state.phase) || state.selectedLookId !== live.lookId;
+    const materialChanged = live.generationNumber !== state.generationNumber || state.selectedLookId !== live.lookId;
+    const interrupted = state.providerMode !== 'xmax' || !['generating', 'showcase'].includes(state.phase)
+      || (materialChanged && !this.keepsLiveConnection(state, session));
     if (session.status !== 'stopped' && (interrupted || ownerLost || expired || exhausted || live.status === 'error' || session.status === 'stopping' || session.status === 'issuance_unknown')) {
       if (!['stopping', 'error'].includes(state.live?.status ?? '')) {
         const draft = structuredClone(this.stored);
@@ -349,7 +418,7 @@ export class ExhibitionService {
     }
     if (session.status === 'stopped' && this.stored.state.live?.sessionId === id) {
       const draft = structuredClone(this.stored); draft.state.live = null;
-      if (!interrupted && draft.state.generationNumber === live.generationNumber && session.exhibition?.sessionNumber === draft.state.sessionNumber && ['generating', 'showcase'].includes(draft.state.phase)) { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; draft.state.generationReadyAt = null; }
+      if (!interrupted && session.exhibition?.sessionNumber === draft.state.sessionNumber && ['generating', 'showcase'].includes(draft.state.phase)) { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; draft.state.generationReadyAt = null; }
       this.commit(draft, 'XMAX 临时凭证已停止，设备占用已释放。', this.now());
     }
   }
@@ -735,8 +804,9 @@ export class ExhibitionService {
       default: throw new ApiError('EXHIBITION_INVALID_COMMAND', '未知的展会操作。');
     }
     const live = state.live;
-    const interruptedSession = live?.sessionId && (live.generationNumber !== state.generationNumber || state.providerMode !== 'xmax'
-      || !['generating', 'showcase'].includes(state.phase) || live.lookId !== state.selectedLookId) ? live.sessionId : undefined;
+    const materialChanged = live?.generationNumber !== state.generationNumber || live?.lookId !== state.selectedLookId;
+    const interruptedSession = live?.sessionId && (state.providerMode !== 'xmax' || !['generating', 'showcase'].includes(state.phase)
+      || (materialChanged && !this.keepsLiveConnection(state))) ? live.sessionId : undefined;
     const locallyEnded = live?.localEnded === true && live.status === 'error' && live.sessionId && this.liveService?.isUnconfirmedExhibitionSession?.(live.sessionId, this.mirrorId) === true;
     if (interruptedSession && live && !locallyEnded) { delete live.localEnded; live.status = 'stopping'; live.updatedAt = time; }
     draft.lastCommandAt = time; this.commit(draft, message, time);

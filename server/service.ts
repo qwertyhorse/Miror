@@ -267,4 +267,56 @@ export class TryOnService {
       }
     }
   }
+  canUpdateExhibitionCondition(id: string, mirrorId: string): boolean {
+    let record: SessionRecord;
+    try { record = this.options.store.get(id); } catch { return false; }
+    return !!record.exhibition && (record.exhibition.mirrorId ?? 'default') === mirrorId && record.status === 'active' && !!record.providerSessionId && record.sourceKind === 'camera' && record.exhibition.mode !== 'mox';
+  }
+  /** Change conditions within an existing camera lease; credential and RTC ownership stay fixed. */
+  async updateExhibitionCondition(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; refImageUrl?: string }, isCurrent: () => boolean) {
+    const mirrorId = input.mirrorId ?? 'default';
+    if (typeof mirrorId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(mirrorId)) throw new ApiError('EXHIBITION_INVALID_MIRROR', '试衣镜编号无效。');
+    this.assertSessionMirror(id, mirrorId, true);
+    const record = this.options.store.get(id);
+    const lookId = boundedText(input.lookId, '展会服装 ID');
+    const deviceId = boundedText(input.deviceId, '设备 ID');
+    const mode = input.mode ?? 'clothx';
+    if (!EXHIBITION_EXPERIENCE_MODES.includes(mode)) throw new ApiError('EXHIBITION_INVALID_MODE', '请选择有效的体验模式。');
+    if (!Number.isSafeInteger(input.sessionNumber) || input.sessionNumber < 1 || !Number.isSafeInteger(input.generationNumber) || input.generationNumber < 1) throw new ApiError('EXHIBITION_INVALID_SESSION', '请先开始一轮展会体验。');
+    if (!record.exhibition || record.exhibition.deviceId !== deviceId || record.exhibition.sessionNumber !== input.sessionNumber) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前设备或体验轮次与会话不匹配。', 409);
+    if (record.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能更换素材。', 409);
+    if (!record.providerSessionId) throw new ApiError('SESSION_NOT_LINKED', '请先关联供应商会话。', 409);
+    if (record.sourceKind !== 'camera' || mode === 'mox' || (record.exhibition.mode ?? 'clothx') !== mode) throw new ApiError('EXHIBITION_SESSION_INCOMPATIBLE', '当前会话不能直接切换此体验模式。', 409);
+    const noReference = input.referenceKind === 'none';
+    if ((input.referenceKind !== undefined && input.referenceKind !== 'image' && !noReference) || (noReference && (mode !== 'free' || input.referenceAsset !== '' || (input.refImageUrl !== undefined && input.refImageUrl !== '')))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '仅 Free 模式可以不使用参考图，封面图不能作为参考图发送。');
+    if (mode === 'free' && (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.trim().length > EXHIBITION_FREE_PROMPT_MAX_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(input.prompt))) throw new ApiError('EXHIBITION_INVALID_PROMPT', 'Free 模式需要有效的提示词。');
+    const prompt = exhibitionPromptForLook({ mode, prompt: input.prompt });
+    const sample = /^\/assets\/exhibition\/(?:commute|city|evening)-cutout\.png$/.test(input.referenceAsset);
+    const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/(upload-[a-f0-9-]{36})$/.exec(input.referenceAsset);
+    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
+    const refImageUrl = noReference ? '' : boundedText(input.refImageUrl, '参考图链接', 4096);
+    const sameCondition = (current: SessionRecord) => current.sourceKind === 'camera' && current.providerSessionId === record.providerSessionId && current.exhibition?.deviceId === deviceId && current.exhibition.sessionNumber === input.sessionNumber && (current.exhibition.mirrorId ?? 'default') === mirrorId && (current.exhibition.mode ?? 'clothx') === mode && current.exhibition.lookId === lookId && current.exhibition.generationNumber === input.generationNumber && current.exhibition.prompt === prompt && current.referenceAsset === input.referenceAsset && current.refImageUrl === refImageUrl;
+    const stale = () => new ApiError('EXHIBITION_STALE_GENERATION', '素材选择已更新，请使用当前素材。', 409);
+    if (!isCurrent() || input.generationNumber < record.exhibition.generationNumber || (input.generationNumber === record.exhibition.generationNumber && !sameCondition(record))) throw stale();
+    if (input.generationNumber === record.exhibition.generationNumber) return this.public(record);
+    if (!noReference) {
+      const url = httpsUrl(refImageUrl);
+      const addresses = await (this.options.resolveHost ? this.options.resolveHost(url.hostname) : lookup(url.hostname, { all: true }).then(rows => rows.map(row => row.address)));
+      if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ApiError('REFERENCE_ADDRESS_BLOCKED', '参考图必须是 SDK 上传后可访问的云端链接。');
+    }
+    // DNS validation yields. A stop, another material change or a newer selection must win.
+    const latest = this.options.store.get(id);
+    if (latest.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能更换素材。', 409);
+    if (!isCurrent()) throw stale();
+    if (latest.sourceKind !== record.sourceKind || latest.referenceVersion !== record.referenceVersion || latest.refImageUrl !== record.refImageUrl || latest.referenceAsset !== record.referenceAsset || latest.providerSessionId !== record.providerSessionId || JSON.stringify(latest.exhibition) !== JSON.stringify(record.exhibition)) {
+      if (sameCondition(latest)) return this.public(latest);
+      throw stale();
+    }
+    return this.public(this.options.store.update(id, {
+      targetItemId: lookId, referenceAsset: input.referenceAsset, refImageUrl, referenceVersion: record.referenceVersion + 1,
+      exhibition: { ...record.exhibition, lookId, mode, prompt, generationNumber: input.generationNumber },
+      resultUrl: undefined, resultAvailable: false, verification: 'none', errorCode: undefined,
+    }));
+  }
+
 }

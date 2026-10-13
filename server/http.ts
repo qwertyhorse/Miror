@@ -91,6 +91,14 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           service.assertSessionMirror(liveReference[1], mirrorId, true);
           return json(response, 200, await current.bindLiveReference(liveReference[1], await body(request)));
         }
+        const liveCondition = /^\/live\/session\/([a-f0-9-]{36})\/condition(?:\/(applied))?$/.exec(path);
+        if (request.method === 'POST' && liveCondition) {
+          service.assertSessionMirror(liveCondition[1], mirrorId, true);
+          const input = await body(request);
+          return json(response, 200, liveCondition[2]
+            ? await current.liveConditionApplied(liveCondition[1], input)
+            : await current.updateLiveCondition(liveCondition[1], input));
+        }
         const session = /^\/sessions\/([a-f0-9-]{36})(?:\/(stop|link|first-frame))?$/.exec(path);
         if (mirrorRoute && session) {
           const [, id, action] = session;
@@ -103,7 +111,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'POST' && path === '/command') {
           const input = await body(request);
           current.command(input);
-          // Selection is local and immediate; keep the old lease until its background stop confirms.
+          // Selection is immediate. Running camera sessions apply conditions in place;
+          // incompatible or unfinished connections stop in the background.
           const reconciling = current.reconcileLive();
           if (['switch', 'next', 'previous'].includes(String(input.action))) void reconciling.catch(() => undefined);
           else await reconciling;

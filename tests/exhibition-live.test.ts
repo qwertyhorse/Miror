@@ -149,7 +149,7 @@ describe('explicit exhibition XMAX path', () => {
     expect(deactivate).toHaveBeenCalledTimes(4); expect(store.allocated()).toBe(120);
   });
 
-  it('switches to a chosen outfit in the same experience and accepts only its new live first frame', async () => {
+  it('switches a running camera outfit in the same experience and requires a current condition acknowledgement', async () => {
     const { exhibition, service, store, issue, deactivate, advance } = fixture(); start(exhibition);
     const previous = await create(exhibition);
     await exhibition.bindLiveReference(previous.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/commute.webp' });
@@ -167,18 +167,21 @@ describe('explicit exhibition XMAX path', () => {
     await expect(exhibition.reportLiveError({ deviceId, sessionId: previous.id, lookId: 'commute', sessionNumber: showcased.sessionNumber,
       generationNumber: showcased.generationNumber, message: '迟到的上一套错误' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
     expect(exhibition.get()).toEqual(switching);
-    // Creating the next round also reconciles and stops the previous credential first.
-    const next = await create(exhibition);
-    expect(deactivate).toHaveBeenCalledWith(previous.token); expect(store.get(previous.id).status).toBe('stopped');
-    expect(next.exhibition).toMatchObject({ lookId: 'evening', sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber });
-    expect(issue).toHaveBeenCalledTimes(2); expect(store.allocated()).toBe(60);
+    await exhibition.reconcileLive();
+    await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_DEVICE_BUSY' });
+    expect(deactivate).not.toHaveBeenCalled(); expect(store.get(previous.id).status).toBe('active');
+    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
     advance(5_000); exhibition.liveFirstFrame(previous.id, 300);
-    expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute', live: { sessionId: next.id } });
-    await exhibition.bindLiveReference(next.id, { deviceId, lookId: 'evening', refImageUrl: 'https://uploads.example/evening.webp' });
-    await service.link(next.id, 'ums-direct-switch-new');
-    await service.firstFrame(next.id, 400); exhibition.liveFirstFrame(next.id, 400);
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute', live: { sessionId: previous.id } });
+    const intent = { deviceId, lookId: 'evening', sessionNumber: switching.sessionNumber, generationNumber: switching.generationNumber };
+    const updated = await exhibition.updateLiveCondition(previous.id, { ...intent, refImageUrl: 'https://uploads.example/evening.webp' });
+    expect(updated).toMatchObject({ id: previous.id, providerSessionId: 'ums-direct-switch-old', referenceVersion: 2,
+      exhibition: { lookId: 'evening', sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber } });
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute' });
+    await exhibition.liveConditionApplied(previous.id, { ...intent, referenceVersion: updated.referenceVersion });
     expect(exhibition.get()).toMatchObject({ phase: 'showcase', selectedLookId: 'evening', displayedLookId: 'evening',
-      sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber, live: { status: 'running', sessionId: next.id } });
+      sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber, live: { status: 'running', sessionId: previous.id, firstFrameMs: 100 } });
+    expect(store.list()).toHaveLength(1); expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled();
   });
 
   it('does not allocate the chosen outfit until the previous live credential is confirmed stopped', async () => {
@@ -404,11 +407,15 @@ describe('live HTTP integration uses mock provider only', () => {
       await post(mirrorPath + '/live/heartbeat', { deviceId, sessionId: session.id });
       const switched = await post(mirrorPath + '/command', { action: 'switch', lookId: 'evening', expectedRevision: exhibition.get().revision });
       expect(switched).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute', sessionNumber: 1, generationNumber: 2,
-        live: { sessionId: session.id, status: 'stopping' } });
+        live: { sessionId: session.id, status: 'running', lookId: 'commute' } });
       await exhibition.reconcileLive();
-      expect(exhibition.get().live).toBeNull();
-      expect(store.get(session.id).status).toBe('stopped');
+      expect(store.get(session.id).status).toBe('active');
+      const intent = { deviceId, lookId: 'evening', sessionNumber: switched.sessionNumber, generationNumber: switched.generationNumber };
+      const updated = await post(`${mirrorPath}/live/session/${session.id}/condition`, { ...intent, refImageUrl: 'https://uploads.example/evening.webp' });
+      expect(await post(`${mirrorPath}/live/session/${session.id}/condition/applied`, { ...intent, referenceVersion: updated.referenceVersion }))
+        .toMatchObject({ phase: 'showcase', displayedLookId: 'evening', live: { sessionId: session.id, status: 'running' } });
       const stopped = await post(mirrorPath + '/command', { action: 'end' }); expect(stopped).toMatchObject({ phase: 'select', live: null });
+      expect(store.get(session.id).status).toBe('stopped'); expect(store.list()).toHaveLength(1);
     } finally { server.close(); await once(server, 'close'); }
   });
 });

@@ -1,0 +1,57 @@
+{
+  "verifiedAt": "2026-10-13T14:34:01.656777+08:00",
+  "scope": "V1.1 standalone exhibition frontend, staff console and API synchronized from current workspace",
+  "baseCommit": "73135e6f56b26afc41e0020b183b1fc81da5602b",
+  "changes": [
+    "Local MediaPipe waving input reusing the screen camera",
+    "Compatible material conditions update within one RTC session and temporary credential",
+    "Local camera retained after cloud failure and reused on explicit retry"
+  ],
+  "build": {
+    "passed": true,
+    "frontendTypecheck": true,
+    "backendTypecheck": true
+  },
+  "unitTests": {
+    "passed": true,
+    "files": 55,
+    "tests": 811,
+    "failed": 0
+  },
+  "runtimeTests": {
+    "passed": true,
+    "tests": 4
+  },
+  "packageSmoke": {
+    "passed": true,
+    "temporaryListenersOnly": true,
+    "providerCalls": 0,
+    "importsChecked": 112,
+    "materialAssets": 99,
+    "securityChecks": 10
+  },
+  "localGestureAssets": {
+    "modelAndWasmBundled": true,
+    "licensesIncluded": true,
+    "sourceBytesMatchWorkspace": true
+  },
+  "exclusions": [
+    "real .env",
+    "runtime .data",
+    "SK and temporary credentials",
+    "device bindings",
+    "session databases and logs",
+    "TLS private keys",
+    "node_modules",
+    "dist",
+    "V1.0",
+    "historical build backups",
+    "browser evidence"
+  ],
+  "limitations": [
+    "No new physical mirror or live XMAX validation in this synchronization",
+    "Camera, lighting and recognition distance require on-site checks",
+    "Previous production-only install validation is retained in docs/verification.json"
+  ],
+  "siteDeployed": false
+}

@@ -1,5 +1,5 @@
 OpenBuy 展会智能镜技术交接
-日期：2026-10-12　版本：V1.1
+日期：2026-10-13　版本：V1.1
 
 交付内容
 src/：镜端大屏与工作人员后台；server/：Node API；shared/：共享类型与协议。
@@ -45,6 +45,6 @@ Windows：附启动展会.cmd，本次未做 Windows 实机验收。
   npm test
   npm run test:runtime
   npm run test:package
-本次源码包含连续快速切换素材及停止竞争处理。交付 SHA256 清单用于核对包内文件。
-当前展会代码尚未实现 MediaPipe 挥手识别，挥手触发、双摄像头路由和现场识别参数需后续开发与实机联调。
-本次仅做本地技术打包，未发布或部署站点。
+本次源码包含挥手切换素材、同一实时会话内换装、失败保留本地取景与主动重试；当前验收记录见 docs/verification-20261013.json。
+MediaPipe 挥手识别已接入本地 Worker，复用当前摄像头；public/assets/exhibition-gestures 与 body-scan/wasm 资源需随前端一同提供。现场识别参数及双摄像头路由仍需实机联调。
+本次同步前后端源码到 GitHub，未发布或部署站点。

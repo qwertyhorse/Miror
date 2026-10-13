@@ -235,6 +235,8 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 | GET | `M/live/status` | — | 200 `ExhibitionLiveStatus` |
 | POST | `M/live/session` | 见下例 | 201 会话对象 + 临时 `token` + `model` |
 | POST | `M/live/session/{sessionId}/reference` | `{ "deviceId": "screen_device_001", "lookId": "commute", "refImageUrl": "https://供应商上传地址/参考图.webp" }` | 200 会话对象 |
+| POST | `M/live/session/{sessionId}/condition` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、可选 `refImageUrl` | 200 更新后的会话，包含 `referenceVersion` |
+| POST | `M/live/session/{sessionId}/condition/applied` | 同上，加 `referenceVersion` | 200 镜状态，确认当前素材已应用 |
 | POST | `M/live/heartbeat` | `{ "deviceId": "screen_device_001", "sessionId": "会话 UUID" }` | 200 镜状态 |
 | POST | `M/live/error` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、`message`；已有会话时加 `sessionId` | 200 暂停后的镜状态 |
 | GET | `S` | — | 200 会话对象，更新供应商凭证状态 |
@@ -281,7 +283,8 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 3. 通过对应区域官方 SDK 上传参考图，将云端 HTTPS 链接提交给 `live/session/{id}/reference`。Free 的 `referenceKind=none` 跳过参考图上传和绑定；MoX 使用图片输入。
 4. SDK 建立 RTC 后，调用 `S/link` 关联真实供应商会话；收到真实远端首帧后调用 `S/first-frame`。仅上报首帧才进入 `showcase`，`firstFrameMs` 范围 0–120000。
 5. 每 5 秒提交本地 `live/heartbeat`。超过 15 秒未收到心跳、有效期结束或达到单次上限时，服务端尝试停止并释放占用。
-6. 停止/切换/离开时释放 SDK 和摄像头，提交 `command.end` 或 `command.idle`，并对已创建会话调用 `S/stop`；以服务端停止确认完成为准。
+6. 正在运行的兼容摄像头会话切换素材时，先提交 `command.switch`，在原会话调用 `condition`，用返回的参考图和提示词更新 SDK 条件；SDK 确认成功后提交 `condition/applied`。两次请求均带当前 `deviceId`、`lookId`、`sessionNumber`、`generationNumber`，确认请求再带 `referenceVersion`。旧素材的迟到请求返回 409，不替换最新选择；保持原 RTC、摄像头和临时凭证。MoX、模式改变或未连接会话继续走停止与重建流程。
+7. 停止或离开时释放 SDK 和摄像头，提交 `command.end` 或 `command.idle`，并对已创建会话调用 `S/stop`；以服务端停止确认完成为准。
 
 会话状态为 `reserved` / `active` / `stopping` / `stopped` / `issuance_unknown` / `error`。签发或停止状态未知时保留异常记录，不自动重复申请。`recover` 仅释放已结束的本地占用，不宣称未知云端凭证已撤销。
 

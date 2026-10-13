@@ -25,6 +25,8 @@ export function exhibitionLiveFailure(cause: unknown, fallbackMessage: string): 
   const reason = typeof details?.reason_code === 'string' ? details.reason_code : '';
   let message = safeExhibitionErrorMessage(fallbackMessage);
   if (code === 'INVALID_API_KEY') message = 'XMAX 凭证无效，请检查后台配置。';
+  else if (details?.business_code === 500 || (typeof details?.http_status === 'number' && details.http_status >= 500))
+    message = 'XMAX 生成服务暂时异常，请稍后重试。';
   else if (reason === 'remote_first_frame_timeout') message = '生成画面等待超时，请检查镜端网络后重试。';
   else if (reason === 'local_outbound_track_ended') message = '摄像头已断开，请重新开启。';
   else if (['local_outbound_zero_sent_frame_rate', 'local_outbound_not_ready', 'local_publish_failed', 'local_outbound_track_muted'].includes(reason))

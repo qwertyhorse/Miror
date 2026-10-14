@@ -15,6 +15,7 @@ import { OutfitSwitchSettings } from './OutfitSwitchSettings';
 import { MirrorUiSkinSettings } from './MirrorUiSkinSettings';
 import { MirrorCredentialSettings } from './MirrorCredentialSettings';
 import { GestureRecognitionSettings } from './GestureRecognitionSettings';
+import { SessionLimitSettings } from './SessionLimitSettings';
 import { CustomSelect } from '../components/SelectionControls';
 
 function useModal() {
@@ -116,9 +117,14 @@ function DeviceSettings({ controller, live, mirrorId }: { controller: Exhibition
     <div className="ex-device-setting-grid">
       <div className="ex-device-setting"><span className="ex-device-setting-label">无操作返回待机</span><div className="ex-form-row"><CustomSelect className="ex-device-select" label="无操作返回待机" value={timeout} disabled={disabled} onChange={value => { if (baseline === undefined) setBaseline(state!.revision); setTimeoutValue(value); setSaved(false); }} options={[{ value: '0', label: '关闭自动返回' }, ...[30, 60, 90, 180, 300, ...(![0, 30, 60, 90, 180, 300].includes(Number(timeout)) ? [Number(timeout)] : [])].sort((a, b) => a - b).map(seconds => ({ value: String(seconds), label: seconds < 180 ? `${seconds} 秒` : `${seconds / 60} 分钟` }))]} /><button className="ex-button" disabled={disabled} onClick={async () => { if (await send({ action: 'configure', autoReturnSeconds: Number(timeout), expectedRevision: baseline })) { setBaseline(undefined); setSaved(true); } }}>保存</button>{saved && <span className="ex-saved" role="status"><Check size={14} />已保存</span>}</div>{baseline !== undefined && <button type="button" className="ex-reset-setting" disabled={pending} onClick={() => { setBaseline(undefined); setTimeoutValue(String(state!.settings.autoReturnSeconds)); setSaved(false); controller.clearError(); }}>放弃修改，读取最新设置</button>}</div>
       <div className="ex-device-setting"><span className="ex-device-setting-label">运行方式</span><CustomSelect className="ex-device-select" label="运行方式" value={state!.providerMode} disabled={disabled} onChange={value => void send({ action: 'configure', providerMode: value as 'demo' | 'xmax' })} options={[{ value: 'demo', label: '交互演示' }, { value: 'xmax', label: 'XMAX 实时生成' }]} /></div>
+      <div className="ex-device-setting"><span className="ex-device-setting-label">素材栏列数</span><CustomSelect className="ex-device-select" label="素材栏列数" value={String(state!.settings.materialDrawerColumns ?? 2)} disabled={disabled} onChange={value => {
+        if (disabled || (value !== '1' && value !== '2') || Number(value) === (state!.settings.materialDrawerColumns ?? 2)) return;
+        void send({ action: 'configure', materialDrawerColumns: value === '1' ? 1 : 2, expectedRevision: state!.revision });
+      }} options={[{ value: '1', label: '一列' }, { value: '2', label: '两列' }]} /></div>
     </div>
     <GestureRecognitionSettings key={`gestures-${mirrorId}`} controller={controller} />
     <MirrorCredentialSettings key={`credentials-${mirrorId}`} controller={controller} live={live} />
+    <SessionLimitSettings key={`session-limits-${mirrorId}`} controller={controller} />
     <MirrorUiSkinSettings key={`skin-${mirrorId}`} controller={controller} />
     <details className="ex-device-details"><summary>素材上传限制<span>文件大小与图片尺寸</span></summary><UploadLimitsSettings controller={controller} /></details>
     <details className="ex-device-details"><summary>设备入口<span>镜端与后台地址</span></summary><div className="ex-device-links">

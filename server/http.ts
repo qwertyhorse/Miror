@@ -53,10 +53,10 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (!current) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这面试衣镜。', 404);
         const path = mirrorRoute ? mirrorRoute[2] ?? '' : url.pathname.slice('/api/exhibition'.length);
         if (mirrorRoute && path === '/credentials') {
-          if (request.method === 'GET') return json(response, 200, service.mirrorCredentialsStatus(mirrorId, current.credentialsEditable()));
+          if (request.method === 'GET') return json(response, 200, { ...service.mirrorCredentialsStatus(mirrorId, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
           if (request.method === 'PUT') {
             const input = await body(request, 2_048);
-            return json(response, 200, service.saveMirrorCredentials(mirrorId, input, current.credentialsEditable()));
+            return json(response, 200, { ...service.saveMirrorCredentials(mirrorId, input, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
           }
           throw new ApiError('NOT_FOUND', '未找到镜端密钥接口。', 404);
         }
@@ -80,6 +80,12 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           const timer = setTimeout(finish, 8_000);
           response.once('close', () => { done = true; clearTimeout(timer); unsubscribe(); waitingForChanges--; });
           return;
+        }
+        if (request.method === 'GET' && path === '/references') return json(response, 200, { references: current.referencePreparationStatuses() });
+        const retryReference = /^\/references\/([^/]+)\/retry$/.exec(path);
+        if (request.method === 'POST' && retryReference) {
+          await body(request);
+          return json(response, 202, { status: current.retryReferencePreparation(retryReference[1]) });
         }
         const preparedReference = /^\/references\/([^/]+)$/.exec(path);
         if (preparedReference && request.method === 'GET') return json(response, 200, { reference: current.readyReference(preparedReference[1]) });
@@ -106,6 +112,14 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           const created = await current.createLiveSession(input, { cancelled: () => response.destroyed }); localId = created.id;
           if (response.destroyed) { await service.stop(created.id); await current.reconcileLive(); return; }
           return json(response, 201, created);
+        }
+        const liveRenewal = /^\/live\/session\/([a-f0-9-]{36})\/renewal(?:\/(commit))?$/.exec(path);
+        if (request.method === 'POST' && liveRenewal) {
+          service.assertSessionMirror(liveRenewal[1], mirrorId, true);
+          const input = await body(request);
+          return json(response, 200, liveRenewal[2]
+            ? await current.commitLiveRenewal(liveRenewal[1], input)
+            : await current.prepareLiveRenewal(liveRenewal[1], input));
         }
         const liveReference = /^\/live\/session\/([a-f0-9-]{36})\/reference$/.exec(path);
         if (request.method === 'POST' && liveReference) {

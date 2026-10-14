@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ReferencePreparationStage, ReferencePreparationStatus } from '../shared/referencePreparation.ts';
+import { preparationFailureMessage, ReferencePreparationError } from './referencePreparation.ts';
 
 export interface ReferenceSource { scope: string; bytes: Buffer; mime: string }
+export interface ReferenceIdentity { scope: string; sha256: string; mime: string }
 export interface ReadyReference { url: string; sha256: string; scope: string; freshUntil: number }
 export interface ReferenceStorage {
-  upload(bytes: Buffer, sha256: string, mime: string): Promise<string>;
+  upload(bytes: Buffer, sha256: string, mime: string, onStage?: (stage: ReferencePreparationStage) => void): Promise<string>;
   check(url: string): Promise<boolean>;
 }
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -20,6 +23,7 @@ export function safeReferenceUrl(value: string): boolean {
 export class ReferenceAssets {
   private readonly pending = new Map<string, Promise<ReadyReference>>();
   private readonly retryAfter = new Map<string, number>();
+  private readonly progress = new Map<string, ReferencePreparationStatus>();
   private readonly directory: string;
   private readonly now: () => number;
   constructor(directory: string, options: { now?: () => number } = {}) {
@@ -27,11 +31,11 @@ export class ReferenceAssets {
     this.now = options.now ?? Date.now;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
   }
-  private identity(input: ReferenceSource) {
-    const sha256 = hash(input.bytes);
+  private identity(input: ReferenceSource | ReferenceIdentity) {
+    const sha256 = 'sha256' in input ? input.sha256 : hash(input.bytes);
     return { sha256, id: hash(JSON.stringify([input.scope, sha256, input.mime])) };
   }
-  private read(input: ReferenceSource): ReadyReference | null {
+  private read(input: ReferenceSource | ReferenceIdentity): ReadyReference | null {
     const { id, sha256 } = this.identity(input);
     try {
       const record = JSON.parse(readFileSync(join(this.directory, id + '.json'), 'utf8'));
@@ -40,9 +44,17 @@ export class ReferenceAssets {
         ? { url: record.url, sha256, scope: input.scope, freshUntil: record.freshUntil } : null;
     } catch { return null; } // Corrupt derived copies can be rebuilt from the source.
   }
-  ready(input: ReferenceSource): ReadyReference | null {
+  ready(input: ReferenceSource | ReferenceIdentity): ReadyReference | null {
     const record = this.read(input);
     return record && record.freshUntil > this.now() ? record : null;
+  }
+  status(input: ReferenceIdentity): ReferencePreparationStatus {
+    const { id } = this.identity(input);
+    const progress = this.progress.get(id);
+    if (progress) return { ...progress };
+    const ready = this.ready(input);
+    if (ready) return { state: 'ready', freshUntil: ready.freshUntil };
+    return { state: 'queued' };
   }
   prepare(input: ReferenceSource, provider: ReferenceStorage): Promise<ReadyReference> {
     const ready = this.ready(input);
@@ -52,22 +64,35 @@ export class ReferenceAssets {
     if (existing) return existing;
     if (this.pending.size >= 2) return Promise.reject(new Error('Reference preparation busy'));
     if ((this.retryAfter.get(id) ?? 0) > this.now()) return Promise.reject(new Error('Reference preparation cooling down'));
+    const onStage = (stage: ReferencePreparationStage) => {
+      this.progress.set(id, { state: 'preparing', stage, updatedAt: this.now() });
+    };
+    onStage('credentials');
     const task = (async () => {
       const previous = this.read(input);
       // A transport failure throws; only a definite missing/denied object is reuploaded.
+      if (previous) onStage('availability');
       const reusable = previous && await provider.check(previous.url);
-      const url = reusable ? previous.url : await provider.upload(input.bytes, sha256, input.mime);
-      if (!safeReferenceUrl(url)) throw new Error('Invalid reference storage response');
+      const url = reusable ? previous.url : await provider.upload(input.bytes, sha256, input.mime, onStage);
+      if (!safeReferenceUrl(url)) throw new ReferencePreparationError('check', 'malformed');
       const record = { schemaVersion: 1, url, sha256, scope: input.scope, freshUntil: this.now() + 60 * 60_000 };
       const target = join(this.directory, id + '.json');
       const temporary = target + '.' + randomUUID() + '.tmp';
       try { writeFileSync(temporary, JSON.stringify(record), { mode: 0o600, flag: 'wx' }); renameSync(temporary, target); }
       finally { rmSync(temporary, { force: true }); }
       this.retryAfter.delete(id);
+      this.progress.delete(id);
       return { url, sha256, scope: input.scope, freshUntil: record.freshUntil };
     })().catch(error => {
-      this.retryAfter.set(id, this.now() + 60_000);
+      const retryAt = this.now() + 60_000;
+      this.retryAfter.set(id, retryAt);
+      this.progress.set(id, { state: 'failed', message: preparationFailureMessage(error), retryAt, updatedAt: this.now(),
+        ...(error instanceof ReferencePreparationError ? { stage: error.stage } : {}) });
       while (this.retryAfter.size > 2_000) this.retryAfter.delete(this.retryAfter.keys().next().value!);
+      for (const [key, value] of this.progress) {
+        if (this.progress.size <= 2_000) break;
+        if (value.state !== 'preparing') this.progress.delete(key);
+      }
       throw error;
     }).finally(() => this.pending.delete(id));
     this.pending.set(id, task);

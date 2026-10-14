@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { isBenchmarkAddress } from './network.ts';
 import { ApiError, type Provider, type SessionRecord, type SessionRequest } from './types.ts';
 import type { XmaxRegion } from '../shared/xmax.ts';
 import { apiKeyBudgetScope, SecretBox, SessionStore } from './store.ts';
@@ -10,6 +11,8 @@ import { EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibit
 
 import { ReferenceAssets, type ReferenceStorage } from './referenceAssets.ts';
 import { referenceStorage } from './referenceStorage.ts';
+import type { ReferencePreparationStatus } from '../shared/referencePreparation.ts';
+import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
 export interface ServiceOptions {
   provider: Provider; store: SessionStore; secrets: SecretBox;
@@ -21,6 +24,7 @@ export interface ServiceOptions {
   providerForApiKey?: (apiKey: string, region?: XmaxRegion) => Provider;
 }
 export function publicAddress(address: string): boolean {
+  if (isBenchmarkAddress(address)) return false;
   if (isIP(address) === 4) {
     const [a, b] = address.split('.').map(Number);
     return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0)) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19)));
@@ -47,9 +51,9 @@ export class TryOnService {
   readonly perSessionLimit: number; readonly expireSeconds: number;
   private readonly stoppingSessions = new Map<string, Promise<Omit<SessionRecord, 'tokenCipher' | 'providerKeyCipher'>>>();
   constructor(readonly options: ServiceOptions) {
-    this.perSessionLimit = Math.min(30, options.perSessionLimit ?? 30);
-    this.expireSeconds = Math.min(120, options.expireSeconds ?? 120);
-    if (![this.perSessionLimit, this.expireSeconds].every(n => Number.isInteger(n) && n > 0)) throw new Error('Invalid temporary credential configuration');
+    this.perSessionLimit = options.perSessionLimit === undefined ? DEFAULT_SESSION_LIMITS.credits! : options.perSessionLimit;
+    this.expireSeconds = options.expireSeconds === undefined ? DEFAULT_SESSION_LIMITS.expireSeconds : options.expireSeconds;
+    if (this.perSessionLimit === null || !isSessionLimits({ credits: this.perSessionLimit, expireSeconds: this.expireSeconds })) throw new Error('Invalid temporary credential configuration');
   }
   private token(record: SessionRecord): string {
     if (!record.tokenCipher) throw new ApiError('SESSION_NOT_READY', '会话尚未签发临时凭证。', 409);
@@ -72,6 +76,11 @@ export class TryOnService {
   readyReference(mirrorId: string, bytes: Buffer, mime: string) {
     const context = this.referenceContext(mirrorId);
     return context.provider.configured ? this.options.referenceAssets?.ready({ scope: context.scope, bytes, mime }) ?? null : null;
+  }
+  referencePreparationStatus(mirrorId: string, sha256: string, mime: string): ReferencePreparationStatus {
+    const context = this.referenceContext(mirrorId);
+    if (!context.key || !context.provider.configured || !this.options.referenceAssets) return { state: 'unconfigured' };
+    return this.options.referenceAssets.status({ scope: context.scope, sha256, mime });
   }
   async prepareReference(mirrorId: string, bytes: Buffer, mime: string) {
     const context = this.referenceContext(mirrorId);
@@ -144,7 +153,7 @@ export class TryOnService {
     return this.mirrorCredentialsStatus(mirrorId);
   }
   /** Mirror-only session issuance; supplier quota is authoritative. */
-  async createExhibition(input: { mirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
+  async createExhibition(input: { mirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number; sessionLimits?: ExhibitionSessionLimits }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
     const lookId = boundedText(input.lookId, '展会服装 ID');
     const deviceId = boundedText(input.deviceId, '设备 ID');
     const mirrorId = input.mirrorId ?? 'default';
@@ -160,14 +169,17 @@ export class TryOnService {
     if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
     if (!Number.isSafeInteger(input.sessionNumber) || input.sessionNumber < 1 || !Number.isSafeInteger(input.generationNumber) || input.generationNumber < 1) throw new ApiError('EXHIBITION_INVALID_SESSION', '请先开始一轮展会体验。');
     return this.reserveSession({ targetItemId: lookId, sourceId: `exhibition:${deviceId}`, sourceKind: mode === 'mox' ? 'photo' : 'camera', sourceName: boundedText(input.name, '展会服装名称') }, '', input.referenceAsset, hooks,
-      { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber } });
+      { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber, ...(input.sessionLimits?.credits === null ? { continuous: true } : {}) } }, input.sessionLimits);
   }
   private async reserveSession(request: SessionRequest, reference: string, referenceAsset: string | undefined,
-    hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }, extra: Pick<SessionRecord, 'exhibition'> = {}) {
+    hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }, extra: Pick<SessionRecord, 'exhibition'> = {}, sessionLimits?: ExhibitionSessionLimits) {
+    const limits = sessionLimits === undefined ? { credits: this.perSessionLimit, expireSeconds: this.expireSeconds } : { ...sessionLimits };
+    if (!isSessionLimits(limits)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请设置有效的单轮积分上限与凭证有效期。');
+    const credits = limits.credits ?? CONTINUOUS_SEGMENT_CREDITS;
     const context = this.credentialContext(extra.exhibition ? extra.exhibition.mirrorId ?? 'default' : undefined);
     if (!context.provider.configured) throw new ApiError('MISSING_API_KEY', '尚未配置 XMax 服务端凭证。', 503);
     const now = new Date().toISOString();
-    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: this.perSessionLimit,
+    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: credits,
       refImageUrl: reference, referenceAsset, referenceVersion: 0, consumedCredits: 0, resultAvailable: false, verification: 'none', createdAt: now, updatedAt: now,
       referenceScope: createHash('sha256').update(`${context.region}:${context.scope}`).digest('hex'),
       providerRegion: context.region, ...(context.key ? { providerKeyCipher: this.options.secrets.encrypt(context.key) } : {}) };
@@ -175,7 +187,7 @@ export class TryOnService {
     this.options.store.reserve(record, undefined, context.scope); hooks?.onReserved?.(record.id);
     try {
       if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') { this.options.store.update(record.id, { status: 'stopped' }); throw new ApiError('SESSION_CANCELLED', '试穿已取消。', 409); }
-      const issued = await context.provider.issueKey(this.perSessionLimit, this.expireSeconds);
+      const issued = await context.provider.issueKey(credits, limits.expireSeconds);
       this.options.store.update(record.id, { tokenCipher: this.options.secrets.encrypt(issued.token), expiresAt: issued.expiresAt });
       if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') {
         await this.stop(record.id);

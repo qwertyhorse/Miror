@@ -7,6 +7,8 @@ export interface ExhibitionGestureSettings {
   minTrackingConfidence: number;
   palmConfirmMs: number;
   palmReleaseMs: number;
+  palmLowerMs: number;
+  lowerTrackingGraceMs: number;
   maxFps: number;
   inputLongEdge: 480 | 720 | 960;
 }
@@ -18,6 +20,8 @@ export const DEFAULT_EXHIBITION_GESTURE_SETTINGS: ExhibitionGestureSettings = {
   minTrackingConfidence: 0.5,
   palmConfirmMs: 300,
   palmReleaseMs: 500,
+  palmLowerMs: 350,
+  lowerTrackingGraceMs: 500,
   maxFps: 15,
   inputLongEdge: 720,
 };
@@ -37,13 +41,19 @@ export function isExhibitionGestureSettings(value: unknown): value is Exhibition
     && new Set(settings.gestures).size === settings.gestures.length
     && confidence(settings.minHandDetectionConfidence) && confidence(settings.minHandPresenceConfidence)
     && confidence(settings.minTrackingConfidence) && integerIn(settings.palmConfirmMs, 150, 1000)
-    && integerIn(settings.palmReleaseMs, 300, 1500) && integerIn(settings.maxFps, 5, 30)
+    && integerIn(settings.palmReleaseMs, 300, 1500) && integerIn(settings.palmLowerMs, 150, 1500)
+    && integerIn(settings.lowerTrackingGraceMs, 100, 1000) && integerIn(settings.maxFps, 5, 30)
     && (settings.inputLongEdge === 480 || settings.inputLongEdge === 720 || settings.inputLongEdge === 960);
 }
 
-/** Legacy or invalid persisted settings safely fall back without sharing mutable arrays. */
+/** Fill only newly introduced fields in legacy settings; invalid values still fall back atomically. */
 export function resolveExhibitionGestureSettings(value?: unknown): ExhibitionGestureSettings {
-  const settings = isExhibitionGestureSettings(value) ? value : DEFAULT_EXHIBITION_GESTURE_SETTINGS;
+  const migrated = value && typeof value === 'object' && !Array.isArray(value) ? {
+    palmLowerMs: DEFAULT_EXHIBITION_GESTURE_SETTINGS.palmLowerMs,
+    lowerTrackingGraceMs: DEFAULT_EXHIBITION_GESTURE_SETTINGS.lowerTrackingGraceMs,
+    ...value,
+  } : value;
+  const settings = isExhibitionGestureSettings(migrated) ? migrated : DEFAULT_EXHIBITION_GESTURE_SETTINGS;
   return {
     gestures: [...settings.gestures],
     minHandDetectionConfidence: settings.minHandDetectionConfidence,
@@ -51,6 +61,8 @@ export function resolveExhibitionGestureSettings(value?: unknown): ExhibitionGes
     minTrackingConfidence: settings.minTrackingConfidence,
     palmConfirmMs: settings.palmConfirmMs,
     palmReleaseMs: settings.palmReleaseMs,
+    palmLowerMs: settings.palmLowerMs,
+    lowerTrackingGraceMs: settings.lowerTrackingGraceMs,
     maxFps: settings.maxFps,
     inputLongEdge: settings.inputLongEdge,
   };

@@ -1,0 +1,17 @@
+.ex-reference-preparation{width:100%;margin-top:10px;font-size:10px;line-height:1.5;color:#8b7c9d}
+.ex-reference-status-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;min-height:26px}
+.ex-reference-state,.ex-reference-state>span{display:inline-flex;align-items:center;gap:5px}
+.ex-reference-ready{color:#4f7b63}
+.ex-reference-preparing,.ex-reference-loading{color:#7862b1}
+.ex-reference-failed,.ex-reference-unknown{color:#a2515d}
+.ex-reference-retry{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:4px 6px;min-height:28px;border:1px solid #e6c9cf;border-radius:5px;background:#fff8f9;color:#a2515d;font:inherit;cursor:pointer;white-space:nowrap}
+.ex-reference-retry:hover:not(:disabled){background:#fcebef;border-color:#ce8a98}
+.ex-reference-retry:disabled{opacity:.55;cursor:default}
+.ex-reference-retry:focus-visible,.ex-reference-fetch-error>button:focus-visible{outline:2px solid #9b88dc;outline-offset:2px}
+.ex-library .ex-reference-error{margin:5px 0 0;font-size:10px;line-height:1.6;color:#a2515d;overflow-wrap:anywhere}
+.ex-reference-fetch-error{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px;padding:8px 12px;border:1px solid #ebd5db;border-radius:6px;background:#fff8fa;color:#a2515d;font-size:12px}
+.ex-reference-fetch-error>button{border:0;background:transparent;color:inherit;font:inherit;min-height:30px;text-decoration:underline;white-space:nowrap}
+.ex-reference-spinner{animation:ex-reference-spin 1.2s linear infinite}
+@keyframes ex-reference-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.ex-reference-spinner{animation:none}}
+@media(pointer:coarse){.ex-reference-retry{min-height:44px;padding:8px}.ex-reference-fetch-error>button{min-height:44px}}

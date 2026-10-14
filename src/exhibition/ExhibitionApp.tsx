@@ -13,6 +13,7 @@ import { TerminalPairingScreen } from './TerminalPairingScreen';
 import { useExhibitionLive, type ExhibitionLiveController } from './useExhibitionLive';
 import { StreamVideo } from './LiveCameraPanel';
 import { useExhibitionGestures } from './useExhibitionGestures';
+import { usePresenterKeys } from './usePresenterKeys';
 import { useExhibition, type ExhibitionController } from './useExhibition';
 import { MirrorMaterialDrawer } from './MirrorMaterialDrawer';
 import { MoXDragSurface } from './MoXDragSurface';
@@ -28,6 +29,39 @@ import './mirror-screen.css';
 
 function Brand() {
   return <span className="ex-brand"><img src={appUrl('/assets/exhibition/openbuy-ai-logo-rgb.png')} alt="OpenBuyAI" /></span>;
+}
+
+interface GestureAcknowledgement {
+  epoch: number;
+  mirrorId: string;
+  sessionNumber: number;
+  mode: ExhibitionState['experienceMode'];
+  revision: number;
+  generationNumber: number;
+  previousLookId: ExhibitionState['selectedLookId'];
+  lookId: string;
+  action: 'select' | 'switch';
+  label: string;
+  showSuccess: boolean;
+}
+
+interface PresenterSelection {
+  scope: string;
+  lookId: string;
+  revision: number;
+  pending: boolean;
+}
+
+function presenterScope(state: ExhibitionState) {
+  return `${state.mirrorId ?? 'default'}:${state.sessionNumber}:${state.experienceMode ?? 'clothx'}`;
+}
+
+function matchesGestureTarget(ack: GestureAcknowledgement, state: ExhibitionState) {
+  const generation = ack.generationNumber + (ack.action === 'switch' ? 1 : 0);
+  return (state.mirrorId ?? 'default') === ack.mirrorId && state.sessionNumber === ack.sessionNumber
+    && state.experienceMode === ack.mode && ['idle', 'select', 'generating', 'showcase'].includes(state.phase)
+    && state.generationNumber >= ack.generationNumber && state.generationNumber <= generation
+    && (state.selectedLookId === ack.lookId || (state.selectedLookId === ack.previousLookId && state.revision === ack.revision));
 }
 
 export function Kiosk({ state, send, disabled = false, passive = false, live, stopExperience, stopPending = false, commandPending = false, selectionPending = false, canControl = true, presentation = 'terminal', diagnostics = null, sendDiagnosed }: {
@@ -51,7 +85,11 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const [gesturesOn, setGesturesOn] = useState(true);
   const [gestureReset, setGestureReset] = useState(0);
   const [gestureSelection, setGestureSelection] = useState<{ lookId: string; revision: number } | null>(null);
+  const [gestureAcknowledgement, setGestureAcknowledgement] = useState<GestureAcknowledgement | null>(null);
+  const gestureFeedbackEpoch = useRef(0);
   const gesturePending = useRef(false);
+  const presenterTarget = useRef<PresenterSelection | null>(null);
+  const [presenterSelection, setPresenterSelection] = useState<PresenterSelection | null>(null);
   const starting = useRef(false);
   const beginIntent = useRef(0);
   const stopping = useRef(false);
@@ -74,8 +112,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const visualSource = !localView || welcome ? null : showingInputImage ? '素材预览'
     : live?.outputStream ? (live.status === 'running' && state.phase === 'showcase') || (state.live?.status === 'running' && state.phase === 'generating') ? '生成结果' : null
       : null;
-  const generationPending = localView && state.phase === 'generating' && live?.status !== 'stopping' && live?.status !== 'error';
-  const preparationLabel = live?.outputStream && state.live?.status === 'running' ? '正在换装'
+  const generationPending = localView && (state.phase === 'generating' || !!state.live?.renewal) && live?.status !== 'stopping' && live?.status !== 'error';
+  const preparationLabel = state.live?.renewal ? '正在续接体验' : live?.outputStream && state.live?.status === 'running' ? '正在换装'
     : live?.status === 'opening' ? '开启摄像头'
     : live?.status === 'preparing' ? '准备素材'
       : live?.status === 'connecting' ? '连接实时服务' : live?.status === 'running' ? '等待生成画面' : '等待连接';
@@ -122,6 +160,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       if (stopping.current || stopPending) return false;
       stopping.current = true; ++beginIntent.current; starting.current = false;
       diagnosticEpoch.current++;
+      gestureFeedbackEpoch.current++;
+      setGestureAcknowledgement(null);
       diagnostics?.observe(diagnosticContext(currentRound.current.state), { active: false });
       setGestureReset(value => value + 1);
       setGestureSelection(null);
@@ -172,14 +212,66 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const stopButton = hasStop ? <button type="button" className="ex-kiosk-primary ex-kiosk-stop" disabled={passive || !canControl || !send || stopPending || localStopPending} onClick={() => void command({ action: 'end' })}><Square fill="currentColor" />{stopPending || localStopPending ? '正在停止…' : '停止生成'}</button> : null;
   const recoveryButton = locallyEnded ? <button type="button" className="ex-kiosk-primary" disabled={disabled || passive || !canControl || !send || commandPending || stopPending || localStopPending} onClick={() => void command({ action: 'recover' })}><RotateCcw />{commandPending ? '恢复中…' : '恢复操作'}</button> : null;
   const canChoose = !disabled && !passive && canControl && !!send && !localStopPending && !stopPending && !beginPending
-    && (!commandPending || selectionPending) && !needsRetry && !serverError && !live?.opening
+    && (!commandPending || selectionPending) && !needsRetry && !serverError && !live?.opening && !state.live?.renewal
     && ((welcome && !state.live) || state.phase === 'generating' || state.phase === 'showcase');
   currentRound.current.canChoose = canChoose;
+  const clearPresenterSelection = (target: PresenterSelection) => {
+    if (presenterTarget.current !== target) return;
+    presenterTarget.current = null;
+    setPresenterSelection(null);
+  };
+  useEffect(() => {
+    const target = presenterTarget.current;
+    if (target && (target.scope !== presenterScope(state) || paused || locallyEnded || stopPending || localStopPending
+      || !enabled.some(item => item.id === target.lookId)
+      || (!target.pending && (state.selectedLookId === target.lookId || state.revision > target.revision)))) clearPresenterSelection(target);
+  }, [state.mirrorId, state.sessionNumber, mode, state.selectedLookId, state.revision, paused, locallyEnded, stopPending, localStopPending, enabled]);
+  usePresenterKeys({
+    enabled: !remote && !passive && !otherDevice && canControl && !!send,
+    scope: presenterScope(state),
+    onStep: direction => {
+      const latest = currentRound.current;
+      if (!latest.canChoose || carouselBusy || gesturePending.current || gestureSelection || presenterTarget.current
+        || starting.current || stopping.current) return;
+      const ordered = enabledLooksForMode(latest.state);
+      if (ordered.length < 2) return;
+      const index = ordered.findIndex(item => item.id === latest.state.selectedLookId);
+      const next = ordered[index < 0 ? direction > 0 ? 0 : ordered.length - 1 : (index + direction + ordered.length) % ordered.length];
+      const target: PresenterSelection = { scope: presenterScope(latest.state), lookId: next.id, revision: latest.state.revision, pending: true };
+      presenterTarget.current = target;
+      setPresenterSelection(target);
+      // Retain the target until its state is observed, even if the response wins the React render.
+      void command({ action: ['idle', 'select'].includes(latest.state.phase) ? 'select' : 'switch', lookId: next.id })
+        .then(accepted => {
+          target.pending = false;
+          const current = currentRound.current.state;
+          if (!accepted || target.scope !== presenterScope(current) || current.selectedLookId === target.lookId
+            || current.revision > target.revision) clearPresenterSelection(target);
+        })
+        .catch(() => {
+          if (presenterTarget.current !== target) return;
+          setBeginError('素材切换未完成，请重试。');
+          clearPresenterSelection(target);
+        });
+    },
+  });
   const gestureCamera = !!live?.cameraStream?.getVideoTracks?.().some(track => track.readyState === 'live');
   const recognitionSettings = resolveExhibitionGestureSettings(state.settings.gestureRecognition);
   const configuredGestures = recognitionSettings.gestures;
   const gestureAvailable = realtime && !mox && !remote && !passive && !otherDevice && canControl && !!live?.secure && !locallyEnded && gestureCamera;
-  const gestureProcessing = gestureSelection !== null || beginPending || commandPending || selectionPending || !!live?.opening
+  useEffect(() => {
+    ++gestureFeedbackEpoch.current;
+    setGestureAcknowledgement(null);
+    return () => { ++gestureFeedbackEpoch.current; };
+  }, [state.mirrorId, state.sessionNumber, mode, gesturesOn, gestureAvailable, disabled, paused, locallyEnded,
+    stopPending, localStopPending, needsRetry, serverError, configuredGestures.join(',')]);
+  useEffect(() => {
+    if (!gestureAcknowledgement?.showSuccess) return;
+    const timer = setTimeout(() => setGestureAcknowledgement(current => current === gestureAcknowledgement
+      ? { ...current, showSuccess: false } : current), 1200);
+    return () => clearTimeout(timer);
+  }, [gestureAcknowledgement]);
+  const gestureProcessing = gestureSelection !== null || presenterSelection !== null || beginPending || commandPending || selectionPending || !!live?.opening
     || (!welcome && (state.phase === 'generating' || live?.status === 'preparing' || live?.status === 'connecting'));
   const gestureBlocked = !canChoose || carouselBusy || gestureProcessing;
   useEffect(() => {
@@ -208,16 +300,27 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
             ...(metadata.raiseStartedAt === undefined ? {} : { raiseLatencyMs: metadata.detectedAt - metadata.raiseStartedAt }) } });
       }
       if (!resolveExhibitionGestureSettings(latest.state.settings.gestureRecognition).gestures.includes(gesture as ExhibitionGestureKind) || !gesturesOn || !gestureAvailable || gestureBlocked
-        || gesturePending.current || gestures.operatorStatus !== 'locked'
+        || gesturePending.current || presenterTarget.current || gestures.operatorStatus !== 'locked'
         || gestures.status !== 'ready' || gestures.captureStatus !== 'active' || ordered.length < 2) {
         if (metadata) diagnostics?.record({ type: 'gesture_ignored', context, interactionId: metadata.eventId, actionId: `${metadata.eventId}-attempt-1`, reason: ordered.length < 2 ? 'insufficient_materials' : 'blocked' });
         return;
       }
       gesturePending.current = true;
       setGestureSelection({ lookId: next.id, revision: latest.state.revision });
+      setGestureAcknowledgement(null);
+      const acknowledgement: GestureAcknowledgement = {
+        epoch: gestureFeedbackEpoch.current, mirrorId: latest.state.mirrorId ?? 'default', sessionNumber: latest.state.sessionNumber,
+        mode: latest.state.experienceMode, revision: latest.state.revision, generationNumber: latest.state.generationNumber,
+        previousLookId: latest.state.selectedLookId, lookId: next.id, action: input.action as 'select' | 'switch',
+        label: input.action === 'select' ? '已选中' : mode === 'clothx' ? '换装已提交' : '素材切换已提交', showSuccess: true,
+      };
       // Use the same selection path as the material drawer, including stop and lease guards.
       void command(input, metadata?.eventId)
-        .then(accepted => { if (accepted === false) setGestureSelection(null); })
+        .then(accepted => {
+          if (accepted === false) setGestureSelection(null);
+          else if (accepted === true && acknowledgement.epoch === gestureFeedbackEpoch.current
+            && matchesGestureTarget(acknowledgement, currentRound.current.state)) setGestureAcknowledgement(acknowledgement);
+        })
         .catch(() => { setBeginError('素材切换未完成，请重试。'); setGestureSelection(null); })
         .finally(() => {
           gesturePending.current = false;
@@ -240,30 +343,39 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       diagnostics.record({ type: 'sample', context: diagnosticContext(current), metrics: { operatorStatus: value.operatorStatus,
         captureStatus: value.captureStatus, width: value.inputWidth, height: value.inputHeight, fps: value.fps, inferenceMs: value.inferenceMs, recognitionMs: value.recognitionMs,
         armed: value.armed, handDetected: value.handDetected, handRaised: value.handRaised, needsRelease: value.needsRelease, controlSource: value.controlSource,
-        confirmationState: value.confirmationState, palmHoldMs: value.palmHoldMs, rawHandCount: value.rawHandCount, matchedHandCount: value.matchedHandCount,
+        confirmationState: value.confirmationState, palmHoldMs: value.palmHoldMs,
+        palmConfirmMs: resolveExhibitionGestureSettings(current.settings.gestureRecognition).palmConfirmMs,
+        rawHandCount: value.rawHandCount, matchedHandCount: value.matchedHandCount,
         ...(value.ambiguityReason ? { ambiguityReason: value.ambiguityReason } : {}) } });
     };
     sample();
     const timer = setInterval(sample, 1000);
     return () => clearInterval(timer);
-  }, [diagnostics, gestures.confirmationState, gestures.palmHoldMs, gestures.rawHandCount, gestures.matchedHandCount, gestures.controlSource, gestures.captureStatus]);
+  }, [diagnostics, gestures.confirmationState, gestures.palmHoldMs, gestures.rawHandCount, gestures.matchedHandCount, gestures.controlSource, gestures.captureStatus, recognitionSettings.palmConfirmMs]);
   const gestureCapturing = gestures.captureStatus === 'active';
   const gestureSeeingHand = gesturesOn && gestureAvailable && !gestureBlocked && gestureCapturing
     && gestures.operatorStatus === 'locked' && gestures.handDetected;
   const gestureAction = mode === 'clothx' ? '换装' : '换素材';
   const gestureInstruction = configuredGestures.length > 1 ? `挥手或展掌${gestureAction}` : configuredGestures[0] === 'wave' ? `挥手${gestureAction}` : `展掌${gestureAction}`;
+  const currentAcknowledgement = !disabled && !needsRetry && !serverError && !stopPending && !localStopPending
+    && gestureAcknowledgement?.epoch === gestureFeedbackEpoch.current
+    && matchesGestureTarget(gestureAcknowledgement, state) ? gestureAcknowledgement : null;
   const gestureLabel = !configuredGestures.length ? '手势已关闭' : !gestureAvailable ? '等待摄像头' : !gesturesOn ? '手势已关闭'
     : gestures.status === 'error' ? '重试手势' : gestures.status === 'loading' ? '加载手势…'
       : gestures.captureStatus === 'stalled' ? '取景未更新'
         : ['disabled', 'muted', 'hidden'].includes(gestures.captureStatus) ? '取景已暂停'
-          : gestureProcessing ? '切换中'
+          : currentAcknowledgement?.showSuccess && gestures.operatorStatus !== 'ambiguous' ? currentAcknowledgement.label
+            : gestureProcessing ? '切换中'
             : gestureBlocked ? '手势已暂停'
               : !gestureCapturing ? '等待取景'
                 : gestures.operatorStatus === 'ambiguous' ? gestures.ambiguityReason === 'hands' ? '请只露一只手' : '请单人体验'
                   : gestures.operatorStatus !== 'locked' ? '请露出手掌'
-                    : !gestures.handDetected ? '请露出手'
-                      : !configuredGestures.includes('wave') && (gestures.needsRelease || gestures.confirmationState === 'already_triggered') ? '请收手'
-                        : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
+                    : gestures.confirmationState === 'raise_required' ? '可以再次抬手'
+                      : gestures.confirmationState === 'lowering' || (configuredGestures.includes('open_palm')
+                        && (gestures.needsRelease || gestures.confirmationState === 'already_triggered')) ? '请放下手'
+                        : currentAcknowledgement && configuredGestures.includes('open_palm') && gestures.armed && !gestures.needsRelease ? '可以再次抬手'
+                          : !gestures.handDetected ? '请露出手'
+                            : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
   if (!look || !visualLook || !enabled.length) return <section className="ex-kiosk ex-mirror-minimal ex-empty-mode" style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className="ex-mirror-stage ex-mirror-empty"><Sparkles aria-hidden="true" /><span>暂无可用素材</span><div className="ex-mirror-stage-actions">{recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>}</div></div>
@@ -282,7 +394,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
         {generationPending && <span className="ex-visual-generating"><Sparkles aria-hidden="true" />{preparationLabel}</span>}
       </div>}
       {!realtime && loading && <div className="ex-visual-status" role="status"><span>正在生成</span></div>}
-      <MirrorMaterialDrawer key={mode} looks={enabled} selectedId={state.selectedLookId} disabled={!canChoose} passive={passive}
+      <MirrorMaterialDrawer key={mode} looks={enabled} selectedId={state.selectedLookId} disabled={!canChoose} passive={passive} columns={state.settings.materialDrawerColumns ?? 2}
         title={mode === 'clothx' ? '选择服装' : '选择素材'} onBusyChange={setCarouselBusy} onSelect={lookId => {
           const latest = currentRound.current;
           if (!latest.canChoose) return Promise.resolve(false);

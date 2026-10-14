@@ -14,7 +14,7 @@ vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
 vi.mock('@xmaxai/sdk', () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }));
 vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }));
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
-afterEach(async () => { await host?.close(); host = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(async () => { await host?.close(); host = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
   return { mirrorId: 'default', revision: 1, phase: 'generating', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
@@ -25,7 +25,7 @@ function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
 function track() { const value = { readyState: 'live', onended: null, getSettings: () => ({ deviceId: 'camera-fixture' }), clone: () => track(),
   stop: vi.fn(() => { value.readyState = 'ended'; }) }; return value; }
 class FixtureStream { constructor(private tracks: ReturnType<typeof track>[]) {} getTracks() { return this.tracks; } getVideoTracks() { return this.tracks; } }
-async function fixture(initialState = snapshot()) {
+async function fixture(initialState = snapshot(), continuous = false) {
   host = await createReactHost(); vi.stubGlobal('MediaStream', FixtureStream); vi.stubGlobal('localStorage', { getItem: () => null });
   const cameraTrack = track(); const camera = new FixtureStream([cameraTrack]) as unknown as MediaStream;
   const output = new FixtureStream([track()]) as unknown as MediaStream;
@@ -35,14 +35,15 @@ async function fixture(initialState = snapshot()) {
   let value = { state: initialState, active: true, selectionPending: false };
   let live!: ExhibitionLiveController; let update!: (state: ExhibitionState, selectionPending?: boolean) => void;
   let record: any;
+  let segments = 0;
   mocks.api.mockImplementation(async (path: string, _method?: string, input?: Record<string, any>) => {
     if (path.endsWith('/live/status')) return { configured: true, perSessionLimit: 30 };
     if (path.endsWith('/live/session')) {
-      record = { id: 'same-session', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'camera', sourceKind: 'camera', sourceName: '摄像头',
+      record = { id: continuous ? `segment-${++segments}` : 'same-session', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'camera', sourceKind: 'camera', sourceName: '摄像头',
         targetItemId: 'exhibition-first', lookId: input!.lookId, referenceAsset: '/assets/first.png', refImageUrl: '', referenceVersion: 0,
         expiresAt: new Date(Date.now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none',
         exhibition: { mirrorId: 'default', deviceId: input!.deviceId, lookId: input!.lookId, sessionNumber: 1, generationNumber: input!.generationNumber,
-          mode: 'clothx', prompt: exhibitionPromptForLook({ mode: 'clothx' }) } };
+          mode: 'clothx', prompt: exhibitionPromptForLook({ mode: 'clothx' }), ...(continuous ? { continuous: true } : {}) } };
       return { ...record };
     }
     if (path.endsWith('/reference')) { record = { ...record, refImageUrl: input!.refImageUrl, referenceVersion: 1 }; return { ...record }; }
@@ -53,9 +54,23 @@ async function fixture(initialState = snapshot()) {
       return { ...record };
     }
     if (path.endsWith('/condition/applied')) return {};
-    if (path.endsWith('/first-frame')) return { ...record };
+    if (path.endsWith('/first-frame')) {
+      if (continuous) update({ ...value.state, phase: 'showcase', displayedLookId: record.lookId, revision: value.state.revision + 1,
+        live: { deviceId: record.exhibition.deviceId, generationNumber: record.exhibition.generationNumber, sessionId: record.id, lookId: record.lookId,
+          status: 'running', heartbeatAt: Date.now(), updatedAt: Date.now(), firstFrameMs: 100 } });
+      return { ...record };
+    }
+    if (continuous && path.endsWith('/renewal')) {
+      update({ ...value.state, revision: value.state.revision + 1, live: { ...value.state.live!, renewal: { id: 'renewal-fixture', requestedAt: Date.now() } } });
+      return { renewalId: 'renewal-fixture' };
+    }
+    if (continuous && path.endsWith('/renewal/commit')) {
+      expect(record.status).toBe('stopped');
+      update({ ...value.state, revision: value.state.revision + 1, phase: 'generating', generationNumber: value.state.generationNumber + 1, live: null });
+      return {};
+    }
     if (path.endsWith('/live/heartbeat') || path.endsWith('/live/error')) return {};
-    if (path.endsWith('/stop')) return { ...record, status: 'stopped' };
+    if (path.endsWith('/stop')) { if (continuous) record.status = 'stopped'; return { ...record, status: 'stopped' }; }
     throw new Error(`Unexpected fixture path: ${path}`);
   });
   function Harness() {
@@ -65,7 +80,7 @@ async function fixture(initialState = snapshot()) {
   }
   await host.render(createElement(Harness)); await flushReact();
   await act(async () => live.reportFirstFrame(output)); await flushReact();
-  const lease = { deviceId: live.deviceId, generationNumber: 1, sessionId: 'same-session', lookId: 'first', status: 'running', heartbeatAt: Date.now(), firstFrameMs: 100 } as ExhibitionState['live'];
+  const lease = { deviceId: live.deviceId, generationNumber: 1, sessionId: record.id, lookId: 'first', status: 'running', heartbeatAt: Date.now(), firstFrameMs: 100 } as ExhibitionState['live'];
   await act(async () => update({ ...initialState, phase: 'showcase', displayedLookId: 'first', live: lease, revision: 2 })); await flushReact();
   return { get live() { return live; }, update, camera, output, cameraTrack, getUserMedia, lease,
     allocations: () => mocks.api.mock.calls.filter(([path]) => String(path).endsWith('/live/session')).length,
@@ -73,6 +88,24 @@ async function fixture(initialState = snapshot()) {
 }
 
 describe('exhibition hook preserves generated output while the selected outfit changes', () => {
+  it('automatically connects the next segment with the same camera, then honors manual stop', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-14T04:00:00Z'));
+    const state = snapshot(); state.settings.sessionLimits = { credits: null, expireSeconds: 120 };
+    const f = await fixture(state, true);
+    expect(f.live.status).toBe('running'); expect(f.allocations()).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(105_000); }); await flushReact();
+    expect(f.calls('/renewal')).toHaveLength(1); expect(f.calls('/renewal/commit')).toHaveLength(1);
+    expect(f.allocations()).toBe(2); expect(mocks.connect).toHaveBeenCalledTimes(2);
+    expect(mocks.sdk.disconnect).toHaveBeenCalledTimes(1);
+    expect(f.live.cameraStream).toBe(f.camera); expect(f.getUserMedia).toHaveBeenCalledOnce();
+    expect(f.cameraTrack.stop).not.toHaveBeenCalled();
+    await act(async () => f.live.reportFirstFrame(f.output)); await flushReact();
+    expect(f.live.status).toBe('running');
+    await act(async () => { expect(await f.live.stopGeneration()).toBe(true); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(130_000); }); await flushReact();
+    expect(f.allocations()).toBe(2); expect(f.calls('/renewal')).toHaveLength(1);
+    expect(mocks.sdk.disconnect).toHaveBeenCalledTimes(2); expect(f.cameraTrack.stop).not.toHaveBeenCalled();
+  });
   it.each([
     ['first', 'free-fixture', 'mox-fixture', 'second', 'third'],
     ['second', 'free-fixture', 'third', 'mox-fixture', 'first'],

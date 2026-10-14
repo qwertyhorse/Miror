@@ -8,6 +8,8 @@ import type { ExhibitionController } from './useExhibition';
 import { ExperienceModeChips, experienceModeLabel } from './ExperienceModeChips';
 import { enableLookInOrder, useMaterialOrder } from './useMaterialOrder';
 import { MaterialActionsMenu } from './MaterialActionsMenu';
+import { ReferencePreparationBadge } from './ReferencePreparationBadge';
+import { useReferencePreparation } from './useReferencePreparation';
 import './wardrobe.css';
 
 function validateFile(file: File, limits: ExhibitionUploadLimits) {
@@ -158,6 +160,8 @@ function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
   const orderHintId = useId();
   useEffect(() => { if (results.current) results.current.scrollTop = 0; }, [mode, query]);
   const looks = state ? looksFor(state) : [];
+  const referenceCatalogKey = JSON.stringify(looks.map(look => [look.id, look.image, look.referenceKind]));
+  const preparation = useReferencePreparation(controller.mirrorId, referenceCatalogKey, !!state?.looks);
   const modeLooks = looks.filter(look => look.mode === mode);
   const configurable = !!state && ['idle', 'select'].includes(state.phase) && !state.live;
   const disabled = pending || !connected || !configurable;
@@ -174,11 +178,12 @@ function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
   if (!state?.looks || !state.settings.uploadLimits) return <p>正在更新素材库服务，请稍后刷新。</p>;
   function openEditor(next: string, deleting = false) { setOpenMenuId(null); controller.clearError(); setEditorLook(looks.find(item => item.id === next)); setEditor(next); setInitialDelete(deleting); setNotice(''); }
   function savedEditor(savedMode: ExhibitionExperienceMode) {
-    setNotice(editor === 'upload' ? '素材已上传，启用后会在对应模式的大屏中展示。' : '素材信息已保存。');
+    setNotice(editor === 'upload' ? '素材已保存。' : '素材信息已保存。');
     setMode(savedMode); setQuery(''); setEditor(null);
   }
   return <div className="ex-library">
     {notice && <p role="status" className="ex-library-notice"><Check size={16} />{notice}</p>}
+    {preparation.error && <div className="ex-reference-fetch-error" role="alert"><span>{preparation.error}</span><button type="button" onClick={preparation.refresh}>刷新状态</button></div>}
     {editor && <LookEditor key={editor} controller={controller} look={editorLook} initialMode={mode} initialDelete={initialDelete} close={() => setEditor(null)} saved={savedEditor} deleted={() => { setNotice('素材已删除。'); setEditor(null); }} />}
     <div className="ex-library-filters"><ExperienceModeChips label="按模式筛选素材" value={mode} onChange={setMode} /><label className="ex-library-search"><Search size={16} /><input aria-label="搜索素材" placeholder="搜索素材名称、说明" value={query} onChange={event => setQuery(event.target.value)} /></label><div className="ex-library-actions"><button className="ex-button ex-primary" disabled={pending || !connected} onClick={() => openEditor('upload')}><Plus size={17} />上传素材</button></div></div>
     <span id={orderHintId} className="ex-sr-only">{query.trim() ? '清空搜索后可拖动排序。' : '拖动图片或手柄排序；手柄支持方向键、Home 和 End。'}</span><span className="ex-sr-only" role="status" aria-live="polite">{order.message}</span>
@@ -188,6 +193,7 @@ function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
         <div className="ex-library-card-body">
           <div className="ex-library-card-title"><h3>{item.name}</h3><div className="ex-library-card-tools"><MaterialActionsMenu name={item.name} open={openMenuId === item.id} onOpenChange={open => setOpenMenuId(open ? item.id : null)} onEdit={() => openEditor(item.id)} onDelete={() => openEditor(item.id, true)} disabled={disabled || order.saving || !!order.draggedId} /></div></div>
           <span className="ex-material-mode">{experienceModeLabel(item.mode)}{item.referenceKind === 'none' && ' · 仅提示词'}</span>
+          <ReferencePreparationBadge name={item.name} status={preparation.references[item.id]} unavailable={!!preparation.error} retrying={preparation.retrying.has(item.id)} retryError={preparation.retryErrors[item.id]} now={preparation.now} onRetry={() => { void preparation.retry(item.id); }} />
           <div className="ex-library-file-row"><p className="ex-library-file-info">{item.width ? `${item.width} × ${item.height} px · ${((item.bytes ?? 0) / 1024 / 1024).toFixed(2)} MB` : '预设示例素材'}</p><label className="ex-material-enabled-control" title={state.enabledLookIds.includes(item.id) ? '已启用' : '未启用'}><input aria-label={`启用${item.name}`} role="switch" type="checkbox" checked={state.enabledLookIds.includes(item.id)} disabled={disabled || order.saving || !!order.draggedId} onChange={event => { void send({ action: 'configure', enabledLookIds: event.target.checked ? enableLookInOrder(looks, state.enabledLookIds, item) : state.enabledLookIds.filter(id => id !== item.id) }); }} /><span aria-hidden="true" /></label></div>
         </div>
       </article>)}</div> : <div className="ex-library-empty"><ImagePlus size={28} aria-hidden="true" /><h3>{query ? '没有符合条件的素材' : `${experienceModeLabel(mode)} 暂无素材`}</h3><p>{query ? '试试其他名称或说明关键词。' : '上传此模式的素材并启用后，即可在大屏体验。'}</p>{query && <button className="ex-button" onClick={() => setQuery('')}>清空搜索</button>}</div>}

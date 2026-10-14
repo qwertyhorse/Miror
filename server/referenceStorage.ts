@@ -1,6 +1,8 @@
 import { createHash, createHmac } from 'node:crypto';
 import type { ReferenceStorage } from './referenceAssets.ts';
 import { safeReferenceUrl } from './referenceAssets.ts';
+import type { ReferencePreparationStage } from '../shared/referencePreparation.ts';
+import { ReferencePreparationError } from './referencePreparation.ts';
 
 export type ReplicaFailure =
   | 'network'
@@ -16,6 +18,7 @@ export interface ReferenceReplicaProvider {
     bytes: Buffer,
     sha256: string,
     mime?: string,
+    onStage?: (stage: ReferencePreparationStage) => void,
   ): Promise<{ ok: true; url: string } | { ok: false; error: ReplicaFailure }>;
   check(url: string): Promise<ReplicaCheck>;
 }
@@ -118,7 +121,7 @@ export function createReferenceCosProvider(options: {
     }
   }
   return {
-    async upload(bytes, sha256, mime = 'image/webp') {
+    async upload(bytes, sha256, mime = 'image/webp', onStage) {
       if (!options.apiKey?.trim()) return { ok: false, error: 'not_configured' };
       if (
         !/^[a-f0-9]{64}$/.test(sha256) ||
@@ -126,11 +129,13 @@ export function createReferenceCosProvider(options: {
       )
         return { ok: false, error: 'malformed' };
       for (let attempt = 0; attempt < 2; attempt++) {
+        onStage?.('credentials');
         const sts = await getSts();
         if (!sts.ok) return sts;
         const s = sts.value;
         const signal = AbortSignal.timeout(timeout);
         try {
+          onStage?.('upload');
           const key = `${s.prefix}${s.prefix && !s.prefix.endsWith('/') ? '/' : ''}miror-reference-${sha256}.${mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : 'webp'}`;
           const host = `${s.bucket}.cos.${s.region}.myqcloud.com`;
           const url = `https://${host}/${key.split('/').map(encode).join('/')}`;
@@ -200,23 +205,32 @@ export function referenceStorage(apiKey: string, region: 'cn' | 'global', call: 
   const baseUrl = region === 'cn' ? 'https://api.xmaxai.com/open/api/v1' : 'https://api.xmax.ai/open/api/v1';
   const provider = createReferenceCosProvider({ apiKey, baseUrl, fetch: call });
   return {
-    async upload(bytes, sha256, mime) {
-      const result = await provider.upload(bytes, sha256, mime);
-      if (!result.ok) throw new Error('Reference upload failed');
-      const response = await call(baseUrl + '/cos/image/check', {
-        method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: result.url }), signal: AbortSignal.timeout(20_000), redirect: 'error',
-      });
-      const value = await response.json();
-      if (!response.ok || value?.success !== true || value.data?.safe === false
-        || typeof value.data?.url !== 'string' || !safeReferenceUrl(value.data.url)) throw new Error('Reference check failed');
+    async upload(bytes, sha256, mime, onStage) {
+      let stage: ReferencePreparationStage = 'credentials';
+      const report = (next: ReferencePreparationStage) => { stage = next; onStage?.(next); };
+      const result = await provider.upload(bytes, sha256, mime, report);
+      if (!result.ok) throw new ReferencePreparationError(stage, result.error);
+      report('check');
+      const signal = AbortSignal.timeout(20_000);
+      let response: Response;
+      try {
+        response = await call(baseUrl + '/cos/image/check', {
+          method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: result.url }), signal, redirect: 'error',
+        });
+      } catch { throw new ReferencePreparationError('check', signal.aborted ? 'timeout' : 'network'); }
+      if (!response.ok) throw new ReferencePreparationError('check', response.status === 401 || response.status === 403 ? 'denied' : 'status');
+      let value;
+      try { value = await response.json(); } catch { throw new ReferencePreparationError('check', 'malformed'); }
+      if (value?.data?.safe === false) throw new ReferencePreparationError('check', 'unsafe');
+      if (value?.success !== true || typeof value.data?.url !== 'string' || !safeReferenceUrl(value.data.url)) throw new ReferencePreparationError('check', 'malformed');
       return value.data.url;
     },
     async check(url) {
       const result = await provider.check(url);
       if (result.ok) return true;
       if (['not_found', 'denied'].includes(result.error)) return false;
-      throw new Error('Reference availability unknown');
+      throw new ReferencePreparationError('availability', result.error);
     },
   };
 }

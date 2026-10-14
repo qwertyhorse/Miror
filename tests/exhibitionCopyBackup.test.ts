@@ -104,12 +104,13 @@ describe('recoverable snapshots before mirror copy', () => {
   it('keeps a complete recovery snapshot when the later state commit fails', async () => {
     const f = fixture(); const old = await add(f.target, 'free'); await add(f.source);
     const before = f.target.get(); const bytes = f.target.asset(old.id).data; const file = join(f.targetDirectory, 'exhibition.json');
+    const originalState = JSON.parse(readFileSync(file, 'utf8')).state;
     renameSync(file, `${file}.saved`); mkdirSync(file);
     expect(() => f.copy()).toThrow();
     expect(f.target.get()).toEqual(before); expect(f.target.asset(old.id).data).toEqual(bytes);
     expect(readdirSync(join(f.targetDirectory, 'exhibition-assets'))).toEqual([`${old.id}.webp`]);
     const [backup] = f.backups(); expect(f.backups()).toHaveLength(1);
-    expect(JSON.parse(readFileSync(join(backup, 'exhibition.json'), 'utf8')).state).toEqual(before);
+    expect(JSON.parse(readFileSync(join(backup, 'exhibition.json'), 'utf8')).state).toEqual(originalState);
     expect(readFileSync(join(backup, 'exhibition-assets', `${old.id}.webp`))).toEqual(bytes);
   });
 

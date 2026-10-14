@@ -39,8 +39,9 @@ export interface DiagnosticMetrics {
   handDetected?: boolean;
   handRaised?: boolean;
   needsRelease?: boolean;
-  confirmationState?: 'no_hand' | 'unmatched_hand' | 'settling' | 'ambiguous' | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required';
+  confirmationState?: 'no_hand' | 'unmatched_hand' | 'settling' | 'ambiguous' | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required' | 'lowering' | 'raise_required';
   palmHoldMs?: number;
+  palmConfirmMs?: number;
   rawHandCount?: number;
   matchedHandCount?: number;
   controlSource?: 'body' | 'hand' | 'none';
@@ -88,7 +89,7 @@ export interface DiagnosticSnapshot {
 }
 
 const NUMERIC_METRICS = ['durationMs', 'inferenceMs', 'recognitionMs', 'fps', 'width', 'height', 'packetLoss', 'rttMs',
-  'actualKbps', 'targetKbps', 'queuedMs', 'frameId', 'raiseLatencyMs', 'palmHoldMs', 'rawHandCount', 'matchedHandCount'] as const;
+  'actualKbps', 'targetKbps', 'queuedMs', 'frameId', 'raiseLatencyMs', 'palmHoldMs', 'palmConfirmMs', 'rawHandCount', 'matchedHandCount'] as const;
 const BOOLEAN_METRICS = ['accepted', 'armed', 'handDetected', 'handRaised', 'needsRelease'] as const;
 const ENUM_METRICS = {
   operatorStatus: ['searching', 'locked', 'ambiguous'], captureStatus: ['waiting', 'active', 'disabled', 'muted', 'stalled', 'hidden'],
@@ -96,7 +97,7 @@ const ENUM_METRICS = {
   gesture: ['wave', 'raise_hand', 'open_palm'],
   controlSource: ['body', 'hand', 'none'],
   ambiguityReason: ['people', 'hands'],
-  confirmationState: ['no_hand', 'unmatched_hand', 'settling', 'ambiguous', 'incomplete', 'too_small', 'fingers_folded', 'holding', 'already_triggered', 'release_required'],
+  confirmationState: ['no_hand', 'unmatched_hand', 'settling', 'ambiguous', 'incomplete', 'too_small', 'fingers_folded', 'holding', 'already_triggered', 'release_required', 'lowering', 'raise_required'],
 } as const;
 const OPERATION_TYPES = new Set<DiagnosticEventType>(['experience_started', 'credential_started', 'credential_ready', 'rtc_started', 'rtc_ready', 'reference_cache_hit', 'reference_started', 'reference_ready', 'upload_started', 'upload_ready',
   'bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'condition_committed', 'session_first_frame', 'failed', 'stopped']);

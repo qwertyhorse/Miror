@@ -189,7 +189,11 @@ describe('exhibition configuration and storage', () => {
     expect(() => restarted.command({ action: 'resume' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
     expect(restarted.command({ action: 'begin' }).sessionNumber).toBe(2);
     expect(readdirSync(directory)).toEqual(['exhibition.json']);
-    expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).state).toEqual(restarted.get());
+    const effective = restarted.get();
+    const { sessionLimits, ...storedSettings } = effective.settings;
+    expect(sessionLimits).toEqual({ credits: 30, expireSeconds: 120 });
+    // Omitted limits inherit the service defaults; the public snapshot resolves them.
+    expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).state).toEqual({ ...effective, settings: storedSettings });
   });
 
   it('recovers invalid saved JSON and retains only the newest 40 operations', () => {

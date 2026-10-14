@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from 'react';
 import { ChevronDown, ChevronUp, Download, Trash2, X } from 'lucide-react';
 import type { DiagnosticEventType, DiagnosticMetrics, ExhibitionDiagnostics } from './diagnostics';
+import { DEFAULT_EXHIBITION_GESTURE_SETTINGS } from '../../shared/exhibitionGestures';
 import './diagnostics.css';
 
 const stageLabels: Record<DiagnosticEventType, string> = {
@@ -17,13 +18,17 @@ const ms = (value: number | undefined) => value === undefined ? '—' : `${Math.
 const confirmationLabels: Record<NonNullable<DiagnosticMetrics['confirmationState']>, string> = {
   no_hand: '未检测到手', unmatched_hand: '手与操作者未匹配', settling: '正在锁定手掌', ambiguous: '手归属不明确',
   incomplete: '手掌未完整入镜', too_small: '手掌过小', fingers_folded: '掌形未确认', holding: '展掌确认中',
-  already_triggered: '本次展掌已触发', release_required: '已触发 · 请收手',
+  already_triggered: '本次展掌已触发', release_required: '已触发 · 请放下手',
+  lowering: '下放确认中', raise_required: '已复位 · 请抬手',
 };
 
 function confirmationLabel(sample: DiagnosticMetrics | undefined) {
   if (sample?.captureStatus !== 'active') return '暂停取景';
   if (sample.confirmationState) {
-    if (sample.confirmationState === 'holding') return `展掌确认 ${sample.palmHoldMs === undefined ? '—' : Math.min(300, Math.round(sample.palmHoldMs))} / 300 ms`;
+    if (sample.confirmationState === 'holding') {
+      const targetMs = sample.palmConfirmMs ?? DEFAULT_EXHIBITION_GESTURE_SETTINGS.palmConfirmMs;
+      return `展掌确认 ${sample.palmHoldMs === undefined ? '—' : Math.min(targetMs, Math.round(sample.palmHoldMs))} / ${targetMs} ms`;
+    }
     return confirmationLabels[sample.confirmationState];
   }
   return sample.operatorStatus !== 'locked' ? '未锁定' : !sample.handDetected ? '手未入镜'

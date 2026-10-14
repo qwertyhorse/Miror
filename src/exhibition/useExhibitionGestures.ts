@@ -276,10 +276,18 @@ export function useExhibitionGestures({
     };
     function cameraEnded() { fail('摄像头已断开。'); }
 
+    const frameInterval = () => Math.ceil(1_000 / (combinedMode ? recognition.current.maxFps : 15));
+    const scheduleTick = (delay: number) => {
+      clearTimeout(tickTimer);
+      // Browser timers truncate fractional delays; round up to avoid waking just
+      // before a frame's deadline and losing another complete sampling interval.
+      if (!disposed) tickTimer = setTimeout(tick, Math.max(0, Math.ceil(delay)));
+    };
     const tick = () => {
       if (disposed) return;
-      const frameIntervalMs = Math.ceil(1_000 / (combinedMode ? recognition.current.maxFps : 15));
-      tickTimer = setTimeout(tick, frameIntervalMs);
+      const frameIntervalMs = frameInterval();
+      // Keep observing camera/visibility health even while inference is in flight.
+      scheduleTick(frameIntervalMs);
       const timestamp = performance.now();
       if (document.hidden) { report('hidden'); return; }
       if (tracks.every(track => track.enabled === false)) { report('disabled'); return; }
@@ -301,7 +309,8 @@ export function useExhibitionGestures({
         return;
       }
       if (video.currentTime === previousVideoTime) return;
-      if (timestamp - previousFrameAt < frameIntervalMs) return;
+      const remainingMs = previousFrameAt + frameIntervalMs - timestamp;
+      if (remainingMs > 0) { scheduleTick(remainingMs); return; }
       previousFrameAt = timestamp;
       previousVideoTime = video.currentTime;
       busy = true;
@@ -345,9 +354,12 @@ export function useExhibitionGestures({
           setState(previous => ({ ...previous, status: 'ready', error: '', lastGesture: null }));
           return;
         }
-        if (result.type !== 'result' || result.frameId !== frameId) return;
+        if (result.type !== 'result' || !busy || result.frameId !== frameId) return;
         clearTimeout(frameTimer);
         busy = false;
+        // Start the latest frame as soon as both inference and the rate limit allow.
+        // A fixed polling tick would add a whole interval to slower inference.
+        scheduleTick(previousFrameAt + frameInterval() - performance.now());
         if (document.hidden || tracks.every(track => track.enabled === false) || tracks.every(track => track.muted)
           || pendingResetSequence !== resetSequence.current) return;
         const hand = result.landmarks?.length ? {
@@ -405,8 +417,7 @@ export function useExhibitionGestures({
         minTrackingConfidence: recognition.current.minTrackingConfidence,
       } } : {}) });
       void video.play().catch(() => fail('摄像头预览未就绪，请重试。'));
-      const frameIntervalMs = Math.ceil(1_000 / (combinedMode ? recognition.current.maxFps : 15));
-      tickTimer = setTimeout(tick, frameIntervalMs);
+      scheduleTick(frameInterval());
     } catch {
       fail('手势识别未能启动，请重试。');
     }

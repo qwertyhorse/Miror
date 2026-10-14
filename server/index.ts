@@ -1,4 +1,5 @@
 import { ReferenceAssets } from './referenceAssets.ts';
+import { ReferencePreparationQueue } from './referencePreparationQueue.ts';
 import { chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -42,30 +43,16 @@ await service.recover();
 server.listen(port, '127.0.0.1', () => {
   console.log(`Mirror internal API listening on port ${port} (XMAX ${provider.configured ? 'configured' : 'not configured'})`);
 });
-// One background upload at a time, round-robin across configured mirrors/materials.
+// One background upload at a time; selected and enabled materials take priority.
 // No RTC or temporary generation credential is allocated by preparation.
-let preparing = false;
-let preparationCursor = 0;
-const preparationInterval = setInterval(async () => {
-  if (preparing || closing) return;
-  preparing = true;
-  try {
-    const candidates = exhibition.list().mirrors.flatMap(mirror => {
-      const current = exhibition.getMirror(mirror.id);
-      const state = current.get();
-      return service.status(mirror.id).configured && !state.live
-        ? state.looks.filter(look => look.referenceKind !== 'none').map(look => ({ current, look })) : [];
-    });
-    if (!candidates.length) return;
-    for (let scanned = 0; scanned < Math.min(candidates.length, 4); scanned++) {
-      const candidate = candidates[preparationCursor++ % candidates.length];
-      const ready = candidate.current.readyReference(candidate.look.id);
-      if (ready && ready.freshUntil > Date.now() + 5 * 60_000) continue;
-      await candidate.current.prepareReference(candidate.look.id);
-      break;
-    }
-  } catch { /* Retain originals; failed entries cool down and foreground has its upload fallback. */ }
-  finally { preparing = false; }
+const preparationQueue = new ReferencePreparationQueue(() => exhibition.list().mirrors.map(mirror => {
+  const current = exhibition.getMirror(mirror.id);
+  return { id: mirror.id, state: current.get(), configured: service.status(mirror.id).configured,
+    status: (lookId: string) => current.referencePreparationStatus(lookId),
+    prepare: (lookId: string) => current.prepareReference(lookId) };
+}));
+const preparationInterval = setInterval(() => {
+  if (!closing) void preparationQueue.runOnce().catch(() => { console.warn('Reference preparation queue could not read the material catalog.'); });
 }, 1_000);
 preparationInterval.unref();
 let sweeping = false;

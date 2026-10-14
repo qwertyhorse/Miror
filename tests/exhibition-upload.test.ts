@@ -271,12 +271,13 @@ describe('exhibition garment deletion', () => {
     const before = await service.upload(uploadInput(await image())); const look = before.looks.at(-1)!;
     const originalImage = service.asset(look.id).data;
     const storedPath = join(directory, 'exhibition.json'); const backupPath = `${storedPath}.saved`;
+    const originalState = readFileSync(storedPath, 'utf8');
     renameSync(storedPath, backupPath); mkdirSync(storedPath);
     expect(() => service.removeLook(look.id, { expectedRevision: before.revision })).toThrow();
     expect(service.get()).toEqual(before); expect(service.asset(look.id).data).toEqual(originalImage);
     expect(readdirSync(directory).filter(name => name.endsWith('.tmp'))).toEqual([]);
     rmSync(storedPath, { recursive: true }); renameSync(backupPath, storedPath);
-    expect(JSON.parse(readFileSync(storedPath, 'utf8')).state).toEqual(before);
+    expect(readFileSync(storedPath, 'utf8')).toBe(originalState);
   });
 
   it('does not misreport a committed deletion when asset cleanup fails, and never serves the orphan', async () => {

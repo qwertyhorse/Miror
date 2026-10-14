@@ -99,6 +99,19 @@ describe('page-owned exhibition diagnostics', () => {
     expect(f.store.getSnapshot().events.filter(event => event.type === 'gesture_confirmed')).toHaveLength(0);
   });
 
+  it('reports configured palm confirmation timing and natural release states', () => {
+    const f = fixture();
+    const render = () => renderToStaticMarkup(createElement(DiagnosticsPanel, { store: f.store, onClose: () => {} }));
+    f.record('sample', { metrics: { captureStatus: 'active', confirmationState: 'holding', palmHoldMs: 380, palmConfirmMs: 450 } });
+    expect(render()).toContain('展掌确认 380 / 450 ms');
+    expect(JSON.parse(f.store.exportJSON()).events.at(-1).metrics.palmConfirmMs).toBe(450);
+    f.record('sample', { metrics: { captureStatus: 'active', confirmationState: 'lowering' } });
+    expect(render()).toContain('下放确认中');
+    f.record('sample', { metrics: { captureStatus: 'active', confirmationState: 'raise_required' } });
+    expect(render()).toContain('已复位 · 请抬手');
+    expect(JSON.parse(f.store.exportJSON()).events.at(-1).metrics.confirmationState).toBe('raise_required');
+  });
+
   it('requires operation IDs for cloud milestones and action IDs for commands', () => {
     const f = fixture();
     expect(f.record('sdk_set_resolved', { operationId: undefined })).toBeNull();

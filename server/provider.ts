@@ -50,6 +50,12 @@ export class XmaxProvider implements Provider {
     return object(envelope.data);
   }
   async issueKey(pointsLimit: number, expireSeconds: number): Promise<IssuedKey> {
+    // The documented API requires numeric bounds. Never serialize the UI's
+    // continuing-experience option as null, -1 or an omitted pointsLimit.
+    if (typeof pointsLimit !== 'number' || !Number.isSafeInteger(pointsLimit) || pointsLimit < 0
+      || typeof expireSeconds !== 'number' || !Number.isSafeInteger(expireSeconds) || expireSeconds <= 0) {
+      throw new ApiError('INVALID_SESSION_LIMITS', '临时凭证需要有效的积分上限和有效期。');
+    }
     const data = await this.request('/temporary-api-key', 'POST', this.apiKey, { pointsLimit, expireSeconds });
     if (typeof data.temporaryApiKey !== 'string' || !/^tk-[A-Za-z0-9_-]+$/.test(data.temporaryApiKey)) throw new ApiError('PROVIDER_INVALID_RESPONSE', 'XMax 未返回有效临时凭证。', 502);
     return { token: data.temporaryApiKey, expiresAt: date(data.expireTimestamp) };

@@ -95,7 +95,7 @@
 | `categories`, `tags` | 平面分类和标签 |
 | `sessionNumber`, `generationNumber` | 体验轮次与生成代数 |
 | `generationReadyAt`, `autoSwitchAt` | 服务器截止时间，未启用时为 null |
-| `settings` | 上传限制、自动返回、轮播、皮肤和手势识别设置 |
+| `settings` | 上传限制、自动返回、轮播、皮肤、手势识别和单轮限制设置 |
 | `live` | 当前实时占用信息，无会话时为 null |
 | `logs` | 最近 40 条日志，最新在前 |
 
@@ -156,8 +156,14 @@ if (!response.ok) throw new Error(next.message);
 | `autoSwitchSeconds` | 5–600 整数秒；仅此字段和 `switchMode` 可在体验中调整 |
 | `autoReturnSeconds` | 0 关闭，或 15–600 整数秒 |
 | `uiSkinPreset` | `crystal` / `brand`，选择后替换自定义皮肤 |
+| `materialDrawerColumns` | `1` / `2`，镜端素材栏列数；默认 `2`，每镜独立保存，结束体验后可修改 |
 | `uploadLimits` | 下面的完整限制对象 |
 | `gestureRecognition` | 下面的完整识别对象；仅待机/选材且 `live=null` 时可改 |
+| `sessionLimits` | 完整对象 `{ "credits": 30, "expireSeconds": 120 }`；积分 1–1000000 或 `null` 表示不限，有效期 1–86400 秒（不限时至少 60 秒），数值均为整数；仅待机/选材且 `live=null` 时可改 |
+
+单轮限制按镜保存，默认 30 credits / 120 秒。旧配置没有此字段时沿用服务端默认值；状态中的 `settings.sessionLimits` 返回当前镜的设置。复制设备设置包含这项限制。保存只影响随后签发的临时凭证，不修改已签发凭证；`live/session` 只读取服务器保存的限制，客户端请求里的积分或有效期不能覆盖。
+
+`credits: null` 表示体验不限积分、自动分段续接，默认仍使用有限模式。每段签发 3000 credits 的可撤销临时凭证，有效期使用本镜 `expireSeconds`；不向 XMAX 发送 `null` 或伪造“无限”值。`live/status.perSessionLimit` 与 `credentials.perSessionLimit` 在不限模式返回每段实际的 3000。签发结果 `exhibition.continuous=true` 冻结该段的续接模式。不限体验运行期间不因 `autoReturnSeconds` 无操作返回待机；手动结束、真实错误、心跳失联等仍会停止。
 
 手势识别默认值（`configure` 更新此项时必须提交完整对象）：
 
@@ -169,12 +175,18 @@ if (!response.ok) throw new Error(next.message);
   "minTrackingConfidence": 0.5,
   "palmConfirmMs": 300,
   "palmReleaseMs": 500,
+  "palmLowerMs": 350,
+  "lowerTrackingGraceMs": 500,
   "maxFps": 15,
   "inputLongEdge": 720
 }
 ```
 
-`gestures` 可选 `open_palm`、`wave`，支持多选，不允许重复；空数组关闭识别。三项置信度为 0.1–0.9；确认时间为 150–1000 整数毫秒；收手间隔为 300–1500 整数毫秒；帧率为 5–30 整数；输入长边为 480/720/960。非法配置返回 `EXHIBITION_INVALID_SETTINGS`，不会部分写入。已有设备缺少此字段时补入默认值；复制设备设置包含此项。配置范围由 `shared/exhibitionGestures.ts` 统一校验。
+`gestures` 可选 `open_palm`、`wave`，支持多选，不允许重复；空数组关闭识别。三项置信度为 0.1–0.9；`palmConfirmMs` 确认时间为 150–1000 整数毫秒；`palmReleaseMs` 收手间隔为 300–1500 整数毫秒；`palmLowerMs` 自然放手复位时间为 150–1500 整数毫秒；`lowerTrackingGraceMs` 放手过程的短暂跟踪丢失容错为 100–1000 整数毫秒；帧率为 5–30 整数；输入长边为 480/720/960。新提交必须包含全部字段；缺失或非法配置返回 `EXHIBITION_INVALID_SETTINGS`，不会部分写入。复制设备设置包含此项。配置范围由 `shared/exhibitionGestures.ts` 统一校验。
+
+读取旧设备数据时，若识别配置合法但缺少 `palmLowerMs` 或 `lowerTrackingGraceMs`，仅为缺少的字段补入默认值，保留原置信度、时长和已关闭的手势选项，并持久化迁移结果。整个识别配置缺失或包含显式非法值时，仍按原规则回退到完整默认值。
+
+展掌触发后，镜端支持同一操作者自然下放手臂，低位确认达到 `palmLowerMs` 后复位，再抬手重新确认；低位停留不会连续触发。此复位需要可信的人体与手腕跟踪，在 `lowerTrackingGraceMs` 范围内的短暂跟踪缺失可保留已开始的放手确认，但必须再次观测到可信的低位手腕才能完成，超时则重新计时，不会仅凭跟踪丢失复位。纯单手取景仍可通过握拳或移出画面复位，间隔采用 `palmReleaseMs`。仅开启 `wave` 时保留原挥手规则。`maxFps` 是采样上限，实际帧率取决于本机推理耗时。镜端的“已选中”“换装已提交”仅表示选装指令被接受，不代表生成画面已出现。
 
 手掌允许自然五指并拢，默认连续可见约 300 ms 确认，持续展示只触发一次；收手后才能再次展掌。仅勾选挥手时静止展示手掌不触发。镜端复用摄像头，只重建需要更新模型阈值的识别 Worker，不会因此启动新的 XMAX 生成。
 
@@ -309,7 +321,13 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 
 会话状态为 `reserved` / `active` / `stopping` / `stopped` / `issuance_unknown` / `error`。签发或停止状态未知时保留异常记录，不自动重复申请。`recover` 仅释放已结束的本地占用，不宣称未知云端凭证已撤销。
 
-智能镜不设置本地累计预算；`consumedCredits` 为单次临时凭证已核对消耗，不代表 SK 余额，余额不足以 XMAX 实际返回为准。默认单次最多 30 credits、有效期最多 120 秒，可在服务端环境配置降低。
+不限模式由大屏主动计划续接，不把 SDK 错误或供应商异常停止作为重试信号：
+
+1. 已收到真实首帧、当前素材已确认且会话仍为 active 时，凭证距到期 20 秒以内，或已核对消耗达到每段上限减 30 credits，允许 `POST M/live/session/{id}/renewal`，提交 `{ "deviceId": "…", "sessionNumber": 1, "generationNumber": 1 }`。成功返回 `{ "renewalId": "…" }`；`live.renewal` 显示这次计划，心跳返回的 `live.renewalDue` 可提示达到续接阈值。未确认使用量或客户端自报额度不构成续接依据。
+2. 大屏停止旧 SDK 并调用 `S/stop`，服务端确认旧临时凭证 stopped 后，再 `POST M/live/session/{id}/renewal/commit`，提交 `{ "deviceId": "…", "renewalId": "…" }`。成功返回完整镜状态：原 `sessionNumber` 保留，`generationNumber` 加一，`phase=generating`、`live=null`，只允许原大屏申请下一段。重复成功提交不重复增加代数或签发凭证。
+3. 计划最多保留 15 秒，且大屏心跳始终有效。续接中轮播与换装暂缓，手动结束/待机/暂停即时生效。旧凭证停止未确认、计划失效、心跳失联或新段签发失败均要求手动继续；后台轮询不会释放有效计划的旧占用，也不会自行续接。服务重启不恢复自动续接计划。
+
+智能镜不设置本地累计预算；`consumedCredits` 为单次临时凭证已核对消耗，不代表 SK 余额，余额不足以 XMAX 实际返回为准。单轮积分与凭证有效期默认 30 credits / 120 秒，可在后台按镜设置，或通过服务端环境配置缺省值；XMAX 仍可根据实际账号和服务限制拒绝签发。会话的 `pointsLimit` 保留签发时的积分上限，耗尽判断使用该快照。
 
 ## 错误处理
 
@@ -341,8 +359,10 @@ HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应
 
 ## 提前准备参考素材
 
+- `GET M/references` 批量返回 `{ references: { [lookId]: { state, message?, retryAt?, updatedAt?, freshUntil?, stage? } } }`，供工作人员后台显示状态。`state` 为 `queued`、`preparing`、`ready`、`failed`、`unconfigured` 或 `not_required`；时间字段为 Unix 毫秒。此接口不返回云端 URL、账号摘要或凭据，也不会触发上传。
+- `POST M/references/{lookId}/retry`，JSON 请求体 `{}`，返回 HTTP 202 和 `{ status }`，异步准备该素材；已有任务复用，有效缓存不重传。失败后冷却期间仅返回当前状态，达到 `retryAt` 后可重试。原有同步准备接口保持兼容。
 - `GET M/references/{lookId}` 只读查询，返回 `{ reference: null }` 或 `{ reference: { url, sha256, scope, freshUntil } }`。`scope` 为账号与区域的不可逆摘要；`freshUntil` 为 Unix 毫秒。查询不会签发临时 key 或发起云端上传。
 - `POST M/references/{lookId}`，JSON 请求体 `{}`，准备指定素材并返回同一结构。仅使用该镜当前永久凭据向对应区域上传原始图片并执行 SDK 同等的安全检查，不创建 RTC 或生成任务。原图仍保存在原素材目录。
-- 后台启动后自动串行准备空闲镜的素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。有效记录保留 1 小时，临近到期以 HEAD 检查续期，明确不存在才重新上传；网络不确定时冷却 60 秒。
+- 后台启动后自动串行准备空闲镜的素材，顺序为当前选中、已启用、其他素材；同优先级在镜子与素材间轮换，新上传或选择变化在下一轮调度生效。失败任务冷却后排在尚待准备的任务之后重试，避免连续超时阻塞正常素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。有效记录保留 1 小时，临近到期以 HEAD 检查续期，明确不存在才重新上传；网络不确定时冷却 60 秒。
 - 创建体验会话新增可选字段 `referenceScope`。客户端仅在它与准备结果 `scope` 相同且仍新鲜时复用 URL；缺字段、区域/账号变化、查找超时或未准备均回退普通 SDK 上传。现有 reference 绑定、session 关联和条件版本校验继续执行。
 - 同时最多 2 个准备任务（自动任务最多 1 个）；变更等待最多 128 个连接，超额返回 429。断开请求自动清理订阅。

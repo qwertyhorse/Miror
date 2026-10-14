@@ -12,9 +12,10 @@ import type { RealtimePresentationState } from '@xmaxai/sdk-global';
 import type { MoXInteraction } from './MoXDragSurface';
 import type { DiagnosticEventInput } from './diagnostics';
 import { exhibitionSdk, prepareExhibitionEntry } from './sdkPreparation';
+import { SESSION_RENEWAL_LEAD_MS } from '../../shared/sessionLimits';
 
 export type ExhibitionCameraStatus = 'off' | 'opening' | 'preview' | 'preparing' | 'connecting' | 'running' | 'stopping' | 'error' | 'other-device';
-type LiveSession = CreatedSession & { exhibition: { mirrorId?: string; lookId: string; deviceId: string; sessionNumber: number; generationNumber: number; mode?: ExhibitionExperienceMode; prompt?: string } };
+type LiveSession = CreatedSession & { exhibition: { mirrorId?: string; lookId: string; deviceId: string; sessionNumber: number; generationNumber: number; mode?: ExhibitionExperienceMode; prompt?: string; continuous?: boolean } };
 interface LiveInput { mirrorId?: string; terminalId?: string; terminalToken?: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; expectedRevision: number; image: string; referenceKind?: 'image' | 'none'; mode?: ExhibitionExperienceMode; prompt?: string; stream?: MediaStream; prefetchImages?: string[]; prefetchLookIds?: Record<string, string>; }
 interface ConditionInput { deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; refImageUrl?: string; }
 export interface ExhibitionSdkSession extends Omit<SdkSession, 'set'> {
@@ -43,6 +44,8 @@ export interface ExhibitionLiveDeps {
   firstFrame: (id: string, firstFrameMs: number) => Promise<SessionData>;
   stop: (id: string) => Promise<SessionData>;
   heartbeat: (id: string, deviceId: string, signal: AbortSignal) => Promise<unknown>;
+  prepareRenewal?: (id: string, input: { deviceId: string; sessionNumber: number; generationNumber: number }, signal: AbortSignal) => Promise<{ renewalId: string }>;
+  commitRenewal?: (id: string, input: { deviceId: string; renewalId: string }, signal: AbortSignal) => Promise<unknown>;
   reportError: (input: { deviceId: string; sessionId?: string; lookId: string; sessionNumber: number; generationNumber: number; message: string }) => Promise<unknown>;
   clone: (stream: MediaStream) => MediaStream;
   now: () => number;
@@ -96,6 +99,8 @@ function liveDefaults(mirrorId: string): ExhibitionLiveDeps {
   firstFrame: (id, firstFrameMs) => api(sessionPath(id, 'first-frame'), 'POST', { firstFrameMs }),
   stop: id => api(sessionPath(id, 'stop'), 'POST', {}),
   heartbeat: (sessionId, deviceId, signal) => api(path('live/heartbeat'), 'POST', { sessionId, deviceId }, signal),
+  prepareRenewal: (id, input, signal) => api(path(`live/session/${encodeURIComponent(id)}/renewal`), 'POST', input, signal),
+  commitRenewal: (id, input, signal) => api(path(`live/session/${encodeURIComponent(id)}/renewal/commit`), 'POST', input, signal),
   reportError: input => api(path('live/error'), 'POST', input),
   clone: stream => new MediaStream(stream.getVideoTracks().map(track => track.clone())),
   now: () => performance.now(),
@@ -135,6 +140,10 @@ export class ExhibitionLiveConnection {
   private timer?: ReturnType<typeof setTimeout>;
   private heartbeatTimer?: ReturnType<typeof setTimeout>;
   private expiryTimer?: ReturnType<typeof setTimeout>;
+  private renewalTimer?: ReturnType<typeof setTimeout>;
+  private renewing?: Promise<void>;
+  private renewalCancelled = false;
+  private renewalController?: AbortController;
   private starting?: Promise<void>;
   private stopping?: Promise<boolean>;
   private sdkDisconnected = false;
@@ -170,9 +179,69 @@ export class ExhibitionLiveConnection {
   private async heartbeat() {
     if (this.closed || !this.local) return;
     try {
-      await deadline(this.deps.heartbeat(this.local.id, this.input.deviceId, this.controller.signal), 6000);
+      const result = await deadline(this.deps.heartbeat(this.local.id, this.input.deviceId, this.controller.signal), 6000);
+      if (!this.closed && result && typeof result === 'object' && 'live' in result) {
+        const live = result.live as { renewalDue?: boolean } | null;
+        if (live?.renewalDue === true) void this.renew();
+      }
       if (!this.closed) this.heartbeatTimer = setTimeout(() => void this.heartbeat(), 5000);
     } catch { if (!this.closed) await this.fail('大屏与后台连接中断，已停止本次换装。'); }
+  }
+  /** Continue only a planned, healthy segment; disconnects never enter this path. */
+  private renew(): Promise<void> {
+    if (this.renewing) return this.renewing;
+    if (this.closed || this.renewalCancelled || !this.firstFrameConfirmed || !this.local?.exhibition.continuous) return Promise.resolve();
+    return this.renewing = this.renewNow();
+  }
+  private async renewNow() {
+    const local = this.local!;
+    const controller = new AbortController();
+    this.renewalController = controller;
+    let pulse: ReturnType<typeof setTimeout> | undefined;
+    let heartbeatFailure = false;
+    const keepLease = async () => {
+      if (controller.signal.aborted) return;
+      try {
+        await deadline(this.deps.heartbeat(local.id, this.input.deviceId, controller.signal), 6000);
+        if (!controller.signal.aborted) pulse = setTimeout(() => void keepLease(), 5000);
+      } catch { if (!controller.signal.aborted) { heartbeatFailure = true; controller.abort(); } }
+    };
+    try {
+      // Finish an accepted selection before freezing the renewal's generation.
+      if (this.updating) await deadline(this.updating, 5000);
+      if (this.closed || this.renewalCancelled) return;
+      if (!this.deps.prepareRenewal || !this.deps.commitRenewal) throw new Error('当前客户端无法自动续接，请更新后重试。');
+      const input = this.input;
+      const plan = await deadline(this.deps.prepareRenewal(local.id, {
+        deviceId: input.deviceId, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber,
+      }, controller.signal));
+      if (this.closed || this.renewalCancelled) return;
+      if (!plan || typeof plan.renewalId !== 'string' || !plan.renewalId) throw new Error('自动续接未取得有效计划，请重新开始。');
+      this.events.status('preparing'); this.events.refresh();
+      // The old SDK and key must both finish stopping before the server can
+      // hand off to another segment. Keep the device lease alive independently.
+      const stopped = this.stopResources();
+      void keepLease();
+      const confirmed = await stopped;
+      if (this.renewalCancelled) return;
+      if (heartbeatFailure) throw new Error('后台连接中断，自动续接已停止。');
+      if (!confirmed) throw new Error('上一段停止尚未确认，自动续接已停止。');
+      await deadline(this.deps.commitRenewal(local.id, { deviceId: this.input.deviceId, renewalId: plan.renewalId }, controller.signal));
+      if (!this.renewalCancelled) this.events.refresh();
+    } catch (cause) {
+      if (this.renewalCancelled) return;
+      const message = cause instanceof Error ? safeExhibitionErrorMessage(cause.message) : '自动续接失败，请手动继续体验。';
+      if (!this.closed) await this.fail(message);
+      else {
+        this.events.status('error', message);
+        await deadline(this.deps.reportError({ deviceId: this.input.deviceId, sessionId: local.id,
+          lookId: this.input.lookId, sessionNumber: this.input.sessionNumber, generationNumber: this.input.generationNumber, message })).catch(() => undefined);
+        this.events.refresh();
+      }
+    } finally {
+      clearTimeout(pulse); controller.abort();
+      if (this.renewalController === controller) this.renewalController = undefined;
+    }
   }
   private async run() {
     const operation = this.operation('start', this.input);
@@ -307,11 +376,15 @@ export class ExhibitionLiveConnection {
       if (this.closed) return;
       this.firstFrameConfirmed = true; this.appliedKey = this.key;
       clearTimeout(this.timer); this.events.status('running'); this.events.refresh();
+      if (this.local?.exhibition.continuous) {
+        const delay = Date.parse(this.local.expiresAt) - Date.now() - SESSION_RENEWAL_LEAD_MS;
+        this.renewalTimer = setTimeout(() => void this.renew(), Math.max(0, Math.min(delay, 2147483647)));
+      }
       void this.warmReferences();
     }).catch(() => { if (!this.closed) void this.fail('首帧确认失败，已停止本次换装，请重新开始。'); });
   };
   canReuse(input: LiveInput) {
-    return !this.closed && this.firstFrameConfirmed && !!this.sdk && !!this.local && this.local.status === 'active'
+    return !this.closed && !this.renewing && this.firstFrameConfirmed && !!this.sdk && !!this.local && this.local.status === 'active'
       && (input.mirrorId ?? 'default') === this.input.mirrorId && input.deviceId === this.input.deviceId
       && input.sessionNumber === this.input.sessionNumber && (input.mode ?? 'clothx') === (this.input.mode ?? 'clothx')
       && (input.mode ?? 'clothx') !== 'mox' && input.stream === this.input.stream
@@ -483,6 +556,11 @@ export class ExhibitionLiveConnection {
     this.events.refresh();
   }
   stop() {
+    this.renewalCancelled = true;
+    this.renewalController?.abort();
+    return this.stopResources();
+  }
+  private stopResources() {
     if (this.stopping) return this.stopping;
     const firstStop = !this.closed;
     this.closed = true;
@@ -490,7 +568,7 @@ export class ExhibitionLiveConnection {
     this.controller.abort();
     this.supersedePreparation?.();
     this.updateController?.abort(); this.references.clear(); this.pendingWarmInput = undefined;
-    clearTimeout(this.timer); clearTimeout(this.heartbeatTimer); clearTimeout(this.expiryTimer);
+    clearTimeout(this.timer); clearTimeout(this.heartbeatTimer); clearTimeout(this.expiryTimer); clearTimeout(this.renewalTimer);
     this.inputStream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     this.inputStream = undefined; this.events.stream(null); this.events.interaction?.(null); this.events.presentation?.(null);
     this.stopping = (async () => {

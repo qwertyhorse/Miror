@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import sharp, { type OutputInfo } from 'sharp';
@@ -8,9 +8,12 @@ import { ApiError, type SessionRecord } from './types.ts';
 import type { TryOnService } from './service.ts';
 import { ExhibitionSkinStore } from './exhibitionSkin.ts';
 import { isExhibitionGestureSettings, resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
+import type { ReferencePreparationStatus } from '../shared/referencePreparation.ts';
+import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
 const GENERATION_DELAY_MS = 2_200;
 const HEARTBEAT_TIMEOUT_MS = 15_000;
+const RENEWAL_PREPARE_WINDOW_MS = 20_000;
 const MAX_LOGS = 40;
 const MAX_LOOKS = 100;
 const MAX_INPUT_PIXELS = 32_000_000;
@@ -31,11 +34,15 @@ interface StoredExhibition {
   pausedPhase: 'showcase' | 'generating' | null;
   pausedRemainingMs: number;
 }
+interface LiveRenewalPlan {
+  id: string; requestedAt: number; sessionId: string; deviceId: string; sessionNumber: number; generationNumber: number; lookId: string;
+}
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function isAutoReturn(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && (value === 0 || (value >= 15 && value <= 600)); }
 function isAutoSwitchSeconds(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && value >= EXHIBITION_AUTO_SWITCH_MIN_SECONDS && value <= EXHIBITION_AUTO_SWITCH_MAX_SECONDS; }
 function isSwitchMode(value: unknown): value is 'manual' | 'auto' { return value === 'manual' || value === 'auto'; }
 function isUiSkinPreset(value: unknown): value is ExhibitionUiSkinPreset { return EXHIBITION_UI_SKIN_PRESETS.includes(value as ExhibitionUiSkinPreset); }
+function isMaterialDrawerColumns(value: unknown): value is 1 | 2 { return value === 1 || value === 2; }
 function isUiSkin(value: unknown): value is ExhibitionUiSkin | null { return value === null || (isRecord(value) && typeof value.image === 'string' && value.image.startsWith('/api/exhibition/') && isNonnegativeInteger(value.width) && value.width > 0 && isNonnegativeInteger(value.height) && value.height > 0 && isNonnegativeInteger(value.bytes) && value.bytes > 0); }
 function isNonnegativeInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
 function isTimestamp(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && value >= 0; }
@@ -99,6 +106,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     if (state.settings.autoSwitchSeconds === undefined) state.settings.autoSwitchSeconds = EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS;
     if (state.settings.uiSkinPreset === undefined) state.settings.uiSkinPreset = 'crystal';
     if (state.settings.uiSkin === undefined) state.settings.uiSkin = null;
+    if (!isMaterialDrawerColumns(state.settings.materialDrawerColumns)) state.settings.materialDrawerColumns = 2;
     // Repair only this optional field, preserving an older mirror's catalog and settings.
     state.settings.gestureRecognition = resolveExhibitionGestureSettings(state.settings.gestureRecognition);
   }
@@ -134,7 +142,8 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
       && (state.selectedLookId === null ? !state.looks.some(look => isRecord(look) && look.mode === state.experienceMode && (state.enabledLookIds as unknown[]).includes(look.id)) && ['select', 'idle'].includes(state.phase as string) : state.enabledLookIds.includes(state.selectedLookId) && state.looks.some(look => isRecord(look) && look.id === state.selectedLookId && look.mode === state.experienceMode))
       && isTimestamp(state.updatedAt) && (state.generationReadyAt === null || isTimestamp(state.generationReadyAt))
       && (state.autoSwitchAt === null || isTimestamp(state.autoSwitchAt))
-      && isRecord(state.settings) && isAutoReturn(state.settings.autoReturnSeconds) && validLimits(state.settings.uploadLimits) && isSwitchMode(state.settings.switchMode) && isAutoSwitchSeconds(state.settings.autoSwitchSeconds) && isUiSkinPreset(state.settings.uiSkinPreset) && isUiSkin(state.settings.uiSkin) && ['demo', 'xmax'].includes(state.providerMode as string)
+      && isRecord(state.settings) && isAutoReturn(state.settings.autoReturnSeconds) && validLimits(state.settings.uploadLimits) && isSwitchMode(state.settings.switchMode) && isAutoSwitchSeconds(state.settings.autoSwitchSeconds) && isUiSkinPreset(state.settings.uiSkinPreset) && isUiSkin(state.settings.uiSkin) && isMaterialDrawerColumns(state.settings.materialDrawerColumns) && ['demo', 'xmax'].includes(state.providerMode as string)
+      && (state.settings.sessionLimits === undefined || isSessionLimits(state.settings.sessionLimits))
       && (state.live === null || (isRecord(state.live) && isNonnegativeInteger(state.live.generationNumber) && typeof state.live.deviceId === 'string' && typeof state.live.lookId === 'string' && (state.live.sessionId === null || typeof state.live.sessionId === 'string') && (state.live.localEnded === undefined || typeof state.live.localEnded === 'boolean') && isTimestamp(state.live.heartbeatAt) && isTimestamp(state.live.updatedAt)))
       && Array.isArray(state.logs) && state.logs.every(log => isRecord(log) && typeof log.id === 'string' && isTimestamp(log.time) && typeof log.message === 'string')
       && isTimestamp(migrated.lastCommandAt) && (migrated.pausedPhase === null || migrated.pausedPhase === 'showcase' || migrated.pausedPhase === 'generating')
@@ -158,7 +167,13 @@ export class ExhibitionService {
   private uploadsInProgress = 0;
   private liveService?: TryOnService;
   private reconcilingLive?: Promise<void>;
+  private renewalPlan?: LiveRenewalPlan;
+  private renewalReceipt?: LiveRenewalPlan & { nextGeneration: number };
+  private renewalHandoff?: { deviceId: string; sessionNumber: number; generationNumber: number; expiresAt: number };
   private readonly skinStore: ExhibitionSkinStore;
+  // Uploaded asset IDs are immutable; retain only their digest, never all source bytes.
+  private readonly referenceIdentities = new Map<string, { sha256: string; mime: string }>();
+  private readonly referenceSourceFailures = new Map<string, ReferencePreparationStatus>();
 
   constructor(dataDirectory: string, options: { now?: () => number; mirrorId?: string; assetBasePath?: string; uploadConcurrency?: { inProgress: number; limit: number }; strictStorage?: boolean } = {}) {
     this.mirrorId = options.mirrorId ?? 'default';
@@ -177,7 +192,7 @@ export class ExhibitionService {
         revision: 0, phase: 'select', experienceMode: 'clothx', selectedLookId: 'commute', displayedLookId: null,
         enabledLookIds: [...EXHIBITION_LOOK_IDS], looks: structuredClone(SAMPLE_LOOKS), categories: ['通勤', '休闲', '礼服'], tags: ['简约', '日常', '优雅'],
         sessionNumber: 0, generationNumber: 0, updatedAt: time, generationReadyAt: null, autoSwitchAt: null,
-        settings: { autoReturnSeconds: 90, uploadLimits: { ...DEFAULT_LIMITS }, switchMode: 'manual', autoSwitchSeconds: EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, uiSkinPreset: 'crystal', uiSkin: null, gestureRecognition: resolveExhibitionGestureSettings() }, providerMode: 'demo', live: null, logs: [],
+        settings: { autoReturnSeconds: 90, uploadLimits: { ...DEFAULT_LIMITS }, switchMode: 'manual', autoSwitchSeconds: EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, uiSkinPreset: 'crystal', uiSkin: null, materialDrawerColumns: 2, gestureRecognition: resolveExhibitionGestureSettings() }, providerMode: 'demo', live: null, logs: [],
       }, lastCommandAt: time, pausedPhase: null, pausedRemainingMs: 0,
     };
     let loaded: unknown;
@@ -202,7 +217,26 @@ export class ExhibitionService {
     } else this.commit(this.stored, '局域网交互演示已就绪，未连接 XMAX 或摄像头。', time);
   }
 
-  get(): ExhibitionState { this.tick(); return structuredClone(this.stored.state); }
+  get(): ExhibitionState { this.tick(); return this.snapshotState(); }
+  sessionLimits(): ExhibitionSessionLimits {
+    return resolveSessionLimits(this.stored.state.settings.sessionLimits, {
+      credits: this.liveService && 'perSessionLimit' in this.liveService ? this.liveService.perSessionLimit : DEFAULT_SESSION_LIMITS.credits,
+      expireSeconds: this.liveService && 'expireSeconds' in this.liveService ? this.liveService.expireSeconds : DEFAULT_SESSION_LIMITS.expireSeconds,
+    });
+  }
+  credentialLimits(): { credits: number; expireSeconds: number } {
+    const limits = this.sessionLimits();
+    return { credits: limits.credits ?? CONTINUOUS_SEGMENT_CREDITS, expireSeconds: limits.expireSeconds };
+  }
+  private snapshotState(): ExhibitionState {
+    const state = structuredClone(this.stored.state);
+    state.settings.sessionLimits = this.sessionLimits();
+    if (state.live?.sessionId && this.liveService?.options?.store) {
+      const session = this.liveService.options.store.get(state.live.sessionId);
+      if (this.renewalEligible(state, session) && this.renewalThresholdReached(session)) state.live.renewalDue = true;
+    }
+    return state;
+  }
 
   attachLiveService(service: TryOnService) { this.liveService = service; }
 
@@ -219,14 +253,56 @@ export class ExhibitionService {
     return source ? this.liveService?.readyReference(this.mirrorId, source.data, source.mime) ?? null : null;
   }
   async prepareReference(lookId: string) {
-    const source = this.referenceSource(lookId);
+    let source: ReturnType<ExhibitionService['referenceSource']>;
+    try { source = this.referenceSource(lookId); }
+    catch (error) { if (this.stored.state.looks.some(look => look.id === lookId)) this.referenceSourceUnavailable(lookId); throw error; }
     if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime);
     return this.readyReference(lookId); // Re-read after await: removal/replacement must win.
   }
+  private referenceSourceUnavailable(lookId: string): ReferencePreparationStatus {
+    this.referenceIdentities.delete(lookId);
+    const status: ReferencePreparationStatus = { state: 'failed', message: '本地图片不可用，请重新上传。', retryAt: this.now() + 60_000, updatedAt: this.now() };
+    this.referenceSourceFailures.set(lookId, status);
+    return { ...status };
+  }
+  referencePreparationStatus(lookId: string): ReferencePreparationStatus {
+    const look = this.stored.state.looks.find(item => item.id === lookId);
+    if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
+    if (look.referenceKind === 'none') return { state: 'not_required' };
+    if (!this.liveService?.status(this.mirrorId).configured) return { state: 'unconfigured' };
+    const failure = this.referenceSourceFailures.get(lookId);
+    if (failure && (failure.retryAt ?? 0) > this.now()) return { ...failure };
+    let identity = this.referenceIdentities.get(lookId);
+    if (!identity) {
+      try {
+        const source = this.referenceSource(lookId)!;
+        identity = { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime };
+        this.referenceIdentities.set(lookId, identity);
+        this.referenceSourceFailures.delete(lookId);
+      } catch { return this.referenceSourceUnavailable(lookId); }
+    }
+    return this.liveService.referencePreparationStatus(this.mirrorId, identity.sha256, identity.mime);
+  }
+  referencePreparationStatuses(): Record<string, ReferencePreparationStatus> {
+    const ids = new Set(this.stored.state.looks.map(look => look.id));
+    for (const id of this.referenceIdentities.keys()) if (!ids.has(id)) this.referenceIdentities.delete(id);
+    for (const id of this.referenceSourceFailures.keys()) if (!ids.has(id)) this.referenceSourceFailures.delete(id);
+    return Object.fromEntries([...ids].map(id => [id, this.referencePreparationStatus(id)]));
+  }
+  retryReferencePreparation(lookId: string): ReferencePreparationStatus {
+    const current = this.referencePreparationStatus(lookId);
+    if (current.state === 'unconfigured' || current.state === 'not_required' || current.state === 'preparing'
+      || (current.state === 'ready' && (current.freshUntil ?? 0) > this.now() + 5 * 60_000)
+      || (current.state === 'failed' && (current.retryAt ?? 0) > this.now())) return current;
+    // Preparation is shared with the idle worker and deduplicates by credential scope and bytes.
+    void this.prepareReference(lookId).catch(() => undefined);
+    return this.referencePreparationStatus(lookId);
+  }
   liveStatus(): ExhibitionLiveStatus {
     const status = this.liveService?.status(this.mirrorId);
+    const limits = this.credentialLimits();
     return { configured: status?.configured ?? false, mode: this.stored.state.providerMode, model: status?.model ?? 'x2.0',
-      providerRegion: status?.providerRegion ?? 'global', perSessionLimit: status?.perSessionLimit ?? 30, expireSeconds: this.liveService?.expireSeconds ?? 120,
+      providerRegion: status?.providerRegion ?? 'global', perSessionLimit: limits.credits, expireSeconds: limits.expireSeconds,
       heartbeatTimeoutSeconds: HEARTBEAT_TIMEOUT_MS / 1000, live: structuredClone(this.stored.state.live) };
   }
   credentialsEditable(): boolean {
@@ -245,17 +321,20 @@ export class ExhibitionService {
     if (state.phase !== 'generating') throw new ApiError('EXHIBITION_INVALID_PHASE', '请先开始体验，再连接实时换装。', 409);
     if (input.generationNumber !== state.generationNumber) throw new ApiError('EXHIBITION_STALE_GENERATION', '本轮换装已更新，请等待大屏同步。', 409);
     if (state.live) throw new ApiError('EXHIBITION_DEVICE_BUSY', '已有大屏占用本轮体验，请先结束或等待会话停止。', 409);
+    if (this.renewalHandoff && (this.renewalHandoff.deviceId !== deviceId || this.renewalHandoff.sessionNumber !== state.sessionNumber || this.renewalHandoff.generationNumber !== state.generationNumber)) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '续接只允许原大屏连接。', 409);
     const look = state.looks.find(item => item.id === input.lookId);
     if (!look || look.id !== state.selectedLookId || !activeLookIds(state).includes(look.id)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材与当前模式或体验不一致。');
     if (!this.liveService) throw new ApiError('EXHIBITION_LIVE_UNAVAILABLE', '实时换装服务尚未连接。', 503);
     if (look.source === 'upload') this.asset(look.id);
     const service = this.liveService;
+    const sessionLimits = this.sessionLimits();
     const live = { deviceId, generationNumber: state.generationNumber, sessionId: null as string | null, lookId: look.id, status: 'preparing' as const, updatedAt: this.now(), heartbeatAt: this.now() };
     const draft = structuredClone(this.stored); draft.state.live = live;
     this.commit(draft, '大屏已占用本轮体验，正在申请受限 XMAX 临时凭证。', this.now());
+    this.renewalHandoff = undefined;
     let reservedId: string | undefined;
     try {
-      const created = await service.createExhibition({ mirrorId: this.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: look.referenceKind === 'none' ? '' : look.image, referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber }, {
+      const created = await service.createExhibition({ mirrorId: this.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: look.referenceKind === 'none' ? '' : look.image, referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits }, {
         onReserved: id => {
           reservedId = id;
           const reserved = structuredClone(this.stored);
@@ -285,6 +364,78 @@ export class ExhibitionService {
   heartbeat(input: unknown): ExhibitionState {
     if (!isRecord(input) || !this.stored.state.live || input.deviceId !== this.stored.state.live.deviceId || input.sessionId !== this.stored.state.live.sessionId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前大屏并未持有这个实时会话。', 409);
     this.stored.state.live.heartbeatAt = this.now();
+    return this.get();
+  }
+
+  private renewalThresholdReached(session: Pick<SessionRecord, 'expiresAt' | 'consumedCredits' | 'pointsLimit'>): boolean {
+    const remaining = session.expiresAt ? Date.parse(session.expiresAt) - this.now() : NaN;
+    return (remaining > 0 && remaining <= RENEWAL_PREPARE_WINDOW_MS) || session.consumedCredits >= session.pointsLimit - 30;
+  }
+  private renewalEligible(state: ExhibitionState, session: SessionRecord): boolean {
+    const live = state.live;
+    return this.sessionLimits().credits === null && state.providerMode === 'xmax' && state.phase === 'showcase'
+      && !!live && !live.renewal && live.status === 'running' && live.firstFrameMs !== undefined
+      && live.sessionId === session.id && live.lookId === state.selectedLookId && live.generationNumber === state.generationNumber
+      && this.now() - live.heartbeatAt < HEARTBEAT_TIMEOUT_MS && session.status === 'active' && session.firstFrameMs !== undefined
+      && !!session.expiresAt && Date.parse(session.expiresAt) > this.now()
+      && session.exhibition?.continuous === true && session.exhibition.deviceId === live.deviceId
+      && session.exhibition.sessionNumber === state.sessionNumber && session.exhibition.generationNumber === state.generationNumber;
+  }
+  private renewalPlanCurrent(plan: LiveRenewalPlan): boolean {
+    const state = this.stored.state;
+    return this.renewalPlan === plan && this.sessionLimits().credits === null && state.providerMode === 'xmax' && state.phase === 'showcase'
+      && state.live?.sessionId === plan.sessionId && state.live.deviceId === plan.deviceId && state.live.renewal?.id === plan.id
+      && state.live.status !== 'error' && state.live.generationNumber === plan.generationNumber
+      && state.sessionNumber === plan.sessionNumber && state.generationNumber === plan.generationNumber && state.selectedLookId === plan.lookId
+      && this.now() - state.live.heartbeatAt < HEARTBEAT_TIMEOUT_MS && this.now() - plan.requestedAt < HEARTBEAT_TIMEOUT_MS;
+  }
+  async prepareLiveRenewal(id: string, input: unknown): Promise<{ renewalId: string }> {
+    if (!isRecord(input) || !this.liveService) throw new ApiError('EXHIBITION_INVALID_SESSION', '续接请求无效。');
+    this.tick();
+    const state = this.stored.state;
+    if (state.live?.sessionId !== id || state.live.deviceId !== input.deviceId || state.sessionNumber !== input.sessionNumber || state.generationNumber !== input.generationNumber) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '续接请求与当前大屏体验不匹配。', 409);
+    if (this.renewalPlan && this.renewalPlanCurrent(this.renewalPlan)) return { renewalId: this.renewalPlan.id };
+    const session = await this.liveService.get(id, false);
+    // The await may race a manual stop, material switch or another preparing request.
+    if (this.stored.state !== state) throw new ApiError('EXHIBITION_STALE_GENERATION', '体验状态已更新，请保留当前会话。', 409);
+    if (!this.renewalEligible(state, session) || !this.renewalThresholdReached(session)) throw new ApiError('EXHIBITION_RENEWAL_UNAVAILABLE', '当前会话尚不能续接。', 409);
+    const plan: LiveRenewalPlan = { id: randomUUID(), requestedAt: this.now(), sessionId: id, deviceId: state.live!.deviceId,
+      sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, lookId: state.selectedLookId! };
+    const draft = structuredClone(this.stored); draft.state.live!.renewal = { id: plan.id, requestedAt: plan.requestedAt }; draft.state.autoSwitchAt = null;
+    this.renewalPlan = plan;
+    try { this.commit(draft, '本轮体验正在续接临时凭证。', this.now()); }
+    catch (error) { this.renewalPlan = undefined; throw error; }
+    return { renewalId: plan.id };
+  }
+  async commitLiveRenewal(id: string, input: unknown): Promise<ExhibitionState> {
+    if (!isRecord(input) || !this.liveService) throw new ApiError('EXHIBITION_INVALID_SESSION', '续接请求无效。');
+    this.tick();
+    const receipt = this.renewalReceipt;
+    if (receipt?.sessionId === id && receipt.id === input.renewalId && receipt.deviceId === input.deviceId) return this.get();
+    const plan = this.renewalPlan;
+    if (!plan || plan.sessionId !== id || plan.id !== input.renewalId || plan.deviceId !== input.deviceId) throw new ApiError('EXHIBITION_RENEWAL_UNAVAILABLE', '续接计划已失效，请手动继续。', 409);
+    const session = await this.liveService.get(id, false);
+    // A successful concurrent commit is harmless; never advance twice.
+    if (this.renewalReceipt?.id === plan.id) return this.get();
+    if (!this.renewalPlanCurrent(plan) || session.status !== 'stopped') {
+      if (this.renewalPlan === plan) {
+        this.renewalPlan = undefined;
+        const failed = structuredClone(this.stored);
+        if (failed.state.live?.sessionId === id) {
+          delete failed.state.live.renewal;
+          if (['generating', 'showcase'].includes(failed.state.phase)) { failed.state.phase = 'paused'; failed.pausedPhase = 'generating'; }
+          this.commit(failed, '续接未完成，请检查停止状态后手动继续。', this.now());
+        }
+      }
+      throw new ApiError('EXHIBITION_RENEWAL_UNAVAILABLE', '旧凭证停止或大屏状态未确认，请手动继续。', 409);
+    }
+    const draft = structuredClone(this.stored);
+    draft.state.live = null; draft.state.phase = 'generating'; draft.state.generationNumber += 1;
+    draft.state.generationReadyAt = null; draft.state.autoSwitchAt = null; draft.pausedPhase = null; draft.pausedRemainingMs = 0;
+    this.commit(draft, '旧凭证已停止，正在连接本轮下一段体验。', this.now());
+    this.renewalReceipt = { ...plan, nextGeneration: draft.state.generationNumber };
+    this.renewalHandoff = { deviceId: plan.deviceId, sessionNumber: plan.sessionNumber, generationNumber: draft.state.generationNumber, expiresAt: this.now() + HEARTBEAT_TIMEOUT_MS };
+    this.renewalPlan = undefined;
     return this.get();
   }
 
@@ -400,6 +551,15 @@ export class ExhibitionService {
     let session = await service.get(id, false);
     let state = this.stored.state;
     if (state.live?.sessionId !== id || state.live.generationNumber !== live.generationNumber) return;
+    const renewal = this.renewalPlan;
+    if (renewal?.sessionId === id) {
+      if (this.renewalPlanCurrent(renewal) && ['active', 'stopping', 'stopped'].includes(session.status)) return;
+      this.renewalPlan = undefined;
+      const cancelled = structuredClone(this.stored); delete cancelled.state.live!.renewal;
+      if (['generating', 'showcase'].includes(cancelled.state.phase)) { cancelled.state.phase = 'paused'; cancelled.pausedPhase = 'generating'; }
+      this.commit(cancelled, '续接计划已取消，正在确认旧会话停止。', this.now()); state = this.stored.state;
+    }
+    if (!state.live || state.live.sessionId !== id) return;
     if (session.status === 'issuance_unknown' && service.isUnconfirmedExhibitionSession?.(id, this.mirrorId) === true) {
       const localEnded = state.live.localEnded === true && ['idle', 'select'].includes(state.phase);
       const message = localEnded ? '本地体验已结束，云端凭证状态待确认。' : 'XMAX 凭证签发状态未确认，请联系工作人员。';
@@ -532,7 +692,7 @@ export class ExhibitionService {
       writeFileSync(filename, normalized.data, { mode: 0o600, flag: 'wx' });
       try { this.commit(draft, `服装「${details.name}」已上传，启用后会出现在大屏。`, this.now()); }
       catch (error) { rmSync(filename, { force: true }); throw error; }
-      return structuredClone(this.stored.state);
+      return this.snapshotState();
     } finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
   }
 
@@ -583,7 +743,7 @@ export class ExhibitionService {
       throw error;
     }
     for (const id of previousUploads) { try { rmSync(join(this.assetsDirectory, `${id}.webp`), { force: true }); } catch { /* State was committed; stale files are not served. */ } }
-    return structuredClone(this.stored.state);
+    return this.snapshotState();
   }
 
   private backupBeforeCopy(sourceMirrorId: string, input: { copyLooks: boolean; copySettings: boolean }): void {
@@ -623,7 +783,7 @@ export class ExhibitionService {
     const details = this.lookMetadata({ ...existing, ...payload });
     const draft = structuredClone(this.stored); draft.state.looks[index] = { ...existing, ...details };
     reconcileSelection(draft.state);
-    this.commit(draft, `服装「${details.name}」的信息已保存。`, this.now()); return structuredClone(this.stored.state);
+    this.commit(draft, `服装「${details.name}」的信息已保存。`, this.now()); return this.snapshotState();
   }
 
   removeLook(id: string, input: unknown): ExhibitionState {
@@ -643,7 +803,7 @@ export class ExhibitionService {
       // leaves an inaccessible orphan instead of reporting a committed deletion as failed.
       try { rmSync(join(this.assetsDirectory, `${id}.webp`), { force: true }); } catch { /* Catalog membership gates all asset reads. */ }
     }
-    return structuredClone(this.stored.state);
+    return this.snapshotState();
   }
 
   taxonomy(input: unknown): ExhibitionState {
@@ -652,7 +812,7 @@ export class ExhibitionService {
     const tags = nameList(payload.tags, '标签', 80, true);
     if (this.stored.state.looks.some(look => !categories.includes(look.category) || look.tags.some(tag => !tags.includes(tag)))) throw new ApiError('EXHIBITION_TAXONOMY_IN_USE', '部分分类或标签仍被服装使用，请先修改对应服装。', 409);
     const draft = structuredClone(this.stored); draft.state.categories = categories; draft.state.tags = tags;
-    this.commit(draft, '单级分类与标签已保存。', this.now()); return structuredClone(this.stored.state);
+    this.commit(draft, '单级分类与标签已保存。', this.now()); return this.snapshotState();
   }
 
   updateUiSkin(skin: ExhibitionUiSkin | null, expectedRevision?: number): ExhibitionState {
@@ -662,7 +822,7 @@ export class ExhibitionService {
     const draft = structuredClone(this.stored); draft.state.settings.uiSkin = skin === null ? null : { ...skin };
     if (skin === null) draft.state.settings.uiSkinPreset = 'crystal';
     this.commit(draft, skin ? '镜端界面皮肤已更新。' : '镜端界面皮肤已恢复默认。', this.now());
-    return structuredClone(this.stored.state);
+    return this.snapshotState();
   }
 
   async uploadUiSkin(input: unknown): Promise<ExhibitionState> {
@@ -691,6 +851,7 @@ export class ExhibitionService {
     if (!isRecord(input) || typeof input.action !== 'string') throw new ApiError('EXHIBITION_INVALID_COMMAND', '请选择有效的展会操作。');
     this.tick(); this.checkRevision(input.expectedRevision);
     const draft = structuredClone(this.stored); const state = draft.state; const time = this.now(); let message: string;
+    if (state.live?.renewal && ['switch', 'next', 'previous', 'select'].includes(input.action)) throw new ApiError('EXHIBITION_RENEWAL_PENDING', '正在续接体验，请稍候再换装。', 409);
     const isLookId = (id: unknown): id is string => typeof id === 'string' && state.looks.some(look => look.id === id);
     const currentModeIds = activeLookIds(state);
     const requireSelection = () => { if (state.selectedLookId === null || !currentModeIds.includes(state.selectedLookId)) throw new ApiError('EXHIBITION_NO_ENABLED_LOOKS', '当前模式暂无启用素材，请先上传并启用素材。', 409); };
@@ -714,14 +875,14 @@ export class ExhibitionService {
         requirePhase('generating', 'showcase');
         if (!isLookId(input.lookId) || !currentModeIds.includes(input.lookId)) throw new ApiError('EXHIBITION_INVALID_LOOK', '这份素材不属于当前模式或尚未启用。');
         // Tapping the current outfit must not restart or allocate another live session.
-        if (input.lookId === state.selectedLookId) return structuredClone(this.stored.state);
+        if (input.lookId === state.selectedLookId) return this.snapshotState();
         state.selectedLookId = input.lookId; state.phase = 'generating'; state.generationNumber += 1;
         state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
       case 'next':
       case 'previous': {
         requirePhase('generating', 'showcase'); requireSelection(); const current = currentModeIds.indexOf(state.selectedLookId!); const direction = input.action === 'next' ? 1 : -1;
-        if (currentModeIds.length === 1) return structuredClone(this.stored.state);
+        if (currentModeIds.length === 1) return this.snapshotState();
         state.selectedLookId = currentModeIds[(current + direction + currentModeIds.length) % currentModeIds.length];
         state.phase = 'generating'; state.generationNumber += 1; state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
@@ -740,7 +901,7 @@ export class ExhibitionService {
       case 'idle': {
         const phase = input.action === 'end' ? 'select' : 'idle';
         const unknown = state.live?.sessionId && this.liveService?.isUnconfirmedExhibitionSession?.(state.live.sessionId, this.mirrorId) === true;
-        if (unknown && state.phase === phase && state.live?.localEnded === true && state.live.status === 'error') return structuredClone(this.stored.state);
+        if (unknown && state.phase === phase && state.live?.localEnded === true && state.live.status === 'error') return this.snapshotState();
         this.reset(draft, phase);
         if (unknown && state.live) {
           state.live.localEnded = true; state.live.status = 'error'; state.live.updatedAt = time;
@@ -750,7 +911,7 @@ export class ExhibitionService {
       }
       case 'recover': {
         requirePhase('select', 'idle');
-        if (!state.live) return structuredClone(this.stored.state);
+        if (!state.live) return this.snapshotState();
         if (state.live.localEnded !== true || state.live.status !== 'error' || !state.live.sessionId
           || this.liveService?.isUnconfirmedExhibitionSession(state.live.sessionId, this.mirrorId) !== true) {
           throw new ApiError('EXHIBITION_RECOVERY_UNAVAILABLE', '请先结束体验并确认旧会话状态后再恢复。', 409);
@@ -770,7 +931,7 @@ export class ExhibitionService {
         if (!Array.isArray(input.lookIds) || input.lookIds.length !== looks.length || new Set(input.lookIds).size !== looks.length
           || !input.lookIds.every(id => typeof id === 'string' && looks.some(look => look.id === id))) throw new ApiError('EXHIBITION_INVALID_LOOK_ORDER', '请提交该模式全部素材的顺序，素材不能重复、遗漏或跨模式。');
         const lookIds = input.lookIds as string[];
-        if (lookIds.every((id, index) => id === looks[index].id)) return structuredClone(this.stored.state);
+        if (lookIds.every((id, index) => id === looks[index].id)) return this.snapshotState();
         const ordered = new Map(looks.map(look => [look.id, look]));
         let catalogIndex = 0;
         state.looks = state.looks.map(look => look.mode === mode ? ordered.get(lookIds[catalogIndex++])! : look);
@@ -781,9 +942,19 @@ export class ExhibitionService {
         message = '素材顺序已保存，大屏选择和自动换装按此顺序播放。'; break;
       }
       case 'configure': {
-        const otherSettings = input.enabledLookIds !== undefined || input.autoReturnSeconds !== undefined || input.uploadLimits !== undefined || input.providerMode !== undefined || input.experienceMode !== undefined || input.uiSkinPreset !== undefined || input.gestureRecognition !== undefined;
+        const otherSettings = input.enabledLookIds !== undefined || input.autoReturnSeconds !== undefined || input.uploadLimits !== undefined || input.providerMode !== undefined || input.experienceMode !== undefined || input.uiSkinPreset !== undefined || input.materialDrawerColumns !== undefined || input.gestureRecognition !== undefined || input.sessionLimits !== undefined;
         if (otherSettings) requirePhase('select', 'idle');
         if (!otherSettings && input.switchMode === undefined && input.autoSwitchSeconds === undefined) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请提供要更新的展会设置。');
+        if (input.materialDrawerColumns !== undefined) {
+          if (!isMaterialDrawerColumns(input.materialDrawerColumns)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '素材列数请选择一列或两列。');
+          if (state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再修改素材列数。', 409);
+          state.settings.materialDrawerColumns = input.materialDrawerColumns;
+        }
+        if (input.sessionLimits !== undefined) {
+          if (!isSessionLimits(input.sessionLimits)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', `单轮积分需为 1–${SESSION_CREDIT_MAX} 或不限，凭证有效期需为 1–${SESSION_EXPIRY_MAX} 秒的整数；不限模式至少 60 秒。`);
+          if (state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再修改单轮限制。', 409);
+          state.settings.sessionLimits = resolveSessionLimits(input.sessionLimits);
+        }
         if (input.gestureRecognition !== undefined) {
           if (!isExhibitionGestureSettings(input.gestureRecognition)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '手势识别设置无效，请检查所选手势和参数范围。');
           if (state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再修改手势识别设置。', 409);
@@ -840,7 +1011,7 @@ export class ExhibitionService {
     draft.lastCommandAt = time; this.commit(draft, message, time);
     // Block delayed reference/link/signing completions before awaiting revocation.
     if (interruptedSession) this.liveService?.cancelExhibitionSession(interruptedSession, this.mirrorId);
-    return structuredClone(this.stored.state);
+    return this.snapshotState();
   }
 
   private checkRevision(revision: unknown) {
@@ -871,6 +1042,7 @@ export class ExhibitionService {
     reconcileSelection(draft.state);
   }
   private autoSwitchEligible(state: ExhibitionState, time: number) {
+    if (state.live?.renewal) return false;
     if (state.settings.switchMode !== 'auto' || state.phase !== 'showcase' || activeLookIds(state).length < 2) return false;
     return state.providerMode === 'demo' || (!!state.live?.sessionId && state.live.status === 'running' && state.live.generationNumber === state.generationNumber
       && state.live.lookId === state.selectedLookId && time - state.live.heartbeatAt < HEARTBEAT_TIMEOUT_MS);
@@ -888,9 +1060,18 @@ export class ExhibitionService {
     this.commit(draft, `自动切换至${this.lookName(state.selectedLookId)}。`, time);
   }
   private tick() {
+    if (this.renewalHandoff && (this.stored.state.phase !== 'generating' || this.stored.state.sessionNumber !== this.renewalHandoff.sessionNumber
+      || this.stored.state.generationNumber !== this.renewalHandoff.generationNumber)) this.renewalHandoff = undefined;
+    if (this.renewalHandoff && this.now() >= this.renewalHandoff.expiresAt) {
+      this.renewalHandoff = undefined;
+      const expired = structuredClone(this.stored); expired.state.phase = 'paused'; expired.pausedPhase = 'generating';
+      this.commit(expired, '大屏未及时续接，请手动继续。', this.now());
+    }
     const { state, lastCommandAt } = this.stored; const time = this.now();
     const automaticExperience = state.settings.switchMode === 'auto' && ['generating', 'showcase'].includes(state.phase);
-    if (!automaticExperience && state.phase !== 'idle' && state.phase !== 'paused' && state.settings.autoReturnSeconds > 0 && time - lastCommandAt >= state.settings.autoReturnSeconds * 1_000) {
+    const continuousExperience = this.sessionLimits().credits === null && state.providerMode === 'xmax'
+      && ['generating', 'showcase'].includes(state.phase) && (!!state.live || !!this.renewalHandoff);
+    if (!automaticExperience && !continuousExperience && state.phase !== 'idle' && state.phase !== 'paused' && state.settings.autoReturnSeconds > 0 && time - lastCommandAt >= state.settings.autoReturnSeconds * 1_000) {
       const draft = structuredClone(this.stored); this.reset(draft, 'idle'); this.commit(draft, '长时间未操作，大屏已自动返回待机。', time);
     } else if (state.providerMode === 'demo' && state.phase === 'generating' && state.generationReadyAt !== null && time >= state.generationReadyAt) {
       const draft = structuredClone(this.stored); draft.state.phase = 'showcase'; draft.state.displayedLookId = draft.state.selectedLookId; draft.state.generationReadyAt = null;

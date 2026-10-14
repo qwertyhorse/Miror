@@ -16,6 +16,7 @@ class NativeXmaxController(private val events: MutableList<String>) {
     val uploadEntered = CompletableDeferred<Unit>()
     var connectedImage: ByteArray? = null
     var connectedPosition: CameraPosition? = null
+    var connectedCameraDeviceId: String? = null
     var generatedPrompt: String? = null
     var generatedReference: String? = null
     var uploadedBytes: ByteArray? = null
@@ -32,11 +33,13 @@ class NativeXmaxController(private val events: MutableList<String>) {
     }
 
     suspend fun connect(token: String, region: String, model: String,
-                        position: CameraPosition = CameraPosition.BACK, image: ByteArray? = null): String {
+                        position: CameraPosition = CameraPosition.BACK, image: ByteArray? = null,
+                        cameraDeviceId: String? = null): String {
         check(token == "tk-fixture" && region == "cn" && model == "x2.0")
         events.add("connect")
         connectedImage = image
         connectedPosition = position
+        connectedCameraDeviceId = cameraDeviceId
         if (failConnect) throw IOException("连接失败 tk-fixture https://supplier-fixture.invalid/?secret=fixture")
         return "ums-fixture"
     }

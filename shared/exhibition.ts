@@ -1,6 +1,7 @@
 import type { XmaxRegion } from './xmax.ts';
 import type { ExhibitionGestureSettings } from './exhibitionGestures.ts';
 import type { ExhibitionSessionLimits } from './sessionLimits.ts';
+import type { ExhibitionCameraReport, ExhibitionCameraRequest, ExhibitionCameraStatus } from './exhibitionCamera.ts';
 
 export const EXHIBITION_LOOK_IDS = ['commute', 'city', 'evening'] as const;
 export const EXHIBITION_EXPERIENCE_MODES = ['free', 'charx', 'clothx', 'vibex', 'dimx', 'mox'] as const;
@@ -37,12 +38,18 @@ export interface ExhibitionUploadLimits {
   minHeight: number;
   maxHeight: number;
 }
+export const EXHIBITION_DEFAULT_UPLOAD_LIMITS: Readonly<ExhibitionUploadLimits> = {
+  maxFileSizeMB: 10, minWidth: 256, maxWidth: 8192, minHeight: 256, maxHeight: 8192,
+};
 export interface ExhibitionLook {
   id: ExhibitionLookId;
   name: string;
   description: string;
   /** Version-relative URL: clients should resolve through their version-aware app URL helper. */
   image: string;
+  /** Independent XMAX input; omitted on legacy materials that reuse the display image. */
+  referenceImage?: string;
+  referenceImageInfo?: ExhibitionImageInfo;
   palette: string;
   mode: ExhibitionExperienceMode;
   /** Defaults to image. Free prompt-only presets use none; image remains a display cover. */
@@ -57,6 +64,15 @@ export interface ExhibitionLook {
   bytes?: number;
   mime?: 'image/png' | 'image/jpeg' | 'image/webp';
 }
+export interface ExhibitionImageInfo {
+  width: number;
+  height: number;
+  bytes: number;
+  mime: 'image/png' | 'image/jpeg' | 'image/webp';
+}
+export function exhibitionReferenceImage(look: Pick<ExhibitionLook, 'image' | 'referenceImage' | 'referenceKind'>): string | null {
+  return look.referenceKind === 'none' ? null : look.referenceImage ?? look.image;
+}
 export interface ExhibitionLookInput {
   name: string;
   description?: string;
@@ -66,12 +82,16 @@ export interface ExhibitionLookInput {
   category?: string;
   tags?: string[];
   expectedRevision?: number;
+  /** Optional replacements when editing an existing material. */
+  imageBase64?: string;
+  referenceImageBase64?: string;
 }
 export interface ExhibitionUploadInput extends ExhibitionLookInput {
   /** Uploads append a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock append operations. */
   expectedRevision?: number;
   /** Raw base64 or a data URL. Only fully decoded, static PNG/JPEG/WebP images are accepted. */
   imageBase64: string;
+  referenceImageBase64: string;
 }
 export interface ExhibitionTaxonomyInput {
   categories: string[];
@@ -148,12 +168,15 @@ export interface ExhibitionDeviceBinding {
   boundAt: number;
   lastSeenAt: number;
   online: boolean;
+  camera?: ExhibitionCameraStatus;
 }
 export interface ExhibitionDeviceConnectInput {
   terminalId: string;
   token: string;
   label: string;
   platform: 'android' | 'browser';
+  cameraCapabilities?: { version: 1 };
+  cameraReport?: ExhibitionCameraReport;
 }
 export interface ExhibitionDeviceConnection {
   terminalId: string;
@@ -161,6 +184,9 @@ export interface ExhibitionDeviceConnection {
   mirrorName?: string;
   code?: string;
   expiresAt?: number;
+  cameraBindingId?: string;
+  cameraRequest?: ExhibitionCameraRequest;
+  cameraReportAccepted?: boolean;
 }
 export interface ExhibitionMirrorList {
   defaultMirrorId: string;
@@ -171,6 +197,14 @@ export interface ExhibitionMirrorCopyInput {
   expectedRevision: number;
   copyLooks: boolean;
   copySettings: boolean;
+}
+export interface ExhibitionLookCopyInput {
+  sourceMirrorId: string;
+  sourceLookId: ExhibitionLookId;
+  mode: ExhibitionExperienceMode;
+  expectedRevision: number;
+  /** Required when copying a non-Free material into Free. */
+  prompt?: string;
 }
 
 export interface ExhibitionLiveState {

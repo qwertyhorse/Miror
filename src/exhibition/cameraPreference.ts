@@ -6,10 +6,18 @@ export interface ExhibitionCameraPreference {
   profile: 'default' | 'screen';
 }
 
-/** The physical camera belongs to this browser and release, independently of mirror bindings. */
-export function readCameraPreference(): ExhibitionCameraPreference | null {
+function preferenceKey(scope?: string) {
+  return scope === undefined ? 'exhibition-camera-preference' : `exhibition-camera-preference:${encodeURIComponent(scope)}`;
+}
+
+export function saveCameraPreference(preference: ExhibitionCameraPreference, scope?: string): void {
+  scopedLocalStorage.setItem(preferenceKey(scope), JSON.stringify(preference));
+}
+
+/** Normal mirrors share this browser's camera; isolated tests never fall back to that preference. */
+export function readCameraPreference(scope?: string): ExhibitionCameraPreference | null {
   try {
-    const saved = scopedLocalStorage.getItem('exhibition-camera-preference');
+    const saved = scopedLocalStorage.getItem(preferenceKey(scope));
     if (!saved) return null;
     const value: unknown = JSON.parse(saved);
     if (!value || typeof value !== 'object') return null;

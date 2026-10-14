@@ -1,0 +1,160 @@
+package ai.openbuy.exhibition
+
+import android.content.Context
+import android.graphics.Color
+import android.view.View
+import android.widget.AdapterView
+import android.widget.FrameLayout
+import ai.xmax.sdk.VideoContentMode
+import ai.xmax.sdk.XmaxRealtimeVideoView
+import kotlinx.coroutines.*
+
+/** An exclusive, local-only camera lease. Preferences are committed by the dialog's Save action. */
+internal class NativeCameraSettingsPanel(
+    context: Context,
+    private val controller: NativeXmaxController,
+    initialSelection: NativeCameraSelection,
+    private val legacyPosition: String?,
+    private val migrateLegacy: Boolean,
+    private val awaitExclusive: suspend () -> Unit,
+    private val requestPermission: () -> Boolean,
+    private val onState: (String, NativeCameraSnapshot, NativeCameraSelection, String?, String?) -> Unit = { _, _, _, _, _ -> },
+) : NativeCameraSettingsView(context) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var operation: Job? = null
+    private var epoch = 0L
+    private var closed = false
+    private var initialized = false
+    private var options = listOf<String?>(null)
+    private val preview = XmaxRealtimeVideoView(context).apply {
+        setBackgroundColor(Color.BLACK)
+        videoContentMode = VideoContentMode.FIT
+        visibility = View.GONE
+    }
+    var selection = initialSelection
+        private set
+    private var snapshot = NativeCameraSnapshot(emptyList())
+    private var previewedDeviceId: String? = null
+
+    init {
+        previewContainer.addView(preview, FrameLayout.LayoutParams(-1, -1))
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!initialized || position !in options.indices || options[position] == selection.cameraId) return
+                selection = NativeCameraSelection(options[position])
+                launchOperation { showPreview() }
+            }
+        }
+        refresh.setOnClickListener { rescan() }
+        rescan()
+    }
+
+    fun rescan() {
+        if (closed) return
+        if (!requestPermission()) {
+            message("请允许摄像头权限", true)
+            report("permission-required", "请允许摄像头权限")
+            return
+        }
+        launchOperation {
+            message("检测中…")
+            report("scanning")
+            snapshot = controller.detectCameras()
+            if (!initialized && migrateLegacy) {
+                selection = NativeCameraSelection.migrate(null, legacyPosition, snapshot.devices)
+            }
+            val ids = mutableListOf<String?>(null)
+            val labels = mutableListOf("自动选择")
+            snapshot.devices.forEach { ids.add(it.id); labels.add(it.label) }
+            if (selection.cameraId != null && selection.cameraId !in ids) {
+                ids.add(selection.cameraId)
+                labels.add("摄像头 ${selection.cameraId}（未连接）")
+            }
+            options = ids
+            setChoices(labels)
+            spinner.setSelection(ids.indexOf(selection.cameraId).coerceAtLeast(0))
+            initialized = true
+            showPreview()
+        }
+    }
+
+    private suspend fun showPreview() {
+        val selected = selection.resolve(snapshot.devices)
+        if (selected == null) {
+            preview.visibility = View.GONE
+            previewContainer.visibility = View.GONE
+            message(selection.unavailableMessage(snapshot), true)
+            report("ready", selection.unavailableMessage(snapshot))
+            return
+        }
+        message("连接摄像头…")
+        report("scanning")
+        preview.visibility = View.VISIBLE
+        previewContainer.visibility = View.VISIBLE
+        val owner = epoch
+        controller.onError = {
+            if (!closed && owner == epoch) {
+                previewedDeviceId = null
+                message("摄像头已断开，请重新检测", true)
+                report("ready", "摄像头已断开，请重新检测")
+            }
+        }
+        controller.preview(cameraDeviceId = selected.id, target = preview)
+        // The shared controller defaults to the full-screen mirror's fill mode.
+        preview.videoContentMode = VideoContentMode.FIT
+        if (!closed && owner == epoch) {
+            previewedDeviceId = selected.id
+            message("已连接 · ${selected.label}")
+            report("preview")
+        }
+    }
+
+    private fun launchOperation(action: suspend () -> Unit) {
+        val owner = ++epoch
+        previewedDeviceId = null
+        val previous = operation
+        previous?.cancel()
+        operation = scope.launch {
+            try {
+                previous?.join()
+                awaitExclusive()
+                ensureActive()
+                controller.onError = null
+                controller.disconnect()
+                action()
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                if (!closed && owner == epoch) {
+                    preview.visibility = View.GONE
+                    previewContainer.visibility = View.GONE
+                    val failure = if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "摄像头不可用，请重新检测"
+                    message(failure, true)
+                    report(if (controller.hasReleaseFailure) "error" else "ready", failure)
+                }
+            }
+        }
+    }
+
+    suspend fun close() {
+        if (closed) return
+        closed = true
+        epoch++
+        try {
+            operation?.cancelAndJoin()
+            // No other engine may resume until this has completed, including on Activity.onStop.
+            withContext(NonCancellable) {
+                awaitExclusive()
+                controller.onError = null
+                controller.disconnect()
+            }
+        } finally { scope.cancel() }
+    }
+
+    private fun message(text: String, failed: Boolean = false) {
+        showMessage(text, failed)
+    }
+    private fun report(status: String, error: String? = null) {
+        if (!closed) onState(status, snapshot, selection, previewedDeviceId, error)
+    }
+}

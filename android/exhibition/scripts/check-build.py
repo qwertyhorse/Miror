@@ -55,11 +55,12 @@ try:
     tools = '{http://schemas.android.com/tools}'
     permissions = {item.attrib[android+'name'] for item in manifest.findall('uses-permission')
                    if item.attrib.get(tools+'node') != 'remove'}
-    assert permissions == {'android.permission.INTERNET', 'android.permission.CAMERA'}, permissions
+    assert permissions == {'android.permission.INTERNET', 'android.permission.CAMERA',
+                           'android.permission.CHANGE_WIFI_MULTICAST_STATE'}, permissions
     assert manifest.find('application/activity').attrib[android+'screenOrientation'] == 'portrait'
     for path in (root / 'app/src').rglob('*.xml'):
         ET.parse(path)
-    report('Resource XML + manifest', True, 'well-formed; portrait; INTERNET + CAMERA; no microphone')
+    report('Resource XML + manifest', True, 'well-formed; portrait; INTERNET + CAMERA + bounded LAN discovery; no microphone')
 except (AssertionError, ET.ParseError, KeyError) as error:
     report('Resource XML + manifest', False, str(error))
 

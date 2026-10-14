@@ -8,6 +8,7 @@ import type { Server } from 'node:http';
 import { createApiServer } from '../server/http.ts';
 import { ExhibitionMirrors } from '../server/exhibitionMirrors.ts';
 import { TryOnService } from '../server/service.ts';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits.ts';
 import { SecretBox, SessionStore } from '../server/store.ts';
 import { ApiError, type Provider } from '../server/types.ts';
 
@@ -81,10 +82,10 @@ describe('manual stop over the backend API', () => {
     const first = await f.post('/command', { action: 'end' }); expect(first.status).toBe(200);
     const unconfirmed = await first.json();
     expect(unconfirmed).toMatchObject({ phase: 'select', live: { sessionId: session.id, status: 'error' } }); expect(unconfirmed.live).not.toHaveProperty('localEnded');
-    expect(f.store.get(session.id).status).toBe('stopping'); expect(f.store.allocated()).toBe(30);
+    expect(f.store.get(session.id).status).toBe('stopping'); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     const retry = await f.post('/command', { action: 'end' }); expect(retry.status).toBe(200);
     expect(await retry.json()).toMatchObject({ phase: 'select', live: null });
-    expect(f.deactivate).toHaveBeenCalledTimes(2); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(30);
+    expect(f.deactivate).toHaveBeenCalledTimes(2); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it.each(['end', 'idle'] as const)('confirms local %s for unknown issuance without releasing its cloud protection', async action => {
@@ -106,7 +107,7 @@ describe('manual stop over the backend API', () => {
     await f.service.recover(); await restarted.sweepLive();
     expect(restarted.getMirror().get()).toEqual(ended);
     expect(f.store.get(record.id)).toEqual(record); expect(f.store.get(record.id).status).toBe('issuance_unknown');
-    expect(f.store.allocated()).toBe(30); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).not.toHaveBeenCalled();
+    expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).not.toHaveBeenCalled();
   });
 
   it.each(['end', 'idle'] as const)('explicitly recovers a locally ended unknown %s lease without issuing or refunding credits', async action => {
@@ -118,7 +119,7 @@ describe('manual stop over the backend API', () => {
     expect(recovered).toMatchObject({ phase: action === 'end' ? 'select' : 'idle', live: null,
       sessionNumber: ended.sessionNumber, generationNumber: ended.generationNumber + 1, generationReadyAt: null, autoSwitchAt: null });
     expect(f.store.get(record.id)).toEqual(record); expect(record.providerKeyCipher).toBeTruthy();
-    expect(f.store.allocated()).toBe(30); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).not.toHaveBeenCalled();
+    expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).not.toHaveBeenCalled();
     expect(await (await f.post('/command', { action: 'recover' })).json()).toEqual(recovered);
     const restarted = new ExhibitionMirrors(f.directory); restarted.attachLiveService(f.service);
     await f.service.recover(); await restarted.sweepLive();
@@ -138,7 +139,7 @@ describe('manual stop over the backend API', () => {
     const response = await f.post('/command', { action: 'recover' });
     expect(response.status).toBe(409); expect(await response.json()).toMatchObject({ error: { code: 'EXHIBITION_RECOVERY_UNAVAILABLE' } });
     expect(f.mirror.get()).toEqual(ended); expect(f.store.get(session.id)).toEqual(pending);
-    expect(f.deactivate).toHaveBeenCalledOnce(); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(30);
+    expect(f.deactivate).toHaveBeenCalledOnce(); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('rejects recovery of paused unknown issuance until its local experience is ended', async () => {
@@ -157,7 +158,7 @@ describe('manual stop over the backend API', () => {
     const response = await f.post('/command', { action: 'end' }); const next = await response.json();
     expect(response.status).toBe(200); expect(next).toMatchObject({ phase: 'select', live: { sessionId: session.id, status: 'error' } });
     expect(next.live).not.toHaveProperty('localEnded'); expect(f.store.get(session.id).status).toBe('stopping');
-    expect(f.store.allocated()).toBe(30); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).toHaveBeenCalledOnce();
+    expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).toHaveBeenCalledOnce();
   });
 
   it('releases the live lease only after successfully revoking a known token with unknown issuance status', async () => {
@@ -166,7 +167,7 @@ describe('manual stop over the backend API', () => {
     const response = await f.post('/command', { action: 'end' });
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ phase: 'select', live: null });
     expect(f.store.get(session.id).status).toBe('stopped'); expect(f.deactivate).toHaveBeenCalledOnce();
-    expect(f.store.allocated()).toBe(30); expect(f.issue).toHaveBeenCalledOnce();
+    expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.issue).toHaveBeenCalledOnce();
   });
 
   it('ends automatic switching at its deadline without advancing or allocating another outfit', async () => {

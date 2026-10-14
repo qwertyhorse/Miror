@@ -17,7 +17,7 @@ function fixture() {
 }
 async function upload(service: ExhibitionService, name = '独立服装') {
   const image = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#b0a0f088' } }).png().toBuffer();
-  return service.upload({ name, category: '通勤', tags: ['简约'], imageBase64: image.toString('base64') });
+  return service.upload({ name, category: '通勤', tags: ['简约'], imageBase64: image.toString('base64'), referenceImageBase64: image.toString('base64') });
 }
 function copy(manager: ExhibitionMirrors, targetId: string, sourceMirrorId = 'default', copyLooks = true, copySettings = true) {
   return manager.copy(targetId, { sourceMirrorId, copyLooks, copySettings, expectedRevision: manager.getMirror(targetId).get().revision });
@@ -54,13 +54,14 @@ describe('durable exhibition mirror registry', () => {
     const image = old.asset(garment.id).data;
     const manager = new ExhibitionMirrors(directory, { now }); const migrated = manager.getMirror().get();
     expect(migrated).toMatchObject({ mirrorId: 'default', selectedLookId: garment.id, enabledLookIds: [garment.id, 'evening'], sessionNumber: 1, settings: { autoReturnSeconds: 180 } });
-    expect(migrated.looks.at(-1)!.image).toBe(`/api/exhibition/mirrors/default/assets/${garment.id}`);
+    expect(migrated.looks.at(-1)!.image).toBe(garment.image.replace('/api/exhibition/assets', '/api/exhibition/mirrors/default/assets'));
+    expect(migrated.looks.at(-1)!.referenceImage).toBe(garment.referenceImage!.replace('/api/exhibition/assets', '/api/exhibition/mirrors/default/assets'));
     expect(manager.getMirror().asset(garment.id).data).toEqual(image);
     expect(readFileSync(join(directory, 'exhibition.json'), 'utf8')).toBe(original);
     const backups = readdirSync(directory).filter(name => name.startsWith('exhibition-before-mirrors-'));
     expect(backups).toHaveLength(1);
     expect(readFileSync(join(directory, backups[0], 'exhibition.json'), 'utf8')).toBe(original);
-    expect(readFileSync(join(directory, backups[0], 'exhibition-assets', `${garment.id}.webp`))).toEqual(image);
+    expect(readFileSync(join(directory, backups[0], 'exhibition-assets', `${garment.id}.display.${garment.image.split('/').at(-1)}.webp`))).toEqual(image);
     expect(new ExhibitionMirrors(directory, { now }).getMirror().get()).toEqual(migrated);
     expect(readdirSync(directory).filter(name => name.startsWith('exhibition-before-mirrors-'))).toHaveLength(1);
   });
@@ -184,7 +185,8 @@ describe('independent configuration snapshots', () => {
     const result = copy(manager, second.id);
     const cloned = result.looks.find(look => look.source === 'upload')!;
     expect(cloned.id).not.toBe(original.id);
-    expect(cloned.image).toBe(`/api/exhibition/mirrors/${second.id}/assets/${cloned.id}`);
+    expect(cloned.image).toMatch(new RegExp(`^/api/exhibition/mirrors/${second.id}/assets/${cloned.id}/display/[a-f0-9-]+$`));
+    expect(cloned.referenceImage).toMatch(new RegExp(`^/api/exhibition/mirrors/${second.id}/assets/${cloned.id}/reference/[a-f0-9-]+$`));
     expect(result.enabledLookIds).toEqual([cloned.id, 'city']);
     expect(result).toMatchObject({ mirrorId: second.id, phase: 'idle', sessionNumber: oldTarget.sessionNumber, generationNumber: oldTarget.generationNumber, live: null, settings: { autoReturnSeconds: 240 } });
     expect(result.logs.slice(1)).toEqual(oldTarget.logs);
@@ -219,10 +221,11 @@ describe('independent configuration snapshots', () => {
     await upload(manager.getMirror()); const targetId = manager.create({ name: '目标' }).id; const target = manager.getMirror(targetId);
     const old = await upload(target, '原目标素材'); const oldAsset = old.looks.at(-1)!; const bytes = target.asset(oldAsset.id).data;
     const targetDir = join(directory, 'exhibition-mirrors', targetId); const file = join(targetDir, 'exhibition.json');
+    const originalFiles = readdirSync(join(targetDir, 'exhibition-assets'));
     renameSync(file, `${file}.saved`); mkdirSync(file);
     expect(() => copy(manager, targetId)).toThrow();
     expect(target.get()).toEqual(old); expect(target.asset(oldAsset.id).data).toEqual(bytes);
-    expect(readdirSync(join(targetDir, 'exhibition-assets'))).toEqual([`${oldAsset.id}.webp`]);
+    expect(readdirSync(join(targetDir, 'exhibition-assets'))).toEqual(originalFiles);
     rmSync(file, { recursive: true }); renameSync(`${file}.saved`, file);
     expect(new ExhibitionMirrors(directory, { now }).getMirror(targetId).get()).toEqual(old);
   });
@@ -230,7 +233,7 @@ describe('independent configuration snapshots', () => {
   it('removes already copied files when a later source asset is missing', async () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now }); const source = manager.getMirror();
     await upload(source, '有效图片'); const state = await upload(source, '缺失图片'); const missing = state.looks.at(-1)!;
-    rmSync(join(directory, 'exhibition-mirrors', 'default', 'exhibition-assets', `${missing.id}.webp`));
+    rmSync(join(directory, 'exhibition-mirrors', 'default', 'exhibition-assets', `${missing.id}.reference.${missing.referenceImage!.split('/').at(-1)}.webp`));
     const targetId = manager.create({ name: '目标' }).id; const before = manager.getMirror(targetId).get();
     expect(() => copy(manager, targetId)).toThrow(code('EXHIBITION_ASSET_NOT_FOUND'));
     expect(manager.getMirror(targetId).get()).toEqual(before);
@@ -241,7 +244,7 @@ describe('independent configuration snapshots', () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now });
     const b = manager.create({ name: 'B' }).id; const c = manager.create({ name: 'C' }).id;
     const image = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#fff' } }).png().toBuffer();
-    const input = { name: '素材', category: '通勤', tags: [], imageBase64: image.toString('base64') };
+    const input = { name: '素材', category: '通勤', tags: [], imageBase64: image.toString('base64'), referenceImageBase64: image.toString('base64') };
     const first = manager.getMirror().upload(input); const second = manager.getMirror(b).upload(input); const third = manager.getMirror(c).upload(input);
     expect(() => copy(manager, b)).toThrow(code('EXHIBITION_MIRROR_BUSY'));
     const results = await Promise.allSettled([first, second, third]);

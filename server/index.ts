@@ -39,7 +39,9 @@ const server = createApiServer(service, origins, undefined, exhibition);
 server.prependListener('request', (_request, response) => {
   response.setHeader('X-OpenBuy-Version', '1.1');
 });
+// Persisted temporary test credentials use their frozen signing snapshot during recovery.
 await service.recover();
+await exhibition.browserTests.sweep();
 server.listen(port, '127.0.0.1', () => {
   console.log(`Mirror internal API listening on port ${port} (XMAX ${provider.configured ? 'configured' : 'not configured'})`);
 });
@@ -78,6 +80,7 @@ async function shutdown() {
   clearInterval(interval);
   clearInterval(preparationInterval);
   server.close();
+  await exhibition.browserTests.destroy();
   await Promise.allSettled(store.unclosed().filter(row => row.tokenCipher).map(row => service.stop(row.id)));
   store.close();
   process.exit(0);

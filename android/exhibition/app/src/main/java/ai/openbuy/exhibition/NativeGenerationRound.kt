@@ -4,7 +4,8 @@ import android.os.SystemClock
 import ai.xmax.sdk.CameraPosition
 import java.io.IOException
 import java.net.URI
-import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
@@ -34,6 +35,7 @@ class NativeGenerationRound(
     private val onError: (String) -> Unit,
     private val onFirstFrame: () -> Unit,
     private val cameraPosition: CameraPosition = CameraPosition.BACK,
+    private val cameraDeviceId: String? = null,
 ) {
     private var snapshot = JSONObject(state.toString())
     private var selection = JSONObject(look.toString())
@@ -95,11 +97,12 @@ class NativeGenerationRound(
             coroutineScope {
                 NativeRoundMetadata.validateSnapshot(snapshot, selection, mirrorId, deviceId)
                 val noReference = selection.optString("referenceKind", "image") == "none"
+                val referenceImage = NativeRoundMetadata.referenceImage(selection)
                 val prompt = NativeRoundMetadata.prompt(selection)
                 status("准备素材")
                 // A bad or missing local asset must fail before requesting a paid credential.
                 val prepared = if (noReference || mode == "mox") null else preparedReference(selection)
-                var image = if (noReference || prepared != null) null else api.image(selection.getString("image"))
+                var image = if (noReference || prepared != null) null else api.image(referenceImage!!)
                 val mime = image?.let(NativeRoundMetadata::imageMime)
 
                 status("连接中")
@@ -182,7 +185,7 @@ class NativeGenerationRound(
                 val reference = if (!noReference) {
                     val uploaded = if (prepared != null && scope.isNotEmpty() && prepared.optString("scope") == scope
                         && prepared.optLong("freshUntil") > System.currentTimeMillis()) prepared.getString("url") else {
-                        if (image == null) image = api.image(selection.getString("image"))
+                        if (image == null) image = api.image(referenceImage!!)
                         controller.uploadReference(token, region, image, mime ?: NativeRoundMetadata.imageMime(image))
                     }
                     NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(uploaded), "参考图上传结果无效。")
@@ -197,6 +200,7 @@ class NativeGenerationRound(
                     model = "x2.0",
                     position = cameraPosition,
                     image = if (mode == "mox") image else null,
+                    cameraDeviceId = if (mode == "mox") null else cameraDeviceId,
                 )
                 NativeRoundMetadata.requireValid(NativeRoundMetadata.providerSessionId.matches(providerId), "实时会话编号无效。")
                 val linked = api.link(mirrorId, id, providerId)
@@ -222,7 +226,7 @@ class NativeGenerationRound(
                 var version = if (noReference) 0L else 1L
                 var boundGeneration = generationNumber
                 val references = mutableMapOf<String, String>()
-                if (reference != null) references[selection.getString("image")] = reference
+                if (reference != null) references[referenceImage!!] = reference
                 for ((next, nextLook) in updates) {
                     if (renewing) continue
                     conditionBusy = true
@@ -232,21 +236,22 @@ class NativeGenerationRound(
                     try {
                         NativeRoundMetadata.validateSnapshot(snapshot, selection, mirrorId, deviceId)
                         val none = selection.optString("referenceKind", "image") == "none"
+                        val nextReferenceImage = NativeRoundMetadata.referenceImage(selection)
                         val nextPrompt = NativeRoundMetadata.prompt(selection)
                         status("准备素材")
                         val url = supervisorScope {
                             // Only independent image preparation is cancelled by a newer choice.
                             // Backend binding and SDK condition updates remain serialized.
                             val preparing = async {
-                                if (none) null else references[selection.getString("image")] ?: run {
+                                if (none) null else references[nextReferenceImage!!] ?: run {
                                     val ready = preparedReference(selection)
                                     val uploaded = if (ready != null && scope.isNotEmpty() && ready.optString("scope") == scope) ready.getString("url") else {
-                                        val bytes = api.image(selection.getString("image"))
+                                        val bytes = api.image(nextReferenceImage)
                                         controller.uploadReference(token, region, bytes, NativeRoundMetadata.imageMime(bytes))
                                     }
                                     NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(uploaded), "参考图上传结果无效。")
                                     if (references.size >= 32) references.remove(references.keys.first())
-                                    references[selection.getString("image")] = uploaded
+                                    references[nextReferenceImage] = uploaded
                                     uploaded
                                 }
                             }
@@ -356,17 +361,14 @@ class NativeGenerationRound(
             && meta.optString("prompt") == prompt, "后台会话与本轮素材不一致。")
         val asset = record.optString("referenceAsset")
         NativeRoundMetadata.requireValid(if (noReference) asset.isEmpty() else
-            asset.isNotBlank() && api.assetUrl(asset) == api.assetUrl(selection.getString("image")), "后台参考素材不一致。")
+            asset.isNotBlank() && api.assetUrl(asset) == api.assetUrl(NativeRoundMetadata.referenceImage(selection).orEmpty()), "后台参考素材不一致。")
         NativeRoundMetadata.requireValid(NativeRoundMetadata.integer(record, "referenceVersion") == referenceVersion
             && record.optString("refImageUrl") == referenceUrl
             && record.optString("providerSessionId") == providerId.orEmpty(), "后台会话关联未确认。")
         val region = record.optString("providerRegion")
         NativeRoundMetadata.requireValid(region in setOf("cn", "global")
             && (providerRegion == null || providerRegion == region), "服务区域无效。")
-        val expiresAt = try { Instant.parse(record.getString("expiresAt")).toEpochMilli() }
-            catch (_: Exception) { throw NativeRoundException("体验有效期无效。") }
-        NativeRoundMetadata.requireValid(expiresAt > System.currentTimeMillis(), "本次体验已过期，请重试。")
-        return expiresAt
+        return NativeRoundMetadata.expiryMillis(record)
     }
 
     private suspend fun stopOwnedReservation() {
@@ -417,6 +419,17 @@ internal object NativeRoundMetadata {
         if (!condition) throw NativeRoundException(message)
     }
 
+    fun expiryMillis(record: JSONObject, nowMillis: Long = System.currentTimeMillis()): Long {
+        // Android 9/10's Instant.parse only accepts Z, while XMAX returns +00:00.
+        // Parse an explicit offset without guessing the device timezone or extending expiry.
+        val expiresAt = try {
+            OffsetDateTime.parse(record.getString("expiresAt"), DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                .toInstant().toEpochMilli()
+        } catch (_: Exception) { throw NativeRoundException("体验有效期无效。") }
+        requireValid(expiresAt > nowMillis, "本次体验已过期，请重试。")
+        return expiresAt
+    }
+
     fun integer(value: JSONObject, field: String): Long? {
         val number = value.opt(field) as? Number ?: return null
         val decimal = number.toDouble()
@@ -424,6 +437,9 @@ internal object NativeRoundMetadata {
             || decimal != number.toLong().toDouble()) return null
         return number.toLong()
     }
+
+    fun referenceImage(look: JSONObject): String? = if (look.optString("referenceKind", "image") == "none") null
+        else look.optString("referenceImage", look.optString("image"))
 
     fun validateSnapshot(state: JSONObject, look: JSONObject, mirrorId: String, deviceId: String) {
         val mode = look.optString("mode", "clothx")
@@ -437,7 +453,7 @@ internal object NativeRoundMetadata {
             && integer(state, "revision") != null, "本轮体验已更新，请重新开始。")
         val kind = look.optString("referenceKind", "image")
         requireValid(kind == "image" || (kind == "none" && mode == "free"), "此模式需要参考图。")
-        requireValid(kind == "none" || look.optString("image").isNotBlank(), "请先在后台上传参考图。")
+        requireValid(kind == "none" || !referenceImage(look).isNullOrBlank(), "请先在后台上传参考图。")
         prompt(look)
     }
 

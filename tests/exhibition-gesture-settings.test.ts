@@ -218,7 +218,7 @@ describe('gesture settings HTTP boundary', () => {
   it('round-trips per mirror, rejects invalid/stale saves, and never contacts XMAX', async () => {
     const mirrors = new ExhibitionMirrors(directory());
     const providerAccess = vi.fn(() => { throw new Error('Gesture settings must not contact XMAX.'); });
-    const unrelated = new Proxy({} as TryOnService, { get: providerAccess });
+    const unrelated = new Proxy({} as TryOnService, { get: (_target, property) => property === 'reconcileMirrorSessions' ? async () => {} : providerAccess() });
     const server = createApiServer(unrelated, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     try {

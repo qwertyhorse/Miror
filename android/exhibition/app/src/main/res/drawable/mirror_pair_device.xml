@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="44dp" android:height="44dp" android:viewportWidth="44" android:viewportHeight="44">
+    <!-- Lucide Monitor and Link2, ISC; see assets/lucide-license.txt. -->
+    <group android:translateX="2" android:translateY="2" android:scaleX="1.333333" android:scaleY="1.333333">
+        <path android:fillColor="@android:color/transparent" android:strokeColor="#8261cf" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="M4,3 L20,3 Q22,3 22,5 L22,15 Q22,17 20,17 L4,17 Q2,17 2,15 L2,5 Q2,3 4,3 M12,17 L12,21 M8,21 L16,21" />
+    </group>
+    <path android:fillColor="#f1ebfd" android:pathData="M22,22 L44,22 L44,44 L22,44 Z" />
+    <group android:translateX="23" android:translateY="23" android:scaleX="0.75" android:scaleY="0.75">
+        <path android:fillColor="@android:color/transparent" android:strokeColor="#8261cf" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="M9,17 L7,17 A5,5 0,0 1,7 7 L9,7 M15,7 L17,7 A5,5 0,0 1,17 17 L15,17 M8,12 L16,12" />
+    </group>
+</vector>

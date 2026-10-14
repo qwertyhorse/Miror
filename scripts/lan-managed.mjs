@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { homedir } from 'node:os';
@@ -105,12 +105,38 @@ function announceReady() {
   console.log(`工作人员后台：http://${HOSTNAME}:${EXHIBITION_PORT}/\n固定入口：http://${HOSTNAME}:${HTTP_PORT}/\n镜端入口：${CAMERA_URL}\n登录自启、退出恢复和防闲置睡眠已启用。\n运行数据：${runtime.data}\n后台环境配置：${runtime.environment}\n日志：${runtime.logs}`);
 }
 
+/** Starting restores the published application. Only explicit publication refreshes its code. */
+export async function ensureManagedRuntime(sourceRoot = root, options = {}) {
+  const installed = previewRuntime(sourceRoot, options);
+  let application;
+  try { application = await lstat(installed.app); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!application) {
+    await Promise.all(['.env', 'dist/index.html', 'scripts/static-web.mjs', 'node_modules/tsx/dist/loader.mjs', 'server/index.ts']
+      .map(path => stat(resolve(sourceRoot, path))));
+    return prepareLaunchRuntime(sourceRoot, options);
+  }
+  try {
+    if (!application.isDirectory()) throw new Error('application is not a directory');
+    const files = ['dist/index.html', 'server/index.ts', 'scripts/static-web.mjs', 'scripts/lan-preview.mjs',
+      'scripts/camera-https.mjs', 'scripts/setup.mjs', 'node_modules/tsx/dist/loader.mjs', 'package.json'];
+    const [node, environment, data, ...entries] = await Promise.all([
+      stat(installed.node), stat(installed.environment), stat(installed.data), ...files.map(path => stat(resolve(installed.app, path))),
+    ]);
+    if (!node.isFile() || !(node.mode & 0o111) || !environment.isFile() || !data.isDirectory() || entries.some(entry => !entry.isFile())) throw new Error('runtime is incomplete');
+    if (await realpath(resolve(installed.app, '.env')) !== await realpath(installed.environment)
+      || await realpath(resolve(installed.app, '.data')) !== await realpath(installed.data)) throw new Error('runtime storage does not match');
+  } catch {
+    throw new Error('已发布的运行副本不完整，请修复或重新发布；未从源码覆盖程序、数据或配置。');
+  }
+  return installed;
+}
+
 async function start() {
   const state = preflight();
   if (units.every(unit => state.get(unit.name))) { await ready(); announceReady(); return; }
   if (!units.some(unit => state.get(unit.name))) {
-    await Promise.all(['.env', 'dist/index.html', 'scripts/static-web.mjs', 'node_modules/tsx/dist/loader.mjs', 'server/index.ts'].map(path => readFile(resolve(root, path))));
-    await prepareLaunchRuntime(root);
+    await ensureManagedRuntime();
     // Renew the leaf in the persistent runtime, keeping its trusted CA when
     // network addresses change. No credentials or data are copied back.
     const { prepareCertificates } = await import(pathToFileURL(resolve(runtime.app, 'scripts/setup.mjs')).href);

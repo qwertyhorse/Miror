@@ -1,6 +1,7 @@
 package ai.xmax.sdk.media.camera
 
 import ai.xmax.sdk.CameraPosition
+import ai.xmax.sdk.RealtimeCameraDevice
 import ai.xmax.sdk.MediaServicing
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.RealtimeMediaStream
@@ -52,10 +53,16 @@ internal class CameraController(
         rtcManager.setCameraPreviewReadyListener(listener)
     }
 
+    suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice> {
+        permissionManager.ensureCameraPermission()
+        return rtcManager.enumerateCameraDevices()
+    }
+
     suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean = false,
+        cameraDeviceId: String? = null,
     ): RealtimeMediaStream {
         if (currentTrack != null) {
             throw XmaxError(
@@ -64,16 +71,27 @@ internal class CameraController(
             )
         }
 
+        permissionManager.ensureCameraPermission()
+        val selectedDevice = cameraDeviceId?.let { id ->
+            rtcManager.enumerateCameraDevices().firstOrNull { it.id == id && id.isNotBlank() }
+                ?: throw XmaxError(
+                    code = XmaxErrorCode.INVALID_CONFIGURATION,
+                    message = "Selected camera is unavailable; enumerate camera devices again",
+                )
+        }
         val resolvedFormat = resolveVideoFormat(videoFormat)
         val track = RealtimeVideoTrack(
             id = LOCAL_VIDEO_TRACK_ID,
             videoFormat = resolvedFormat,
-            position = position,
+            position = if (selectedDevice != null) selectedDevice.position else position,
         )
         try {
-            permissionManager.ensureCameraPermission()
             if (useMicrophone) permissionManager.ensureMicrophonePermission()
-            rtcManager.switchCamera(position)
+            if (selectedDevice != null) {
+                rtcManager.selectCameraDevice(selectedDevice.id, selectedDevice.position)
+            } else {
+                rtcManager.switchCamera(position)
+            }
             rtcManager.startVideoCapture(
                 width = resolvedFormat.width,
                 height = resolvedFormat.height,

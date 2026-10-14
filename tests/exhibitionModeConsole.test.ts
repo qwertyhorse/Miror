@@ -73,16 +73,20 @@ describe('six-mode console presentation', () => {
     expect(html).not.toContain('素材-cloth'); expect(html).not.toContain('素材-character');
   });
 
-  it('requires a bounded prompt for each Free material and uses presets for other modes', () => {
+  it('requires a bounded prompt for Free and keeps other modes free of prompt editing', () => {
     const renderEditor = (mode: ExhibitionExperienceMode) => renderToStaticMarkup(createElement(LookEditor, {
       controller: controller(state()), look: material('editing', mode), initialMode: mode, close: vi.fn(), saved: vi.fn(), deleted: vi.fn(),
     }));
     const free = renderEditor('free');
+    expect(free).not.toContain('素材名称'); expect(free).not.toContain('type="text"');
     expect(free).toMatch(new RegExp(`<textarea[^>]*required=""[^>]*maxLength="${EXHIBITION_FREE_PROMPT_MAX_LENGTH}"`));
     expect(free).toContain('保留人物动作，更换背景'); expect(free).toContain('Free 提示词');
     expect(free).not.toContain('隐藏旧分类'); expect(free).not.toContain('隐藏旧标签');
     const preset = renderEditor('charx');
-    expect(preset).toContain('CharX 使用系统预设提示词。'); expect(preset).not.toContain('Free 提示词');
+    expect(preset).not.toContain('素材名称'); expect(preset).not.toContain('type="text"');
+    expect(preset).toMatch(/checked="" value="charx"|value="charx" checked=""/);
+    expect(preset).not.toContain('<textarea'); expect(preset).not.toContain('Free 提示词');
+    expect(preset).toContain('aria-label="展示图文件"'); expect(preset).toContain('aria-label="XMAX 参考图文件"');
     const blank = renderToStaticMarkup(createElement(LookEditor, {
       controller: controller(state()), look: { ...material('editing', 'free'), prompt: '   ' }, initialMode: 'free', close: vi.fn(), saved: vi.fn(), deleted: vi.fn(),
     }));
@@ -99,7 +103,7 @@ describe('six-mode console presentation', () => {
     expect(html).toContain('保留素材'); expect(html).not.toContain('至少保留');
   });
 
-  it.each(['free', 'vibex'] as const)('preserves the prompt-only kind or explicitly converts it when saving as %s', async mode => {
+  it.each(['free', 'vibex'] as const)('saves without a reference only when the target %s supports prompt-only materials', async mode => {
     const look = { ...material('prompt-only', 'free'), referenceKind: 'none' as const };
     const host = await createReactHost();
     const Node = window.HTMLElement;
@@ -109,12 +113,19 @@ describe('six-mode console presentation', () => {
     const saved = vi.fn();
     try {
       await host.render(createElement(LookEditor, { controller: control, look, initialMode: 'free', close: vi.fn(), saved, deleted: vi.fn() }));
-      expect(host.find(node => node.textContent.includes('封面用于列表展示，生成时只使用提示词。'))).toBeDefined();
+      expect(host.find(node => node.nodeName === 'span' && node.textContent === '仅提示词')).toBeDefined();
+      expect(host.find(node => node.getReactProps()['aria-label'] === 'XMAX 参考图文件')!.getReactProps().required).toBe(false);
       if (mode !== 'free') await act(async () => { host.find(node => node.getReactProps().type === 'radio' && node.getReactProps().value === mode)!.getReactProps().onChange(); });
       await act(async () => { host.find(node => node.nodeName === 'form')!.getReactProps().onSubmit({ preventDefault: vi.fn() }); });
       await flushReact();
+      if (mode !== 'free') {
+        expect(host.find(node => node.nodeName === 'button' && node.textContent === '保存素材')!.getReactProps().disabled).toBe(true);
+        expect(host.find(node => node.getReactProps()['aria-label'] === 'XMAX 参考图文件')!.getReactProps().required).toBe(true);
+        expect(control.updateLook).not.toHaveBeenCalled(); expect(saved).not.toHaveBeenCalled();
+        return;
+      }
       expect(control.updateLook).toHaveBeenCalledExactlyOnceWith(look.id, {
-        name: look.name, description: look.description, mode, prompt: mode === 'free' ? look.prompt : '', referenceKind: mode === 'free' ? 'none' : 'image', expectedRevision: 4,
+        name: look.name, description: look.description, mode, prompt: look.prompt, referenceKind: 'none', expectedRevision: 4,
       });
       expect(saved).toHaveBeenCalledExactlyOnceWith(mode);
     } finally { await host.close(); vi.unstubAllGlobals(); }

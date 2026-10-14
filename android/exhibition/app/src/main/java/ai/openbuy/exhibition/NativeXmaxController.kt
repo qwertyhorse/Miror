@@ -39,18 +39,31 @@ class NativeXmaxController(
     private var manager: XmaxRealtimeManaging? = null
     private var localStream: RealtimeMediaStream? = null
     private var previewPosition: CameraPosition? = null
+    private var previewDeviceId: String? = null
+    private var previewRequestedId: String? = null
+    private var activeView = view
     private var previewOnly = false
     private var firstFrameDelivered = false
+    internal var hasReleaseFailure = false
+        private set
 
     var onFirstFrame: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    internal var onCameraSnapshot: ((NativeCameraSnapshot) -> Unit)? = null
 
     /** Local-only capture: no temporary key request or XMAX session is created. */
-    suspend fun preview(position: CameraPosition = CameraPosition.BACK) =
+    suspend fun preview(
+        position: CameraPosition = CameraPosition.BACK,
+        cameraDeviceId: String? = null,
+        target: XmaxRealtimeVideoView = view,
+    ): String =
         withContext(Dispatchers.Main.immediate) {
             mutex.withLock {
-                if (previewOnly && previewPosition == position && localStream != null) return@withLock
+                check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
+                if (previewOnly && previewPosition == position && previewRequestedId == cameraDeviceId &&
+                    activeView === target && localStream != null) return@withLock checkNotNull(previewDeviceId)
                 release()
+                activeView = target
                 val ownerEpoch = epoch.get()
                 // Client construction and createLocalCameraStream do not invoke an HTTP API.
                 val next = client("local-preview-only", "cn")
@@ -58,14 +71,16 @@ class NativeXmaxController(
                 manager = next
                 previewOnly = true
                 previewPosition = position
+                previewRequestedId = cameraDeviceId
                 try {
                     val ready = observeErrors(next, ownerEpoch)
-                    localStream = camera(next, position)
-                    view.videoContentMode = VideoContentMode.FIT
-                    view.isInteractionEnabled = false
-                    view.remoteTrack = null
-                    view.localTrack = localStream?.videoTrack
+                    localStream = camera(next, position, cameraDeviceId)
+                    activeView.videoContentMode = VideoContentMode.FILL
+                    activeView.isInteractionEnabled = false
+                    activeView.remoteTrack = null
+                    activeView.localTrack = localStream?.videoTrack
                     awaitCameraPreview(ready)
+                    checkNotNull(previewDeviceId)
                 } catch (error: Throwable) {
                     withContext(NonCancellable) { release() }
                     throw error
@@ -100,9 +115,11 @@ class NativeXmaxController(
         model: String,
         position: CameraPosition = CameraPosition.BACK,
         image: ByteArray? = null,
+        cameraDeviceId: String? = null,
     ): String = withContext(Dispatchers.Main.immediate) {
         require(model == "x2.0") { "当前仅支持 X2.0" }
         mutex.withLock {
+            check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
             release()
             val ownerEpoch = epoch.get()
             val next = client(token, region)
@@ -114,17 +131,17 @@ class NativeXmaxController(
                     require(image.isNotEmpty() && image.size <= 64 * 1024 * 1024) { "输入图片不可用" }
                     next.createLocalImageStream(image)
                 } else {
-                    camera(next, position)
+                    camera(next, position, cameraDeviceId)
                 }
                 localStream = source
-                view.videoContentMode = VideoContentMode.FIT
-                view.isInteractionEnabled = image != null
-                view.localTrack = source.videoTrack
+                activeView.videoContentMode = VideoContentMode.FILL
+                activeView.isInteractionEnabled = image != null
+                activeView.localTrack = source.videoTrack
                 if (image == null) awaitCameraPreview(ready)
                 val remote = next.connect(source)
                 val sessionId = next.currentState.sessionId?.takeIf { it.isNotBlank() }
                     ?: throw IllegalStateException("实时会话未就绪")
-                view.remoteTrack = remote.videoTrack
+                activeView.remoteTrack = remote.videoTrack
                 sessionId
             } catch (error: Throwable) {
                 withContext(NonCancellable) { release() }
@@ -167,14 +184,49 @@ class NativeXmaxController(
         return XmaxClient(applicationContext, XmaxConfiguration(token, environment))
     }
 
+    /** Uses the same RTC device IDs that are accepted by capture; Camera2 only adds diagnostics. */
+    internal suspend fun detectCameras(): NativeCameraSnapshot = withContext(Dispatchers.Main.immediate) {
+        mutex.withLock {
+            check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
+            val owner = manager ?: client("local-preview-only", "cn")
+                .createRealtimeManager(RealtimeConfiguration(RealtimeModel.X2_0)).also { manager = it }
+            cameraSnapshot(owner)
+        }
+    }
+
+    private suspend fun cameraSnapshot(owner: XmaxRealtimeManaging): NativeCameraSnapshot {
+        val system = NativeCameraCatalog(applicationContext).snapshot()
+        val devices = owner.enumerateCameraDevices().map {
+            NativeCameraDevice(it.id, when (it.position) {
+                CameraPosition.FRONT -> NativeCameraFacing.FRONT
+                CameraPosition.BACK -> NativeCameraFacing.BACK
+                null -> NativeCameraFacing.UNKNOWN
+            }, it.name)
+        }
+        return system.mergeRtcDevices(devices).also { onCameraSnapshot?.invoke(it) }
+    }
+
     private suspend fun camera(
         owner: XmaxRealtimeManaging,
         position: CameraPosition,
-    ): RealtimeMediaStream = owner.createLocalCameraStream(
-        videoFormat = RealtimeVideoFormat(width = 704, height = 1280, fps = 24),
-        position = position,
-        useMicrophone = false,
-    )
+        cameraDeviceId: String?,
+    ): RealtimeMediaStream {
+        val detected = cameraSnapshot(owner)
+        val selection = NativeCameraSelection(cameraDeviceId)
+        val selected = selection.resolve(detected.devices)
+            ?: throw IllegalStateException(selection.unavailableMessage(detected))
+        previewDeviceId = selected.id
+        return owner.createLocalCameraStream(
+            videoFormat = RealtimeVideoFormat(width = 704, height = 1280, fps = 24),
+            position = when (selected.facing) {
+                NativeCameraFacing.FRONT -> CameraPosition.FRONT
+                NativeCameraFacing.BACK, NativeCameraFacing.EXTERNAL -> CameraPosition.BACK
+                NativeCameraFacing.UNKNOWN -> position
+            },
+            useMicrophone = false,
+            cameraDeviceId = selected.id,
+        )
+    }
 
     private suspend fun observeErrors(
         owner: XmaxRealtimeManaging,
@@ -198,19 +250,28 @@ class NativeXmaxController(
         check(withTimeoutOrNull(10_000) { ready.await(); true } == true) { "摄像头未就绪，请重试" }
     }
 
-    private suspend fun release() {
+    private suspend fun release() = withContext(NonCancellable) {
         epoch.incrementAndGet()
         val previous = manager
         manager = null
         localStream = null
         previewPosition = null
+        previewDeviceId = null
+        previewRequestedId = null
         previewOnly = false
         firstFrameDelivered = false
-        view.isInteractionEnabled = false
-        view.remoteTrack = null
-        view.localTrack = null
-        previous?.setStateListener(null)
-        previous?.setRemoteVideoFrameListener(null)
-        previous?.close()
+        activeView.isInteractionEnabled = false
+        activeView.remoteTrack = null
+        activeView.localTrack = null
+        activeView = view
+        try {
+            previous?.setStateListener(null)
+            previous?.setRemoteVideoFrameListener(null)
+            previous?.close()
+        } catch (error: Throwable) {
+            hasReleaseFailure = true
+            throw error
+        }
+        check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
     }
 }

@@ -6,6 +6,7 @@ import { MirrorCredentialStore } from '../server/mirrorCredentials.ts';
 import { XmaxProvider } from '../server/provider.ts';
 import { TryOnService } from '../server/service.ts';
 import { ExhibitionService } from '../server/exhibition.ts';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits.ts';
 import { apiKeyBudgetScope, SecretBox, SessionStore } from '../server/store.ts';
 import { ApiError, type SessionRecord } from '../server/types.ts';
 import type { XmaxRegion } from '../shared/xmax.ts';
@@ -216,7 +217,7 @@ describe('per-mirror credential routing and persistent session history', () => {
     expect(exhibition.get()).toEqual(paused); expect(f.store.get(record.id)).toEqual(record);
     expect(() => exhibition.command({ action: 'resume' })).toThrowError(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
     await expect(createLive()).rejects.toMatchObject({ code: 'EXHIBITION_RECOVERY_REQUIRED' });
-    expect(f.store.allocated(apiKeyBudgetScope(keyA))).toBe(30); expect(f.store.allocated(apiKeyBudgetScope(keyB))).toBe(0);
+    expect(f.store.allocated(apiKeyBudgetScope(keyA))).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.store.allocated(apiKeyBudgetScope(keyB))).toBe(0);
     expect(f.store.currentBudgetScope()).toBe(apiKeyBudgetScope(keyDefault)); expect(issue).toHaveBeenCalledOnce(); expect(f.requests).toHaveLength(0);
     await f.service.recover();
     expect(f.store.get(record.id)).toEqual(record);

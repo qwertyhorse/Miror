@@ -1,13 +1,13 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Check, Timer } from 'lucide-react';
-import { CONTINUOUS_MIN_EXPIRY_SECONDS, DEFAULT_SESSION_LIMITS, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, isSessionLimits, resolveSessionLimits,
+import { CONTINUOUS_MIN_EXPIRY_SECONDS, DEFAULT_CREDENTIAL_LIMITS, DEFAULT_SESSION_LIMITS, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, isSessionLimits, resolveSessionLimits,
   type ExhibitionSessionLimits } from '../../shared/sessionLimits';
 import type { ExhibitionController } from './useExhibition';
 import './session-limit-settings.css';
 
 interface Draft { unlimited: boolean; credits: string; expireSeconds: string; original: string; }
 function makeDraft(limits: ExhibitionSessionLimits, original: string): Draft {
-  return { unlimited: limits.credits === null, credits: String(limits.credits ?? DEFAULT_SESSION_LIMITS.credits),
+  return { unlimited: limits.credits === null, credits: String(limits.credits ?? DEFAULT_CREDENTIAL_LIMITS.credits),
     expireSeconds: String(limits.expireSeconds), original };
 }
 const numberValue = (value: string) => value.trim() === '' ? NaN : Number(value);
@@ -61,8 +61,8 @@ export function SessionLimitSettings({ controller }: { controller: ExhibitionCon
     <div className="ex-session-limit-heading"><Timer size={16} aria-hidden="true" /><h4>会话额度</h4></div>
     <fieldset className="ex-session-limit-choices" disabled={disabled} aria-describedby={displayed.unlimited ? `${id}-unlimited-note` : undefined}>
       <legend>单次积分上限</legend>
-      <label><input type="radio" name={`${id}-credit-mode`} value="limited" checked={!displayed.unlimited} onChange={() => edit(value => ({ ...value, unlimited: false }))} /><span>指定额度</span></label>
       <label><input type="radio" name={`${id}-credit-mode`} value="unlimited" checked={displayed.unlimited} onChange={() => edit(value => ({ ...value, unlimited: true }))} /><span>无限制（自动续接）</span></label>
+      <label><input type="radio" name={`${id}-credit-mode`} value="limited" checked={!displayed.unlimited} onChange={() => edit(value => ({ ...value, unlimited: false }))} /><span>指定额度</span></label>
     </fieldset>
     <div className="ex-session-limit-grid">
       {!displayed.unlimited && <label htmlFor={`${id}-credits`}><span>积分额度</span><input id={`${id}-credits`} name="credits" type="number" inputMode="numeric" min={1} max={SESSION_CREDIT_MAX} step={1} required value={displayed.credits} disabled={disabled} onChange={event => { const credits = event.target.value; edit(value => ({ ...value, credits })); }} /></label>}

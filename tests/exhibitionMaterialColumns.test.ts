@@ -111,7 +111,7 @@ describe('per-mirror material drawer columns', () => {
   it('round-trips through the per-mirror HTTP API with validation and revision protection', async () => {
     const mirrors = new ExhibitionMirrors(directory());
     const providerAccess = vi.fn(() => { throw new Error('Column settings must not contact XMAX.'); });
-    const service = new Proxy({} as TryOnService, { get: providerAccess });
+    const service = new Proxy({} as TryOnService, { get: (_target, property) => property === 'reconcileMirrorSessions' ? async () => {} : providerAccess() });
     const origin = 'http://xuminghong.local:10200';
     const server = createApiServer(service, [origin], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening');

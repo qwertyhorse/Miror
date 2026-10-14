@@ -51,14 +51,30 @@ fun main() = runBlocking {
             verify(exchange.requestURI.path == "/v1.1/api/exhibition/terminals/connect", "Terminal endpoint")
             verify(exchange.requestMethod == "POST", "Terminal method")
             verify(exchange.requestHeaders.getFirst("Origin") == origin, "Same-origin header")
+            verify(exchange.requestHeaders.getFirst("X-Miror-Protocol") == "2", "Native lifecycle protocol")
             verify(exchange.requestHeaders.getFirst("Cache-Control") == "no-store", "No cache")
             verify(exchange.requestHeaders.getFirst("Content-Type").startsWith("application/json"), "JSON body")
             val body = exchange.jsonBody()
             verify(body.getString("terminalId") == terminal && body.getString("token") == token, "Persistent identity")
             verify(body.getString("platform") == "android", "Native platform")
+            verify(body.getJSONObject("cameraCapabilities").getInt("version") == 1, "Camera management capability")
+            verify(!body.has("cameraReport"), "Initial poll does not invent a camera binding or report")
             exchange.reply(JSONObject().put("terminalId", terminal).put("mirrorId", "default"))
         }
         verify(api.connectTerminal().getString("mirrorId") == "default", "Binding response")
+        val cameraReport = JSONObject().put("mirrorId", "default").put("bindingId", "binding-fixture")
+            .put("requestId", "camera-fixture").put("status", "preview").put("devices", org.json.JSONArray())
+            .put("selectedDeviceId", "usb-42").put("activeDeviceId", "usb-42")
+        handler.set { exchange ->
+            val body = exchange.jsonBody()
+            verify(body.getString("terminalId") == terminal && body.getString("token") == token, "Camera report uses authenticated terminal poll")
+            verify(body.getJSONObject("cameraReport").toString() == cameraReport.toString(), "Camera metadata contract remains intact")
+            exchange.reply(JSONObject().put("cameraBindingId", "binding-fixture").put("cameraReportAccepted", true)
+                .put("cameraRequest", JSONObject().put("id", "camera-fixture").put("action", "open")))
+        }
+        val cameraBinding = api.connectTerminal(cameraReport)
+        verify(cameraBinding.getBoolean("cameraReportAccepted") && cameraBinding.getJSONObject("cameraRequest").getString("action") == "open",
+            "Poll returns diagnostic request and acknowledgement")
         handler.set { exchange ->
             verify(exchange.requestURI.path == mirrorPath && exchange.requestMethod == "GET", "State endpoint")
             exchange.reply(JSONObject().put("revision", 7))
@@ -69,9 +85,13 @@ fun main() = runBlocking {
             exchange.reply(JSONObject().put("configured", true))
         }
         verify(api.liveStatus("default").getBoolean("configured"), "Live status response")
+        val commandIds = mutableSetOf<String>()
         handler.set { exchange ->
             verify(exchange.requestURI.path == "$mirrorPath/command", "Command endpoint")
             val body = exchange.jsonBody()
+            verify(commandIds.add(body.getString("commandId")) &&
+                java.util.UUID.fromString(body.getString("commandId")).toString() == body.getString("commandId"),
+                "Each command has a distinct UUID")
             if (body.getString("action") == "end") verify(!body.has("expectedRevision"), "Stop bypasses stale revision")
             else verify(body.getLong("expectedRevision") == 7L && body.getString("lookId") == "commute", "Select revision and look")
             exchange.reply(JSONObject())
@@ -109,6 +129,27 @@ fun main() = runBlocking {
         api.firstFrame("default", session, 123)
         api.heartbeat("default", session, "device-fixture")
         handler.set { exchange ->
+            verify(exchange.requestMethod == "POST", "Renewal uses POST")
+            verify(exchange.requestHeaders.getFirst("X-Miror-Protocol") == "2", "Renewal lifecycle protocol")
+            val body = exchange.jsonBody()
+            verify(body.getString("deviceId") == "device-fixture", "Renewal owner")
+            when (exchange.requestURI.path) {
+                "$mirrorPath/live/session/$session/renewal" -> {
+                    verify(body.getLong("sessionNumber") == 2L && body.getLong("generationNumber") == 9L, "Renewal generation")
+                    exchange.reply(JSONObject().put("renewalId", "renewal-fixture"))
+                }
+                "$mirrorPath/live/session/$session/renewal/commit" -> {
+                    verify(body.getString("renewalId") == "renewal-fixture", "Renewal confirmation identity")
+                    exchange.reply(JSONObject().put("generationNumber", 10))
+                }
+                else -> error("Unexpected renewal endpoint")
+            }
+        }
+        verify(api.prepareRenewal("default", session, "device-fixture", 2, 9).getString("renewalId") == "renewal-fixture",
+            "Renewal plan response")
+        verify(api.commitRenewal("default", session, "device-fixture", "renewal-fixture").getLong("generationNumber") == 10L,
+            "Renewal confirmation response")
+        handler.set { exchange ->
             verify(exchange.requestURI.path == "$mirrorPath/sessions/$session/stop", "Stop endpoint")
             exchange.reply(JSONObject().put("status", "stopping"))
         }
@@ -119,11 +160,13 @@ fun main() = runBlocking {
             verify(exchange.requestURI.path == "$mirrorPath/live/error", "Error endpoint")
             val body = exchange.jsonBody()
             verify(body.getLong("sessionNumber") == 2L && body.getLong("generationNumber") == 9L, "Error generation")
+            verify(body.getString("reason") == "lease_expired", "Recovery reason reaches backend")
             verify(!body.getString("message").contains(token) && !body.getString("message").contains("tk-fixture")
                 && !body.getString("message").contains("https://"), "Error report redacts credentials and URLs")
             exchange.reply(JSONObject())
         }
-        api.reportError("default", "device-fixture", session, "commute", 2, 9, "Error $token tk-fixture https://fixture.invalid/?key=secret")
+        api.reportError("default", "device-fixture", session, "commute", 2, 9,
+            "Error $token tk-fixture https://fixture.invalid/?key=secret", "lease_expired")
         handler.set { exchange ->
             exchange.reply(JSONObject().put("error", JSONObject().put("code", "EXHIBITION_STALE_REVISION")
                 .put("message", "状态已更新 tk-fixture $token")), 409)
@@ -137,6 +180,13 @@ fun main() = runBlocking {
             exchange.sendResponseHeaders(302, -1)
         }
         failure("BACKEND_REDIRECT") { api.connectTerminal() }
+        val requestsBeforeDisconnect = received.get()
+        handler.set { exchange ->
+            // A lost reply must not cause OkHttp to repeat a paid allocation POST.
+            exchange.requestBody.use { it.readBytes() }
+        }
+        failure("NETWORK_ERROR") { api.createSession("default", "device-fixture", "commute", 9, 7) }
+        verify(received.get() == requestsBeforeDisconnect + 1, "Lost allocation reply must not be retried")
         handler.set { exchange -> exchange.bytes(byteArrayOf(1, 2, 3), "image/webp") }
         verify(api.image("/assets/fixture.webp").contentEquals(byteArrayOf(1, 2, 3)), "Image bytes")
         handler.set { exchange -> exchange.bytes(byteArrayOf(1), "text/html") }

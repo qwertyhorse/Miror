@@ -49,16 +49,41 @@ function create(exhibition: ExhibitionService, extra: Record<string, unknown> = 
   return exhibition.createLiveSession({ deviceId, lookId: state.selectedLookId, generationNumber: state.generationNumber, ...extra });
 }
 
-describe('per-mirror finite session limits', () => {
-  it('keeps missing persisted settings on the service default, including values above the old caps', () => {
+describe('per-mirror session limits', () => {
+  it('defaults missing persisted settings to continuous while preserving the configured credential duration', () => {
     const { exhibition, service, directory, now } = fixture({ perSessionLimit: 70, expireSeconds: 450 });
-    expect(exhibition.get().settings.sessionLimits).toEqual({ credits: 70, expireSeconds: 450 });
-    expect(exhibition.liveStatus()).toMatchObject({ perSessionLimit: 70, expireSeconds: 450 });
+    expect(exhibition.get().settings.sessionLimits).toEqual({ credits: null, expireSeconds: 450 });
+    expect(exhibition.liveStatus()).toMatchObject({ perSessionLimit: 3000, expireSeconds: 450 });
     const filename = join(directory, 'exhibition-mirrors/default/exhibition.json');
     expect(JSON.parse(readFileSync(filename, 'utf8')).state.settings).not.toHaveProperty('sessionLimits');
     const restored = new ExhibitionMirrors(directory, { now }); restored.attachLiveService(service);
     expect(restored.getMirror().get()).toEqual(exhibition.get());
     expect(JSON.parse(readFileSync(filename, 'utf8')).state.settings).not.toHaveProperty('sessionLimits');
+  });
+
+  it('issues numeric bounded segments by default without changing standalone credential defaults', async () => {
+    const { exhibition, issue, service, store } = fixture();
+    expect(service.perSessionLimit).toBe(30); expect(service.expireSeconds).toBe(120);
+    start(exhibition); const session = await create(exhibition);
+    expect(issue).toHaveBeenCalledExactlyOnceWith(3000, 120);
+    expect(session).toMatchObject({ pointsLimit: 3000, exhibition: { continuous: true } });
+    expect(store.get(session.id)).toMatchObject({ pointsLimit: 3000, exhibition: { continuous: true } });
+  });
+
+  it.each([1, 59])('raises a short service duration of %s only for the missing continuous setting', async expireSeconds => {
+    const { exhibition, issue, service } = fixture({ expireSeconds });
+    expect(service.expireSeconds).toBe(expireSeconds);
+    expect(exhibition.get().settings.sessionLimits).toEqual({ credits: null, expireSeconds: 60 });
+    start(exhibition); await create(exhibition);
+    expect(issue).toHaveBeenCalledExactlyOnceWith(3000, 60);
+  });
+
+  it('preserves an explicitly saved old finite default and short duration after restart', () => {
+    const { exhibition, service, directory, now } = fixture({ expireSeconds: 450 });
+    exhibition.command({ action: 'configure', sessionLimits: { credits: 30, expireSeconds: 1 } });
+    const restored = new ExhibitionMirrors(directory, { now }); restored.attachLiveService(service);
+    expect(restored.getMirror().get().settings.sessionLimits).toEqual({ credits: 30, expireSeconds: 1 });
+    expect(restored.getMirror().liveStatus()).toMatchObject({ perSessionLimit: 30, expireSeconds: 1 });
   });
 
   it('persists and clones an isolated mirror setting without creating a session', () => {
@@ -69,7 +94,7 @@ describe('per-mirror finite session limits', () => {
     expect(saved.settings.sessionLimits).toEqual(value);
     value.credits = 1; saved.settings.sessionLimits!.expireSeconds = 1;
     expect(exhibition.get().settings.sessionLimits).toEqual({ credits: 150, expireSeconds: 600 });
-    expect(other.get().settings.sessionLimits).toEqual({ credits: 30, expireSeconds: 120 });
+    expect(other.get().settings.sessionLimits).toEqual({ credits: null, expireSeconds: 120 });
     const restored = new ExhibitionMirrors(directory, { now }); restored.attachLiveService(service);
     expect(restored.getMirror().get()).toEqual(exhibition.get());
     expect(restored.getMirror(other.mirrorId).get()).toEqual(other.get());
@@ -188,7 +213,8 @@ describe('per-mirror finite session limits', () => {
       method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
     });
     try {
-      expect(await (await fetch(base)).json()).toMatchObject({ settings: { sessionLimits: { credits: 40, expireSeconds: 200 } } });
+      expect(await (await fetch(base)).json()).toMatchObject({ settings: { sessionLimits: { credits: null, expireSeconds: 200 } } });
+      expect(await (await fetch(base + '/live/status')).json()).toMatchObject({ perSessionLimit: 3000, expireSeconds: 200 });
       const configure = { action: 'configure', sessionLimits: { credits: 120, expireSeconds: 600 } };
       for (const headers of [{ Origin: 'http://untrusted.example' }, { 'Sec-Fetch-Site': 'cross-site' }]) {
         const response = await post('/command', configure, headers); expect(response.status).toBe(403);
@@ -278,7 +304,8 @@ describe('continuous experience renewal', () => {
     exhibition.command({ action: 'configure', sessionLimits: { credits: null, expireSeconds: 120 } });
     start(exhibition); const session = await create(exhibition); for (let i = 0; i < 7; i++) { advance(15_000); exhibition.heartbeat({ deviceId, sessionId: session.id }); }
     await expect(prepare(exhibition, session.id)).rejects.toMatchObject({ code: 'EXHIBITION_RENEWAL_UNAVAILABLE' });
-    const finite = fixture(); start(finite.exhibition); const finiteSession = await create(finite.exhibition);
+    const finite = fixture(); finite.exhibition.command({ action: 'configure', sessionLimits: { credits: 30, expireSeconds: 120 } });
+    start(finite.exhibition); const finiteSession = await create(finite.exhibition);
     finite.store.update(finiteSession.id, { firstFrameMs: 400, providerSessionId: 'ums-finite' }); finite.exhibition.liveFirstFrame(finiteSession.id, 400);
     for (let i = 0; i < 7; i++) { finite.advance(15_000); finite.exhibition.heartbeat({ deviceId, sessionId: finiteSession.id }); }
     await expect(prepare(finite.exhibition, finiteSession.id)).rejects.toMatchObject({ code: 'EXHIBITION_RENEWAL_UNAVAILABLE' });

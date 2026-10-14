@@ -607,11 +607,14 @@ export class ExhibitionService {
   async reportLiveError(input: unknown): Promise<ExhibitionState> {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_SESSION', '错误报告无效。');
     const deviceId = shortText(input.deviceId, '设备 ID', 100);
-    const state = this.stored.state;
     const reason: StopReason = isStopReason(input.reason) ? input.reason : 'provider_rejected';
     const recovering = ['rtc_failed', 'credential_expired', 'segment_exhausted', 'lease_expired', 'command_unknown'].includes(reason);
     const record = typeof input.sessionId === 'string' ? await this.liveService?.get(input.sessionId, false) : undefined;
-    if (this.stored.state !== state || state.providerMode !== 'xmax'
+    // Cleanup may commit while the session read yields. Validate the current
+    // semantic owner, not identity of an obsolete state object. Stop/pause/new
+    // generations still invalidate the report below.
+    const state = this.stored.state;
+    if (state.providerMode !== 'xmax'
       || !['generating', 'showcase', ...(recovering && state.lifecycle?.reason !== 'staff_pause' ? ['paused'] : [])].includes(state.phase)
       || input.sessionNumber !== state.sessionNumber || input.generationNumber !== state.generationNumber || input.lookId !== state.selectedLookId
       || (recovering && record && (record.exhibition?.deviceId !== deviceId || record.exhibition?.sessionNumber !== state.sessionNumber

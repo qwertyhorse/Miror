@@ -7,8 +7,6 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.KeyEvent
@@ -54,7 +52,7 @@ internal class MirrorMaterialDrawerView(context: Context) : FrameLayout(context)
     }
     private val heading = TextView(context).apply {
         setTextColor(Color.parseColor("#66587d"))
-        typeface = Typeface.create(Typeface.create("sans-serif", Typeface.NORMAL), 550, false)
+        typeface = MirrorUiTheme.typeface()
         includeFontPadding = false
         maxLines = 2
         ellipsize = TextUtils.TruncateAt.END
@@ -197,11 +195,7 @@ internal class MirrorMaterialDrawerView(context: Context) : FrameLayout(context)
         }
         val padding = px(1.7f)
         panel.setPadding(padding, padding, padding, padding)
-        panel.background = GradientDrawable().apply {
-            setColor(Color.parseColor("#e6faf8ff"))
-            cornerRadius = unit * 2f
-            setStroke(1, Color.parseColor("#cce4dcef"))
-        }
+        panel.background = MirrorUiTheme.rounded(0xe6faf8ff.toInt(), unit * 2f, 0xcce4dcef.toInt())
         panel.elevation = unit
         heading.setTextSize(TypedValue.COMPLEX_UNIT_PX, unit * 2.35f)
         heading.setLineSpacing(0f, 1.3f)
@@ -237,10 +231,7 @@ internal class MirrorMaterialDrawerView(context: Context) : FrameLayout(context)
                 val card = cards.getValue(item.id)
                 (card.parent as? ViewGroup)?.removeView(card)
                 card.unit = unit
-                card.background = GradientDrawable().apply {
-                    setColor(Color.WHITE)
-                    cornerRadius = unit * 1.2f
-                }
+                card.background = MirrorUiTheme.rounded(Color.WHITE, unit * 1.2f)
                 row.addView(card, LinearLayout.LayoutParams(cardWidth, cardHeight).apply {
                     if (column > 0) leftMargin = gap
                 })
@@ -282,7 +273,15 @@ internal class MirrorMaterialDrawerView(context: Context) : FrameLayout(context)
 
         override fun dispatchDraw(canvas: Canvas) {
             super.dispatchDraw(canvas)
-            if (!isSelected && !isFocused) return
+            if (!isSelected && !isFocused && !isHovered) return
+            // The web selection adds a .25cqi translucent ring around its 2px border.
+            // Keep the ring inside the native card outline so it stays visible at scroll edges.
+            if (isSelected) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = .5f * unit + 2f
+                paint.color = 0x80b99bff.toInt()
+                canvas.drawRoundRect(RectF(1f, 1f, width - 1f, height - 1f), 1.2f * unit, 1.2f * unit, paint)
+            }
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 2f
             paint.color = Color.parseColor(if (isSelected) "#b99bff" else "#d7c6fa")

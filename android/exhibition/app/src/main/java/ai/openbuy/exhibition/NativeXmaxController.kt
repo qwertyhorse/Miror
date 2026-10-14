@@ -49,6 +49,7 @@ class NativeXmaxController(
 
     var onFirstFrame: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    internal var onCameraSnapshot: ((NativeCameraSnapshot) -> Unit)? = null
 
     /** Local-only capture: no temporary key request or XMAX session is created. */
     suspend fun preview(
@@ -202,7 +203,7 @@ class NativeXmaxController(
                 null -> NativeCameraFacing.UNKNOWN
             }, it.name)
         }
-        return system.mergeRtcDevices(devices)
+        return system.mergeRtcDevices(devices).also { onCameraSnapshot?.invoke(it) }
     }
 
     private suspend fun camera(

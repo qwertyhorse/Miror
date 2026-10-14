@@ -169,6 +169,22 @@ def main():
                         SOURCE / 'NativeCameraSelection.kt', TESTS / 'NativeCameraSelectionTest.kt'])
         run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraSelectionTestKt'], timeout=60)
 
+        ui_classes = temporary / 'mirror-ui/classes'
+        ui_classes.mkdir(parents=True)
+        ui_classpath = os.pathsep.join(map(str, [ui_classes, stdlib]))
+        print('Run native mirror presentation state fixtures.', flush=True)
+        run(compiler + ['-classpath', ui_classpath, '-d', ui_classes,
+                        SOURCE / 'NativeMirrorUiState.kt', TESTS / 'NativeMirrorUiStateTest.kt'])
+        run([java, '-cp', ui_classpath, 'ai.openbuy.exhibition.NativeMirrorUiStateTestKt'], timeout=60)
+
+        remote_classes = temporary / 'camera-remote/classes'
+        remote_classes.mkdir(parents=True)
+        remote_classpath = os.pathsep.join(map(str, [remote_classes, stdlib, json_jar]))
+        print('Run native per-mirror camera request and metadata fixtures.', flush=True)
+        run(compiler + ['-classpath', remote_classpath, '-d', remote_classes,
+                        SOURCE / 'NativeCameraSelection.kt', SOURCE / 'NativeCameraRemote.kt', TESTS / 'NativeCameraRemoteTest.kt'])
+        run([java, '-cp', remote_classpath, 'ai.openbuy.exhibition.NativeCameraRemoteTestKt'], timeout=60)
+
         metadata_dir = temporary / 'metadata'
         metadata_classes = metadata_dir / 'classes'
         metadata_classes.mkdir(parents=True)

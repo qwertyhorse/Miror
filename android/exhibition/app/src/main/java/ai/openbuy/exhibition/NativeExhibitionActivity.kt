@@ -2,7 +2,7 @@ package ai.openbuy.exhibition
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
+import android.app.Dialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -63,9 +63,14 @@ class NativeExhibitionActivity : Activity() {
     private var cameraDeviceId: String? = null
     private var activeCameraDeviceId: String? = null
     private var cameraSettingsOpen = false
-    private var settingsDialog: AlertDialog? = null
+    private var settingsDialog: Dialog? = null
+    private var lastUiMode = ""
     private var cameraSettingsPanel: NativeCameraSettingsPanel? = null
     private var cameraSettingsCleanup: Job? = null
+    private lateinit var remoteCamera: NativeCameraRemote
+    private var remoteCameraRequest: NativeCameraOpenRequest? = null
+    private var remoteCameraExpiry: Job? = null
+    private var cameraSnapshot: NativeCameraSnapshot? = null
     private var error = ""
     private var backendError = ""
     private var generationStatus = ""
@@ -104,9 +109,14 @@ class NativeExhibitionActivity : Activity() {
             .getOrDefault(UrlPolicy.DEFAULT_URL)
         position = if (prefs.getString("native-camera", "back") == "front") CameraPosition.FRONT else CameraPosition.BACK
         cameraDeviceId = prefs.getString("native-camera-id", null)?.takeIf { it.isNotEmpty() }
+        remoteCamera = NativeCameraRemote(prefs.getStringSet("native-camera-handled-requests", emptySet()).orEmpty())
         api = newApi()
         buildInterface()
         controller = NativeXmaxController(this, video)
+        controller.onCameraSnapshot = { snapshot ->
+            cameraSnapshot = snapshot
+            if (!cameraSettingsOpen) reportCamera("ready")
+        }
         render()
     }
 
@@ -121,6 +131,16 @@ class NativeExhibitionActivity : Activity() {
             permissionAsked = true
             requestPermissions(arrayOf(Manifest.permission.CAMERA), 41)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        MirrorImmersive.apply(window)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) MirrorImmersive.apply(window)
     }
 
     override fun onStop() {
@@ -181,14 +201,31 @@ class NativeExhibitionActivity : Activity() {
     private suspend fun pollBackend() {
         var lastBinding = 0L
         var lastProvider = 0L
+        var pendingCameraRequest: JSONObject? = null
         while (currentCoroutineContext().isActive) {
             val owner = api
             try {
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastBinding >= 10_000 || mirrorId == null) {
-                    val binding = owner.connectTerminal()
+                if (now - lastBinding >= 3_000 || mirrorId == null) {
+                    val cameraReport = remoteCamera.report(System.currentTimeMillis())
+                    val binding = owner.connectTerminal(cameraReport)
                     if (owner !== api) continue
+                    if (binding.optBoolean("cameraReportAccepted")) remoteCamera.acknowledge(cameraReport)
+                    if (!cameraSettingsOpen && binding.optBoolean("cameraReportAccepted") &&
+                        cameraReport?.optString("status") == "closed" &&
+                        (cameraReport.optString("requestId") == remoteCameraRequest?.id ||
+                            remoteCameraRequest?.expiresAt?.let { it <= System.currentTimeMillis() } == true)) {
+                        remoteCameraRequest = null
+                        reportCamera(if (previewFailed) "error" else if (!hasCameraPermission()) "permission-required" else "ready",
+                            if (previewFailed) "摄像头不可用，请重新检测" else null)
+                    }
                     val incoming = binding.string("mirrorId").ifBlank { null }
+                    if (remoteCamera.bind(incoming, binding.string("cameraBindingId"))) {
+                        cameraSnapshot = null
+                        remoteCameraRequest?.let { if (!remoteCamera.owns(it)) settingsDialog?.dismiss() }
+                        remoteCameraRequest = null
+                        reportCamera(if (hasCameraPermission()) "ready" else "permission-required")
+                    }
                     if (incoming != mirrorId) {
                         mirrorId = incoming
                         state = null
@@ -197,6 +234,7 @@ class NativeExhibitionActivity : Activity() {
                     }
                     mirrorName = binding.string("mirrorName").ifBlank { "展会试衣镜" }
                     bindingCode = binding.string("code")
+                    pendingCameraRequest = binding.optJSONObject("cameraRequest")
                     lastBinding = now
                 }
                 val id = mirrorId
@@ -204,10 +242,13 @@ class NativeExhibitionActivity : Activity() {
                     val fresh = state?.let { owner.changes(id, it.optLong("revision", 0)) } ?: owner.state(id)
                     if (owner !== api || id != mirrorId) continue
                     if (!stopBusy) adoptState(fresh)
+                    if (cameraSettingsOpen && cameraIsLocked()) settingsDialog?.dismiss()
                     if (now - lastProvider >= 10_000) {
                         provider = owner.liveStatus(id)
                         lastProvider = now
                     }
+                    pendingCameraRequest?.let { handleRemoteCameraRequest(it) }
+                    pendingCameraRequest = null
                 }
                 if (!healthy && error == backendError) error = ""
                 backendError = ""
@@ -218,6 +259,7 @@ class NativeExhibitionActivity : Activity() {
             catch (cause: Exception) {
                 if (owner === api) {
                     healthy = false
+                    if (cameraSettingsOpen && remoteCameraRequest != null) settingsDialog?.dismiss()
                     backendError = userError(cause, "后台连接中断，请检查网络")
                     error = backendError
                     render()
@@ -312,7 +354,8 @@ class NativeExhibitionActivity : Activity() {
                     currentPosition = position
                     controller.onFirstFrame = null
                     controller.onError = { runOnUiThread {
-                        cameraReady = false; previewFailed = true; error = "摄像头已断开，点状态重试"; render()
+                        cameraReady = false; previewFailed = true; error = "摄像头已断开，点状态重试"
+                        reportCamera("error", "摄像头已断开，请重新检测"); render()
                     } }
                     try {
                         withTimeout(15_000) {
@@ -326,14 +369,17 @@ class NativeExhibitionActivity : Activity() {
                             activeCameraDeviceId = controller.preview(position, cameraDeviceId)
                         }
                         cameraReady = true
+                        reportCamera("ready")
                         if (error.startsWith("摄像头") || error == "请允许摄像头权限") error = ""
                     } catch (_: TimeoutCancellationException) {
                         previewFailed = true
                         error = "摄像头未就绪，点状态重试"
+                        reportCamera("error", "摄像头未就绪，请重新检测")
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (cause: Exception) {
                         previewFailed = true
                         error = "摄像头不可用，点状态重试"
+                        reportCamera("error", "摄像头不可用，请重新检测")
                     }
                     render()
                 }
@@ -439,9 +485,7 @@ class NativeExhibitionActivity : Activity() {
 
     @Suppress("DEPRECATION")
     private fun buildInterface() {
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        MirrorImmersive.apply(window)
         kiosk = MirrorKioskView(this)
         video = kiosk.video
         demoImage = kiosk.poster
@@ -451,7 +495,6 @@ class NativeExhibitionActivity : Activity() {
         pairCode = kiosk.pairCode
         primary = kiosk.primary
         status = kiosk.status
-        kiosk.settings.setOnClickListener { showSettings() }
         kiosk.logo.setOnLongClickListener { showSettings(); true }
         primary.setOnClickListener { startOrStop() }
         kiosk.continueButton.setOnClickListener { command("resume") }
@@ -501,67 +544,82 @@ class NativeExhibitionActivity : Activity() {
         pairTitle.text = if (healthy) "设备绑定" else "连接后台"
         pairCode.text = bindingCode.ifBlank { "····" }
         val demo = snapshot?.string("providerMode") == "demo"
+        val realtime = snapshot?.string("providerMode") == "xmax"
         val imageInput = mode == "mox" && round == null
-        demoImage.visibility = if (demo || imageInput) View.VISIBLE else View.GONE
+        val presentation = NativeMirrorUiState.resolve(realtime, imageInput, cameraReady, round != null,
+            phase, actionBusy, stopBusy, live != null, live?.optBoolean("localEnded") == true)
+        demoImage.visibility = if (presentation.showPoster) View.VISIBLE else View.GONE
         // Transparent posters use the same light stage as the web; an idle video surface is black.
         video.visibility = if (demo || imageInput) View.GONE else View.VISIBLE
-        if (demo || imageInput) bindImage(demoImage, selected?.string("image"), 1280)
+        if (presentation.showPoster) bindImage(demoImage, selected?.string("image"), 1920)
         val settings = snapshot?.optJSONObject("settings")
         val customSkin = settings?.optJSONObject("uiSkin")?.string("image").orEmpty()
         kiosk.applySkin(settings?.string("uiSkinPreset").orEmpty().ifBlank { "crystal" }, customSkin.isNotBlank())
         if (customSkin.isNotBlank()) bindImage(skin, customSkin, 1920)
         kiosk.empty.visibility = if (bound && selected == null) View.VISIBLE else View.GONE
-        val realtime = snapshot?.string("providerMode") == "xmax"
         val missingCameraPermission = realtime && mode != "mox" && !hasCameraPermission()
         val missingCredential = realtime && provider?.optBoolean("configured") == false
         kiosk.status.visibility = if ((snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 ||
             error.isNotBlank() || !healthy || live != null || generationStatus.isNotBlank() || missingCameraPermission || missingCredential) View.VISIBLE else View.GONE
         val busy = phase in listOf("generating", "showcase", "positioning") || round != null
         val blocked = live != null
-        primary.text = when {
-            stopBusy -> "正在停止…"
-            live?.optBoolean("localEnded") == true -> "恢复操作"
-            actionBusy || busy || blocked || phase == "paused" -> "停止生成"
-            else -> "开始体验"
-        }
-        kiosk.setPrimaryIcon(stopBusy || actionBusy || busy || blocked || phase == "paused", live?.optBoolean("localEnded") == true)
+        primary.text = presentation.primaryText
+        primary.visibility = if (bound) View.VISIBLE else View.GONE
+        kiosk.setPrimaryIcon(presentation.stopIcon, presentation.recoverIcon)
         val canStart = !cameraSettingsOpen && !controller.hasReleaseFailure && healthy && selected != null && (!realtime || mode == "mox" || cameraReady) &&
             (!realtime || provider?.optBoolean("configured") == true)
         primary.isEnabled = !stopBusy && bound && snapshot != null && (actionBusy || busy || blocked || phase == "paused" || canStart)
-        primary.alpha = if (primary.isEnabled) 1f else .45f
-        kiosk.continueButton.visibility = if (phase == "paused" && live == null && !stopBusy) View.VISIBLE else View.GONE
+        kiosk.continueButton.visibility = if (bound && presentation.showContinue) View.VISIBLE else View.GONE
         kiosk.continueButton.isEnabled = !actionBusy && !stopBusy && canStart
         kiosk.home.visibility = if (bound && phase !in listOf("idle", "select", "")) View.VISIBLE else View.GONE
         kiosk.home.isEnabled = !stopBusy
         val canSelect = !actionBusy && healthy && phase in listOf("idle", "select", "generating", "showcase") && !blockedUnlessOwn(live)
         kiosk.drawer.visibility = if (bound && selected != null) View.VISIBLE else View.GONE
+        if (!bound || mode != lastUiMode) kiosk.drawer.setOpen(false)
+        lastUiMode = mode
         kiosk.drawer.submit(enabledLooks(snapshot), snapshot?.string("selectedLookId").orEmpty(),
             settings?.optInt("materialDrawerColumns", 2) ?: 2, canSelect, if (mode == "clothx") "选择服装" else "选择素材")
     }
 
     private fun blockedUnlessOwn(live: JSONObject?) = live != null && live.string("deviceId") != deviceId
 
-    private fun showSettings() {
+    private fun cameraIsLocked() = controller.hasReleaseFailure || roundJob != null || round != null || actionBusy || stopBusy ||
+        state?.optJSONObject("live") != null || state?.string("phase") in listOf("generating", "showcase", "positioning", "paused")
+
+    private fun reportCamera(status: String, message: String? = null) {
+        remoteCamera.update(status, cameraSnapshot, NativeCameraSelection(cameraDeviceId),
+            activeCameraDeviceId.takeIf { cameraReady }, message)
+    }
+
+    private fun handleRemoteCameraRequest(value: JSONObject) {
+        val request = remoteCamera.consume(value, terminalId, System.currentTimeMillis(),
+            !started || settingsDialog != null || state == null || cameraIsLocked())
+        // Write before opening so a process restart cannot reopen the same staff request.
+        if (!prefs.edit().putStringSet("native-camera-handled-requests", remoteCamera.handledRequests()).commit()) {
+            remoteCamera.update("error", cameraSnapshot, NativeCameraSelection(cameraDeviceId), null, "无法保存摄像头检测状态")
+            return
+        }
+        if (request != null) showSettings(request)
+    }
+
+    private fun showSettings(remoteRequest: NativeCameraOpenRequest? = null) {
         if (settingsDialog != null) return
-        val cameraLocked = controller.hasReleaseFailure || roundJob != null || round != null || actionBusy || stopBusy ||
-            state?.optJSONObject("live") != null || state?.string("phase") in listOf("generating", "showcase", "positioning", "paused")
+        val cameraLocked = cameraIsLocked()
+        remoteCameraRequest = remoteRequest
+        val reportBinding = remoteCamera.bindingKey()
+        val reportApi = api
+        val reportRequestId = remoteCamera.requestId()
+        fun ownsReport() = reportApi === api && reportBinding == remoteCamera.bindingKey() &&
+            (remoteRequest == null || reportRequestId == remoteCamera.requestId())
         if (!cameraLocked) {
             cameraSettingsOpen = true
             cameraReady = false
             restartWork()
         }
         val cameraReleased = shutdown
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(12), dp(22), 0) }
-        box.addView(label("展台网址", 13, MUTED, false))
-        val address = EditText(this).apply { setText(screenUrl); textSize = 14f; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI; setSingleLine(false) }
-        box.addView(address, LinearLayout.LayoutParams(-1, -2))
-        box.addView(label("备用 IP", 13, MUTED, false))
-        val backendIp = EditText(this).apply {
-            setText(prefs.getString("backend-ip", "")); hint = "自动发现"; textSize = 14f
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-            setSingleLine(true)
-        }
-        box.addView(backendIp, LinearLayout.LayoutParams(-1, -2))
+        val content = NativeDeviceSettingsView(this, remoteRequest != null)
+        val address = content.address.apply { setText(screenUrl) }
+        val backendIp = content.backendIp.apply { setText(prefs.getString("backend-ip", "")) }
         val cameraPanel = if (!cameraLocked) NativeCameraSettingsPanel(
             this, controller, NativeCameraSelection(cameraDeviceId), prefs.getString("native-camera", null),
             migrateLegacy = !prefs.contains("native-camera-id"),
@@ -572,15 +630,24 @@ class NativeExhibitionActivity : Activity() {
                     false
                 }
             },
-        ).also { box.addView(it, LinearLayout.LayoutParams(-1, -2)) } else null
+            onState = { status, snapshot, selection, activeId, message ->
+                if (ownsReport()) {
+                    cameraSnapshot = snapshot
+                    remoteCamera.update(status, snapshot, selection, activeId, message)
+                    if (status == "error" && controller.hasReleaseFailure) settingsDialog?.dismiss()
+                }
+            },
+        ).also { content.cameraContainer.addView(it, LinearLayout.LayoutParams(-1, -2)) } else null
         cameraSettingsPanel = cameraPanel
-        if (cameraLocked) box.addView(label(if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "停止生成后可选择摄像头", 13, MUTED, false))
-        box.addView(label("原生版 ${BuildConfig.VERSION_NAME} · ${Build.MODEL}", 12, MUTED, false))
-        val scroll = ScrollView(this).apply { addView(box) }
-        val dialog = AlertDialog.Builder(this).setTitle("设备设置").setView(scroll).setNegativeButton("取消", null).setPositiveButton("保存", null).create()
+        if (cameraLocked) content.cameraContainer.addView(label(if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "停止生成后可选择摄像头", 13, MUTED, false))
+        content.meta.text = "原生版 ${BuildConfig.VERSION_NAME} · ${Build.MODEL}"
+        val dialog = MirrorSettingsDialog(this, content)
+        content.cancelButton.setOnClickListener { dialog.cancel() }
         settingsDialog = dialog
         var saved = false
         dialog.setOnDismissListener {
+            remoteCameraExpiry?.cancel()
+            remoteCameraExpiry = null
             settingsDialog = null
             cameraSettingsPanel = null
             cameraSettingsOpen = false
@@ -589,6 +656,9 @@ class NativeExhibitionActivity : Activity() {
                     runCatching { cameraPanel.close() }.onFailure {
                         previewFailed = true
                         error = "摄像头释放失败，请重新打开应用"
+                        if (ownsReport()) {
+                            remoteCamera.update("error", cameraSnapshot, NativeCameraSelection(cameraDeviceId), null, error)
+                        }
                         render()
                     }
                 }
@@ -596,12 +666,18 @@ class NativeExhibitionActivity : Activity() {
                 activeCameraDeviceId = null
                 previewFailed = false
                 if (error.startsWith("摄像头") || error.startsWith("所选摄像头")) error = ""
+                if (ownsReport()) {
+                    remoteCamera.update(if (controller.hasReleaseFailure) "error" else "closed", cameraSnapshot,
+                        NativeCameraSelection(cameraDeviceId), null,
+                        if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else null)
+                }
             }
             if (cameraPanel != null || saved) restartWork()
             render()
+            window.decorView.post { if (!destroyed) MirrorImmersive.apply(window) }
         }
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            content.saveButton.setOnClickListener {
                 val fallbackIp = backendIp.text.toString().trim()
                 try { if (fallbackIp.isNotEmpty()) LanBackendAddress.requirePrivateIpv4(fallbackIp) }
                 catch (_: IllegalArgumentException) {
@@ -612,22 +688,32 @@ class NativeExhibitionActivity : Activity() {
                     val url = UrlPolicy.cameraScreenUrl(address.text.toString())
                     // Constructor validates the endpoint before a running terminal is interrupted.
                     ExhibitionApi(url, terminalId, terminalToken, Build.MODEL, LanBackendDns(applicationContext, fallbackIp))
-                    screenUrl = url
-                    val preferences = prefs.edit().putString("screen-url", screenUrl).putString("backend-ip", fallbackIp)
+                    val preferences = prefs.edit().putString("screen-url", url).putString("backend-ip", fallbackIp)
                     if (cameraPanel != null) {
-                        cameraDeviceId = cameraPanel.selection.cameraId
                         preferences.putString("native-camera-id", cameraPanel.selection.storedValue)
                     }
-                    preferences.apply()
+                    check(preferences.commit()) { "无法保存摄像头设置" }
+                    screenUrl = url
+                    if (cameraPanel != null) cameraDeviceId = cameraPanel.selection.cameraId
                     saved = true
-                    api = newApi()
-                    mirrorId = null; state = null; provider = null; healthy = false; error = ""; backendError = ""; previewFailed = false
-                    imageCache.evictAll()
+                    if (remoteRequest == null) {
+                        api = newApi()
+                        remoteCamera.bind(null, null)
+                        mirrorId = null; state = null; provider = null; healthy = false; error = ""; backendError = ""; previewFailed = false
+                        imageCache.evictAll()
+                    }
                     dialog.dismiss()
                 } catch (cause: IllegalArgumentException) { address.error = cause.message ?: "网址无效" }
+                catch (_: IllegalStateException) { Toast.makeText(this, "无法保存摄像头设置", Toast.LENGTH_SHORT).show() }
             }
         }
         dialog.show()
+        if (remoteRequest != null) {
+            remoteCameraExpiry = cleanupScope.launch {
+                delay((remoteRequest.expiresAt - System.currentTimeMillis()).coerceAtLeast(0))
+                if (settingsDialog === dialog) dialog.dismiss()
+            }
+        }
     }
 
     private fun bindImage(target: ImageView, path: String?, maxSide: Int = 256, scope: CoroutineScope = imageScope) {
@@ -700,6 +786,6 @@ class NativeExhibitionActivity : Activity() {
         private val PURPLE = Color.rgb(116, 82, 214)
         private val CREAM = Color.rgb(247, 245, 251)
         private val DARK = Color.rgb(38, 30, 54)
-        private val MUTED = Color.rgb(119, 110, 133)
+        private val MUTED = MirrorUiTheme.MUTED
     }
 }

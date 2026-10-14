@@ -4,11 +4,8 @@ import android.content.Context
 import android.graphics.Color
 import android.view.View
 import android.widget.AdapterView
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.Spinner
-import android.widget.TextView
+import android.widget.FrameLayout
+import ai.xmax.sdk.VideoContentMode
 import ai.xmax.sdk.XmaxRealtimeVideoView
 import kotlinx.coroutines.*
 
@@ -21,35 +18,26 @@ internal class NativeCameraSettingsPanel(
     private val migrateLegacy: Boolean,
     private val awaitExclusive: suspend () -> Unit,
     private val requestPermission: () -> Boolean,
-) : LinearLayout(context) {
+    private val onState: (String, NativeCameraSnapshot, NativeCameraSelection, String?, String?) -> Unit = { _, _, _, _, _ -> },
+) : NativeCameraSettingsView(context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var operation: Job? = null
     private var epoch = 0L
     private var closed = false
     private var initialized = false
     private var options = listOf<String?>(null)
-    private val spinner = Spinner(context)
-    private val refresh = Button(context).apply { text = "重新检测"; isAllCaps = false }
-    private val feedback = TextView(context).apply { textSize = 13f; setPadding(0, dp(6), 0, dp(6)) }
     private val preview = XmaxRealtimeVideoView(context).apply {
         setBackgroundColor(Color.BLACK)
+        videoContentMode = VideoContentMode.FIT
         visibility = View.GONE
     }
     var selection = initialSelection
         private set
     private var snapshot = NativeCameraSnapshot(emptyList())
+    private var previewedDeviceId: String? = null
 
     init {
-        orientation = VERTICAL
-        addView(TextView(context).apply { text = "摄像头"; textSize = 13f })
-        addView(LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            addView(spinner, LayoutParams(0, dp(48), 1f))
-            addView(refresh, LayoutParams(-2, dp(48)))
-        })
-        addView(feedback, LayoutParams(-1, -2))
-        addView(preview, LayoutParams(-1, dp(180)))
-        spinner.contentDescription = "选择摄像头"
+        previewContainer.addView(preview, FrameLayout.LayoutParams(-1, -1))
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -66,10 +54,12 @@ internal class NativeCameraSettingsPanel(
         if (closed) return
         if (!requestPermission()) {
             message("请允许摄像头权限", true)
+            report("permission-required", "请允许摄像头权限")
             return
         }
         launchOperation {
             message("检测中…")
+            report("scanning")
             snapshot = controller.detectCameras()
             if (!initialized && migrateLegacy) {
                 selection = NativeCameraSelection.migrate(null, legacyPosition, snapshot.devices)
@@ -82,9 +72,7 @@ internal class NativeCameraSettingsPanel(
                 labels.add("摄像头 ${selection.cameraId}（未连接）")
             }
             options = ids
-            spinner.adapter = ArrayAdapter(context, android.R.layout.simple_spinner_item, labels).apply {
-                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            }
+            setChoices(labels)
             spinner.setSelection(ids.indexOf(selection.cameraId).coerceAtLeast(0))
             initialized = true
             showPreview()
@@ -95,21 +83,36 @@ internal class NativeCameraSettingsPanel(
         val selected = selection.resolve(snapshot.devices)
         if (selected == null) {
             preview.visibility = View.GONE
+            previewContainer.visibility = View.GONE
             message(selection.unavailableMessage(snapshot), true)
+            report("ready", selection.unavailableMessage(snapshot))
             return
         }
         message("连接摄像头…")
+        report("scanning")
         preview.visibility = View.VISIBLE
+        previewContainer.visibility = View.VISIBLE
         val owner = epoch
         controller.onError = {
-            if (!closed && owner == epoch) message("摄像头已断开，请重新检测", true)
+            if (!closed && owner == epoch) {
+                previewedDeviceId = null
+                message("摄像头已断开，请重新检测", true)
+                report("ready", "摄像头已断开，请重新检测")
+            }
         }
         controller.preview(cameraDeviceId = selected.id, target = preview)
-        if (!closed && owner == epoch) message("已连接 · ${selected.label}")
+        // The shared controller defaults to the full-screen mirror's fill mode.
+        preview.videoContentMode = VideoContentMode.FIT
+        if (!closed && owner == epoch) {
+            previewedDeviceId = selected.id
+            message("已连接 · ${selected.label}")
+            report("preview")
+        }
     }
 
     private fun launchOperation(action: suspend () -> Unit) {
         val owner = ++epoch
+        previewedDeviceId = null
         val previous = operation
         previous?.cancel()
         operation = scope.launch {
@@ -124,7 +127,10 @@ internal class NativeCameraSettingsPanel(
             catch (_: Exception) {
                 if (!closed && owner == epoch) {
                     preview.visibility = View.GONE
-                    message(if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "摄像头不可用，请重新检测", true)
+                    previewContainer.visibility = View.GONE
+                    val failure = if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "摄像头不可用，请重新检测"
+                    message(failure, true)
+                    report(if (controller.hasReleaseFailure) "error" else "ready", failure)
                 }
             }
         }
@@ -146,8 +152,9 @@ internal class NativeCameraSettingsPanel(
     }
 
     private fun message(text: String, failed: Boolean = false) {
-        feedback.text = text
-        feedback.setTextColor(if (failed) Color.rgb(175, 60, 65) else Color.rgb(113, 104, 137))
+        showMessage(text, failed)
     }
-    private fun dp(value: Int) = (value * resources.displayMetrics.density + .5f).toInt()
+    private fun report(status: String, error: String? = null) {
+        if (!closed) onState(status, snapshot, selection, previewedDeviceId, error)
+    }
 }

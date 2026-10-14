@@ -73,10 +73,12 @@ class ExhibitionApi(
         return resolved.toASCIIString()
     }
 
-    suspend fun connectTerminal(): JSONObject = json(
+    suspend fun connectTerminal(cameraReport: JSONObject? = null): JSONObject = json(
         "/exhibition/terminals/connect", "POST", JSONObject()
             .put("terminalId", terminalId).put("token", terminalToken)
-            .put("label", label).put("platform", "android"),
+            .put("label", label).put("platform", "android")
+            .put("cameraCapabilities", JSONObject().put("version", 1))
+            .apply { cameraReport?.let { put("cameraReport", it) } },
     )
 
     suspend fun state(mirrorId: String): JSONObject = json(mirrorPath(mirrorId))

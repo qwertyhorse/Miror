@@ -57,9 +57,24 @@ fun main() = runBlocking {
             val body = exchange.jsonBody()
             verify(body.getString("terminalId") == terminal && body.getString("token") == token, "Persistent identity")
             verify(body.getString("platform") == "android", "Native platform")
+            verify(body.getJSONObject("cameraCapabilities").getInt("version") == 1, "Camera management capability")
+            verify(!body.has("cameraReport"), "Initial poll does not invent a camera binding or report")
             exchange.reply(JSONObject().put("terminalId", terminal).put("mirrorId", "default"))
         }
         verify(api.connectTerminal().getString("mirrorId") == "default", "Binding response")
+        val cameraReport = JSONObject().put("mirrorId", "default").put("bindingId", "binding-fixture")
+            .put("requestId", "camera-fixture").put("status", "preview").put("devices", org.json.JSONArray())
+            .put("selectedDeviceId", "usb-42").put("activeDeviceId", "usb-42")
+        handler.set { exchange ->
+            val body = exchange.jsonBody()
+            verify(body.getString("terminalId") == terminal && body.getString("token") == token, "Camera report uses authenticated terminal poll")
+            verify(body.getJSONObject("cameraReport").toString() == cameraReport.toString(), "Camera metadata contract remains intact")
+            exchange.reply(JSONObject().put("cameraBindingId", "binding-fixture").put("cameraReportAccepted", true)
+                .put("cameraRequest", JSONObject().put("id", "camera-fixture").put("action", "open")))
+        }
+        val cameraBinding = api.connectTerminal(cameraReport)
+        verify(cameraBinding.getBoolean("cameraReportAccepted") && cameraBinding.getJSONObject("cameraRequest").getString("action") == "open",
+            "Poll returns diagnostic request and acknowledgement")
         handler.set { exchange ->
             verify(exchange.requestURI.path == mirrorPath && exchange.requestMethod == "GET", "State endpoint")
             exchange.reply(JSONObject().put("revision", 7))

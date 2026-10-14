@@ -1,22 +1,24 @@
 # OpenBuy 展会试衣镜 Android 原生版
 
-应用版本 **0.3.1 / versionCode 9**，包名 `ai.openbuy.exhibition`。启动入口是原生 `NativeExhibitionActivity`，使用 XMAX 官方 Android SDK 1.0.8 和火山 RTC，不再依赖 Android System WebView 版本。旧 WebView Activity 仅保留为非导出内部类。
+应用版本 **0.3.3 / versionCode 11**，包名 `ai.openbuy.exhibition`。启动入口是原生 `NativeExhibitionActivity`，使用 XMAX 官方 Android SDK 1.0.8 和火山 RTC，不再依赖 Android System WebView 版本。旧 WebView Activity 仅保留为非导出内部类。
 
 ## 安装使用
 
-1. 将 `OpenBuy-展会试衣镜-0.3.1.apk` 发送到大屏安装，允许摄像头权限。
+1. 将 `OpenBuy-展会试衣镜-0.3.3.apk` 发送到大屏安装，允许摄像头权限。
 2. 首次显示四位绑定码，在现有 V1.1 展会后台绑定到对应智能镜。升级旧包沿用原来的安装身份与绑定。
 3. 在后台配置该镜的 XMAX 密钥、区域、额度及素材；选择素材后点击“开始体验”。永久密钥不写入 APK。
 
 默认连接 `https://xuminghong.local:10202/v1.1/exhibition/screen` 对应的原生 API。设备须能访问 Mac 的局域网地址；XMAX 生成需要互联网。管理后台入口为 `http://xuminghong.local:10200/`。
 
-右上角“设置”可更改展台网址、备用 IP 和摄像头。系统无法解析默认 `.local` 域名时，应用通过 NSD 自动发现同一局域网的 Miror 后台；发现窗口最长 3 秒，随后释放 Wi-Fi 多播锁。若路由器限制多播，可在“备用 IP”填写后台 Mac 的私有 IPv4 地址，展台网址保持默认域名。网络请求仍使用默认域名完成 TLS、Host 与 Origin 校验，备用 IP 只影响连接地址。留空恢复自动发现。
+长按顶部 Logo 打开“设备设置”，可更改展台网址、备用 IP 和摄像头。系统无法解析默认 `.local` 域名时，应用通过 NSD 自动发现同一局域网的 Miror 后台；发现窗口最长 3 秒，随后释放 Wi-Fi 多播锁。若路由器限制多播，可在“备用 IP”填写后台 Mac 的私有 IPv4 地址，展台网址保持默认域名。网络请求仍使用默认域名完成 TLS、Host 与 Origin 校验，备用 IP 只影响连接地址。留空恢复自动发现。
 
 debug 包只对默认域名信任随包 CA 公钥，不跳过 TLS 或主机名验证。直接配置 IP 的 HTTPS 地址仍须匹配证书。HTTP 10200 的旧镜端地址会规范化为同主机 HTTPS 10202。
 
 0.2.4 首次启动时会将空的备用 IP 预填为当前展会 Mac 地址 `192.168.63.54`，保留已填写的其他地址；之后仍可修改或清空。兼容旧安卓解析 XMAX 返回的带时区到期时间（如 `+00:00`），实际到期与无效时间仍会停止并释放会话。
 
 ## 摄像头选择
+
+后台每台智能镜的「镜端设备」支持发起摄像头检测；请求通过已绑定镜端的认证轮询送达，只在对应镜端打开检测弹窗。后台接收设备列表、当前选择和状态，不接收预览画面。检测请求在 120 秒后过期；解绑、改绑、重复请求和体验占用不会让其他设备打开摄像头。镜端保存后记住选择，取消保持原配置。旧 APK 需要更新到 0.3.2 或更新版本才支持后台入口。
 
 设备设置支持自动选择、实际摄像头列表和“重新检测”。列表使用 RTC 的真实设备 ID；自动选择优先系统确认的外接摄像头，再选后置、前置。选中后在设置内验证本地取景，保存后记住选择，取消保持原配置。生成或停止尚未结束时，先停止生成再切换摄像头。
 
@@ -25,6 +27,7 @@ debug 包只对默认域名信任随包 CA 公钥，不跳过 TLS 或主机名�
 ## 应用行为
 
 - 镜端沿用网页版的 9:16 品牌布局、Logo、舞台内按钮及左侧素材抽屉；后台皮肤和素材栏单／双列设置同步生效。自定义皮肤完整铺底，预览和生成视频按网页 cover 方式填满舞台。
+- 0.3.3 对齐网页 Logo 尺寸、品牌色、按钮图文居中和禁用状态；素材栏默认收起。等待摄像头时显示浅底素材海报，首帧就绪后展示取景。绑定、设备设置与远程摄像头检测使用统一样式，关闭弹窗或返回应用后恢复全屏。
 - 主画面保持原生摄像头和 XMAX SDK；安卓暂未接入网页手势识别，界面不展示虚假的识别状态。
 
 - 进入先准备本地摄像头并等待真实取景就绪，不申请临时 key，不创建云端生成任务。
@@ -52,6 +55,17 @@ sh scripts/test-native.sh
 输出 `app/build/outputs/apk/debug/app-debug.apk`，debug 签名由构建机的本地 keystore 决定；覆盖旧包需要相同签名。正式发布需另行配置长期签名。
 
 测试采用隔离 HTTP/HTTPS fixture 与假的供应商控制器，不访问真实后台或 XMAX、不消耗额度。覆盖 API 契约、DNS 备用地址与缓存、TLS 域名和证书校验、丢失响应不重复申请凭证、会话 metadata、生成顺序及取消/清理。本轮执行范围与验收边界见 `../../docs/OPTIMIZATION.md`。
+
+UI 验证使用独立 `uiPreview` 构建（包名后缀 `.uipreview`），没有网络或摄像头权限，也不包含真实应用入口；不会修改安装身份、绑定或后台数据。该测试入口不包含在交付的 debug APK 中。
+
+```sh
+sh scripts/build-local.sh assembleUiPreview --max-workers=2
+python3 scripts/capture-ui-preview.py --serial emulator-5580 \
+  --apk app/build/outputs/apk/uiPreview/app-uiPreview.apk \
+  --size 1080x1920 --output ../../output/android-ui-0.3.3/1080x1920 --web-reference
+```
+
+截图包含等待、取景、生成、暂停、恢复、素材栏、绑定和设置状态；摄像头与生成画面由本地静态图片替代。脚本会恢复临时修改的显示尺寸。实际大屏及 USB 摄像头效果仍须实机验收。
 
 ## SDK 来源与限制
 

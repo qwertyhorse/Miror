@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ExhibitionService } from '../server/exhibition.ts';
 import { TryOnService } from '../server/service.ts';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits.ts';
 import { SecretBox, SessionStore } from '../server/store.ts';
 import { ApiError, type IssuedKey, type KeyStatus, type Provider, type ProviderSessionStatus } from '../server/types.ts';
 
@@ -46,12 +47,13 @@ describe('manual stop races', () => {
     read.resolve(f.state('active', 2));
     expect(await polling).toMatchObject({ status: 'stopped', consumedCredits: 5 });
     expect(f.store.get(session.id)).toMatchObject({ status: 'stopped', consumedCredits: 5 });
-    expect(f.issue).toHaveBeenCalledTimes(1); expect(f.store.allocated()).toBe(30);
+    expect(f.issue).toHaveBeenCalledTimes(1); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('keeps an unconfirmed stop and its error through a delayed active reply, then accepts a manual retry', async () => {
     const f = fixture(); const session = await f.create(); f.exhibition.liveFirstFrame(session.id, 100);
-    const read = deferred<KeyStatus>(); f.provider.keyStatus = () => read.promise;
+    const read = deferred<KeyStatus>(); let reads = 0;
+    f.provider.keyStatus = () => ++reads === 1 ? read.promise : Promise.resolve(f.state('active', 2));
     const polling = f.service.get(session.id);
     f.revoke.mockRejectedValueOnce(new ApiError('ISOLATED_REVOKE_FAILURE', 'isolated failure', 502));
     f.exhibition.command({ action: 'end' }); await f.exhibition.reconcileLive();
@@ -62,7 +64,7 @@ describe('manual stop races', () => {
     f.exhibition.command({ action: 'end' }); await f.exhibition.reconcileLive();
     expect(f.store.get(session.id)).toMatchObject({ status: 'stopped', consumedCredits: 5 });
     expect(f.exhibition.get().live).toBeNull(); expect(f.revoke).toHaveBeenCalledTimes(2);
-    expect(f.store.allocated()).toBe(30); expect(f.issue).toHaveBeenCalledTimes(1);
+    expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.issue).toHaveBeenCalledTimes(1);
   });
 
   it('returns the latest stopped state when an earlier status request fails', async () => {
@@ -125,7 +127,7 @@ describe('manual stop races', () => {
     await expect(creating).rejects.toMatchObject({ code: 'SESSION_CANCELLED' });
     expect(f.revoke).toHaveBeenCalledWith('tk-isolated-late-stop-race');
     expect(f.store.get(id).status).toBe('stopped'); expect(f.exhibition.get().live).toBeNull();
-    expect(f.issue).toHaveBeenCalledTimes(1); expect(f.store.allocated()).toBe(30);
+    expect(f.issue).toHaveBeenCalledTimes(1); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('does not turn failed unknown issuance into an apparently revocable session on manual end', async () => {
@@ -139,7 +141,7 @@ describe('manual stop races', () => {
       expect(await f.service.stop(id)).toMatchObject({ status: 'issuance_unknown', errorCode: 'PROVIDER_NETWORK_ERROR' });
       expect(f.exhibition.get()).toMatchObject({ phase: 'select', live: { sessionId: id, status: 'error', localEnded: true, error: '本地体验已结束，云端凭证状态待确认。' } });
     }
-    expect(f.revoke).not.toHaveBeenCalled(); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(30);
+    expect(f.revoke).not.toHaveBeenCalled(); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('fences an old reconciliation, heartbeat and first frame after explicit local recovery', async () => {
@@ -148,8 +150,9 @@ describe('manual stop races', () => {
     f.exhibition.command({ action: 'end' }); await f.exhibition.reconcileLive();
     const ended = f.exhibition.get(); const lease = ended.live!; const record = f.store.get(lease.sessionId!);
     const read = deferred<ReturnType<TryOnService['public']>>();
-    vi.spyOn(f.service, 'get').mockImplementationOnce(() => read.promise);
+    const reading = vi.spyOn(f.service, 'get').mockImplementationOnce(() => read.promise);
     const reconciling = f.exhibition.reconcileLive();
+    await vi.waitFor(() => expect(reading).toHaveBeenCalled());
     const recovered = f.exhibition.command({ action: 'recover' });
     expect(recovered).toMatchObject({ phase: 'select', live: null, generationNumber: ended.generationNumber + 1 });
     const next = f.exhibition.command({ action: 'begin' });
@@ -159,9 +162,9 @@ describe('manual stop races', () => {
     await expect(f.exhibition.reportLiveError({ deviceId: lease.deviceId, sessionId: record.id, lookId: lease.lookId,
       sessionNumber: ended.sessionNumber, generationNumber: ended.generationNumber, message: 'isolated late error' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
     expect(f.exhibition.get()).toEqual(next); expect(f.store.get(record.id)).toEqual(record);
-    await expect(f.create()).rejects.toMatchObject({ code: 'EXHIBITION_LIVE_STOP_PENDING' });
+    await expect(f.create()).resolves.toMatchObject({ status: 'active' });
     expect(f.store.get(record.id)).toEqual(record);
-    expect(f.issue).toHaveBeenCalledTimes(1); expect(f.store.allocated()).toBe(30); expect(f.revoke).not.toHaveBeenCalled();
+    expect(f.issue).toHaveBeenCalledTimes(2); expect(f.store.allocated()).toBe(2 * CONTINUOUS_SEGMENT_CREDITS); expect(f.revoke).not.toHaveBeenCalled();
   });
 
   it('checks the cloud record before recovering a stored local-ended marker for a known token', async () => {
@@ -175,6 +178,6 @@ describe('manual stop races', () => {
     const before = loaded.get(); const record = f.store.get(session.id);
     expect(() => loaded.command({ action: 'recover' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_RECOVERY_UNAVAILABLE' }));
     expect(loaded.get()).toEqual(before); expect(f.store.get(session.id)).toEqual(record);
-    expect(f.revoke).toHaveBeenCalledOnce(); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(30);
+    expect(f.revoke).toHaveBeenCalledOnce(); expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 });

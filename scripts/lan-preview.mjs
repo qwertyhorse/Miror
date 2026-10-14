@@ -26,6 +26,10 @@ export function validateLanRequest(request, ip = null, websocket = false, { port
   if (!['/', '/__mirror_health', '/openbuy-local-ca.crt'].includes(parsed.path) && (!/^\/v1\.1(?:\/|$)/.test(parsed.path) || !/^\/v1\.1(?:\/|$)/.test(parsed.rawPath))) return { code: 404, message: '未找到智能镜页面。' };
   if (/^\/v1\.1\/api\/(?!exhibition(?:\/|$))/.test(parsed.path)) return { code: 404, message: '未找到智能镜接口。' };
   if (writing && /^\/v1\.1\/api\/exhibition\/mirrors\/[a-z0-9][a-z0-9-]{0,63}\/credentials(?:\/|$)/.test(parsed.path)) return { code: 403, message: '密钥请通过安全连接保存。' };
+  if (/^\/v1\.1\/api\/exhibition\/mirrors\/test-[a-f0-9-]{36}(?:\/|$)/.test(parsed.path)
+    || (writing && /^\/v1\.1\/api\/exhibition\/mirrors\/[a-z0-9][a-z0-9-]{0,63}\/browser-tests(?:\/|$)/.test(parsed.path))) {
+    return { code: 403, message: '请通过安全连接打开浏览器测试。' };
+  }
   return null;
 }
 

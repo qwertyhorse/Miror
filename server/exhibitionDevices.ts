@@ -163,6 +163,22 @@ export class ExhibitionDevices {
     this.cameras.delete(terminal.terminalId);
   }
 
+  /** The mirror registry is authoritative, including after an interrupted removal. */
+  retainMirrors(mirrorIds: ReadonlySet<string>): void {
+    if (!this.stored.terminals.some(terminal => terminal.mirrorId && !mirrorIds.has(terminal.mirrorId))) return;
+    const draft = structuredClone(this.stored);
+    for (const terminal of draft.terminals) if (terminal.mirrorId && !mirrorIds.has(terminal.mirrorId)) {
+      this.cameras.delete(terminal.terminalId);
+      terminal.mirrorId = null; terminal.boundAt = null; terminal.pairing = null;
+    }
+    try { this.commit(draft); }
+    catch {
+      // The primary registry already committed removal. Enforce it in memory;
+      // the next terminal write or startup reconciliation repairs the disk copy.
+      this.stored = draft;
+    }
+  }
+
   binding(mirrorId: string): ExhibitionDeviceBinding | null {
     const terminal = this.stored.terminals.find(item => item.mirrorId === mirrorId);
     if (!terminal) return null;

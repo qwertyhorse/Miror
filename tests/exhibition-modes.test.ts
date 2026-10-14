@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -189,7 +190,7 @@ describe('authoritative exhibition mode session snapshots', () => {
     expect(linked).toMatchObject({ referenceAsset: '', refImageUrl: '', referenceVersion: 0, providerSessionId: 'ums-free-prompt-only' });
     await live.firstFrame(session.id, 150); service.liveFirstFrame(session.id, 150);
     expect(service.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'commute' });
-    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('rejects missing references outside explicitly prompt-only Free sessions before reserving credits', async () => {
@@ -209,12 +210,12 @@ describe('authoritative exhibition mode session snapshots', () => {
     const session = await create(service, { mode: 'free', prompt: 'untrusted client prompt' });
     expect(session).toMatchObject({ sourceKind: mode === 'mox' ? 'photo' : 'camera', exhibition: { mode, prompt: exhibitionPromptForLook(service.get().looks[0]), mirrorId: 'default' } });
     expect(session.exhibition?.prompt).not.toBe('untrusted client prompt');
-    expect(store.get(session.id).exhibition).toEqual(session.exhibition); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(store.get(session.id).exhibition).toEqual(session.exhibition); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     await expect(live.link(session.id, `ums-${mode}`)).rejects.toMatchObject({ code: 'REFERENCE_NOT_READY' });
     await service.bindLiveReference(session.id, { deviceId: 'screen-mode-test', lookId: 'commute', refImageUrl: 'https://uploads.example/reference.webp' });
     await live.link(session.id, `ums-${mode}`); await live.firstFrame(session.id, 200); service.liveFirstFrame(session.id, 200);
     expect(service.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'commute' });
-    await live.link(session.id, `ums-${mode}`); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    await live.link(session.id, `ums-${mode}`); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('rejects a different-mode live material and empty modes without allocating credits', async () => {
@@ -238,6 +239,6 @@ describe('authoritative exhibition mode session snapshots', () => {
     provider.deactivate = async () => { throw new Error('stop pending'); };
     service.command({ action: 'end' }); await service.reconcileLive(); const before = service.get();
     expect(() => setMode(service, 'charx')).toThrow(code('EXHIBITION_MIRROR_BUSY')); expect(service.get()).toEqual(before);
-    expect(store.allocated()).toBe(60);
+    expect(store.allocated()).toBe(2 * CONTINUOUS_SEGMENT_CREDITS);
   });
 });

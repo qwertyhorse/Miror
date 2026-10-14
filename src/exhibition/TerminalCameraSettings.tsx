@@ -121,9 +121,9 @@ export function TerminalCameraEntry({ settings, busy, connected }: {
   settings: ReturnType<typeof useTerminalCameraRequest>; busy: boolean; connected: boolean;
 }) {
   const reason = !connected ? '镜端连接中断' : busy ? '结束体验后可切换' : '';
-  return <div className="ex-terminal-camera-entry"><button type="button" disabled={!settings.canOpen || !connected} onClick={() => void settings.open()}
-    aria-label="摄像头" aria-describedby={reason ? 'terminal-camera-reason' : undefined}><Camera size={18} />{settings.opening ? '正在打开…' : '摄像头'}</button>
-    {reason && <span id="terminal-camera-reason">{reason}</span>}
+  return <div className="ex-terminal-camera-entry" title={reason || '摄像头设置'}><button type="button" disabled={!settings.canOpen || !connected} onClick={() => void settings.open()}
+    aria-label="摄像头" aria-busy={settings.opening} aria-describedby={reason ? 'terminal-camera-reason' : undefined}><Camera size={18} aria-hidden="true" /><span className="ex-sr-only">{settings.opening ? '正在打开…' : '摄像头'}</span></button>
+    {reason && <span className="ex-sr-only" id="terminal-camera-reason">{reason}</span>}
     {settings.openError && <span className="ex-terminal-camera-entry-error" role="alert">{settings.openError}</span>}
   </div>;
 }
@@ -150,9 +150,9 @@ export function useTerminalCameraReport(terminal: TerminalBinding | undefined, m
   }, [bound, bindingId, mirrorId, live.opening, live.cameraError, live.cameraStream, live.cameras, live.selectedCameraId, terminal?.reportCamera]);
 }
 
-export function TerminalCameraSettings({ request, live, report = ignoreCameraReport, close, keepPreview = true }: { request: ExhibitionCameraRequest; live: ExhibitionLiveController;
-  report?: (value: ExhibitionCameraReport) => void; close: () => void; keepPreview?: boolean }) {
-  const previous = useRef({ stream: live.cameraStream, deviceId: live.selectedCameraId, preference: readCameraPreference() });
+export function TerminalCameraSettings({ request, live, report = ignoreCameraReport, close, keepPreview = true, cameraPreferenceScope }: { request: ExhibitionCameraRequest; live: ExhibitionLiveController;
+  report?: (value: ExhibitionCameraReport) => void; close: () => void; keepPreview?: boolean; cameraPreferenceScope?: string }) {
+  const previous = useRef({ stream: live.cameraStream, deviceId: live.selectedCameraId, preference: readCameraPreference(cameraPreferenceScope) });
   const current = useRef(live); current.current = live;
   const [devices, setDevices] = useState(() => cameraDevices(live.cameras));
   const [selected, setSelected] = useState(live.selectedCameraId || previous.current.preference?.deviceId || '');
@@ -228,7 +228,7 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
   };
   const save = () => {
     if (!previewReady || closing || completed.current) return;
-    try { saveCameraPreference({ deviceId: activeId, label: devices.find(device => device.id === activeId)?.label ?? '摄像头', profile: previous.current.preference?.profile ?? 'screen' }); }
+    try { saveCameraPreference({ deviceId: activeId, label: devices.find(device => device.id === activeId)?.label ?? '摄像头', profile: previous.current.preference?.profile ?? 'screen' }, cameraPreferenceScope); }
     catch { setError('无法保存摄像头选择，请允许浏览器保存网站数据。'); return; }
     completed.current = true; publish('closed', { error: undefined, activeDeviceId: keepPreview ? activeId || null : null });
     if (!keepPreview) current.current.stopCamera();

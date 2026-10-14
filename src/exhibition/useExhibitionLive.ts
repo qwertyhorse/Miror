@@ -660,7 +660,7 @@ function cameraFailureMessage(cause: unknown) {
   }
   return cause instanceof Error ? cause.message : '摄像头开启失败，请检查设备后重试。';
 }
-export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false, cameraSettingsOpen = false, onDiagnostic }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean; cameraSettingsOpen?: boolean; onDiagnostic?: (event: DiagnosticEventInput) => void }) {
+export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false, cameraSettingsOpen = false, cameraPreferenceScope, onDiagnostic }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean; cameraSettingsOpen?: boolean; cameraPreferenceScope?: string; onDiagnostic?: (event: DiagnosticEventInput) => void }) {
   const diagnosticCallback = useRef(onDiagnostic);
   diagnosticCallback.current = onDiagnostic;
   // Per mounted page instance: duplicate tabs must not inherit another screen's lease.
@@ -680,7 +680,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   const [mirrored, setMirrored] = useState(true);
   const [liveStatus, setLiveStatus] = useState<ExhibitionLiveStatus | null>(null);
   // Identity, rather than a revision or mirror string alone, also distinguishes A → B → A.
-  const identity = useMemo(() => ({ mirrorId }), [mirrorId]);
+  const identity = useMemo(() => ({ mirrorId, cameraPreferenceScope }), [mirrorId, cameraPreferenceScope]);
   const current = useRef({ state, active, refresh, identity, cameraSettingsOpen });
   current.current = { state, active, refresh, identity, cameraSettingsOpen };
   const camera = useRef<MediaStream | null>(null);
@@ -751,7 +751,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       // and release before a replacement can touch the physical camera.
       if (cameraCaptureFlight.current) await cameraCaptureFlight.current.catch(() => null);
       if (controller.signal.aborted || request !== cameraRequest.current) return false;
-      const preference = readCameraPreference();
+      const preference = readCameraPreference(owner.cameraPreferenceScope);
       const capture = acquireExhibitionCamera(cameraCaptureConstraints(cameraId, preference), controller.signal);
       cameraCaptureFlight.current = capture;
       let stream: MediaStream | null;

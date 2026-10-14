@@ -14,6 +14,7 @@
 .ex-mirror-placeholder>svg,.ex-mirror-empty>svg{width:6cqi;height:6cqi;stroke-width:1.2}
 .ex-mirror-placeholder small{font-size:2.5cqi;color:#a29ab4;line-height:1.5}
 .ex-mirror-footer{position:absolute;left:4.5%;right:4.5%;bottom:.4%;height:3.2%;display:flex;align-items:center;justify-content:center}
+.ex-mirror-footer-tools{display:flex;align-items:center;justify-content:center;gap:1.4cqi}
 .ex-mirror-gesture{display:flex;align-items:center;justify-content:center;gap:.7cqi;padding:.5cqi 1.4cqi;border:0;border-radius:1cqi;background:#ffffff80;color:#7966bc;font:inherit;font-size:1.8cqi;line-height:1.2;cursor:pointer}
 .ex-mirror-gesture>svg{width:2.3cqi;height:2.3cqi}
 .ex-mirror-gesture>i{width:.8cqi;height:.8cqi;border-radius:50%;background:#b7b0c5}

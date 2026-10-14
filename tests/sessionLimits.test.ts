@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { XmaxProvider } from '../server/provider';
-import { DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits } from '../shared/sessionLimits';
+import { DEFAULT_CREDENTIAL_LIMITS, DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits } from '../shared/sessionLimits';
 
 describe('session-limit boundary', () => {
-  it('preserves explicit settings and the default of an older mirror', () => {
-    expect(resolveSessionLimits(undefined)).toEqual(DEFAULT_SESSION_LIMITS);
+  it('defaults missing mirror settings to continuous while preserving explicit finite limits', () => {
+    expect(DEFAULT_SESSION_LIMITS).toEqual({ credits: null, expireSeconds: 120 });
+    expect(resolveSessionLimits(undefined)).toEqual({ credits: null, expireSeconds: 120 });
+    expect(DEFAULT_CREDENTIAL_LIMITS).toEqual({ credits: 30, expireSeconds: 120 });
     expect(resolveSessionLimits(undefined, { credits: 20, expireSeconds: 80 })).toEqual({ credits: 20, expireSeconds: 80 });
+    expect(resolveSessionLimits({ credits: 30, expireSeconds: 1 })).toEqual({ credits: 30, expireSeconds: 1 });
     expect(resolveSessionLimits({ credits: 3000, expireSeconds: 3600 })).toEqual({ credits: 3000, expireSeconds: 3600 });
   });
 

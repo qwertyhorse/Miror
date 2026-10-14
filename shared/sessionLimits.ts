@@ -12,7 +12,9 @@ export interface ExhibitionSessionLimits {
   expireSeconds: number;
 }
 
-export const DEFAULT_SESSION_LIMITS: Readonly<ExhibitionSessionLimits> = { credits: 30, expireSeconds: 120 };
+export const DEFAULT_SESSION_LIMITS: Readonly<ExhibitionSessionLimits> = { credits: null, expireSeconds: 120 };
+/** Numeric defaults for standalone credentials and the optional finite mode. */
+export const DEFAULT_CREDENTIAL_LIMITS: Readonly<{ credits: number; expireSeconds: number }> = { credits: 30, expireSeconds: 120 };
 
 export function isSessionLimits(value: unknown): value is ExhibitionSessionLimits {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;

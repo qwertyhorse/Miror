@@ -50,6 +50,7 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.3.3（version
 | GET | `/v1.1/api/exhibition/mirrors` | — | 200 `ExhibitionMirrorList` |
 | POST | `/v1.1/api/exhibition/mirrors` | `{ "name": "右侧智能镜" }` | 201 `ExhibitionMirrorSummary` |
 | PATCH | `M` | `{ "name": "入口智能镜" }` | 200 `ExhibitionMirrorSummary` |
+| DELETE | `M` | `{ "expectedRevision": 12 }` | 200 剩余设备的 `ExhibitionMirrorList` |
 | GET | `M` | — | 200 `ExhibitionState` |
 | GET | `M/changes?after={revision}` | — | 200 最新 `ExhibitionState`；相同版本等待变化，最多 8 秒 |
 | POST | `M/copy` | `{ "sourceMirrorId": "default", "copyLooks": true, "copySettings": true, "expectedRevision": 12 }` | 200 目标镜状态 |
@@ -61,6 +62,8 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.3.3（version
 | POST | `M/camera` | `{ "terminalId": "terminal-…", "action": "open" }` | 200 `ExhibitionCameraStatus` |
 
 名称为 1–40 字且不能重名。复制至少选择一种内容，目标镜应结束体验；复制素材会替换目标素材，并先保存备份，密钥、绑定、会话和日志不从来源镜复制。
+
+删除必须携带确认时的 `expectedRevision`。默认镜保留，返回 409 `EXHIBITION_DEFAULT_MIRROR`；体验、素材处理或云端会话未结束时返回 409 `EXHIBITION_MIRROR_BUSY`；版本变化时返回 409 `EXHIBITION_STALE_REVISION`。删除成功后解除镜端绑定，原镜编号及其素材、凭证等接口返回 404；原目录、SQLite 镜状态与事件、命令记录及会话记录保留用于恢复，不执行文件清除。 仅剩无临时凭证、有效期及供应商会话 ID 的历史签发未确认记录时，允许在本地体验结束后移除，历史状态保持不变；正在签发或仍需撤销的会话继续阻止删除。工作人员页面删除当前镜后切回默认镜，已绑定镜端重新进入配对流程。
 
 设备列表响应示例：
 
@@ -130,6 +133,20 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.3.3（version
 `POST M/camera` 只接受当前绑定终端的 `open` 操作，可选 `bindingId` 必须匹配当前绑定版本。返回的请求也会经该终端下次连接传递，包含编号、镜/终端/绑定标识及 120 秒有效期。重复点击复用未完成请求；离线、旧客户端、体验中或云端清理未完成时拒绝。有效检测请求阻止开始/恢复体验与签发实时会话，关闭、失败、忙碌或到期后解除；客户端也在面板打开期间阻止生成。请求与检测快照不写入永久设备配置，重启或重新绑定后不重放，须重新检测。旧版 Android 需升级到 0.3.2 才支持此入口。
 
 独立 `camera-check.html` 仍用于打开该页面的本机检测，不作为后台远程检测的替代入口。
+
+## 独立浏览器测试
+
+后台的「浏览器测试」在同主机 HTTPS 10202 新开测试页，使用所选镜的素材、设置及 XMAX 区域与凭据快照。测试具有独立 `test-UUID` 状态和素材目录，不进入正式设备列表，也不修改真机绑定、体验状态或素材。页面准备电脑摄像头取景，点击「开始体验」后才签发临时凭证并生成。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| POST | `M/browser-tests` | 创建测试，返回 `{ mirror, expiresAt }`，不返回 SK 或测试授权令牌 |
+| GET | `/mirrors/:testId/browser-test` | 恢复当前浏览器的测试页面 |
+| POST | `/mirrors/:testId/browser-test/close` | 结束测试，停止临时凭证；未确认停止时可重试 |
+
+创建和测试 API 仅经 HTTPS 使用。授权保存在限定测试路径的 `Secure; HttpOnly; SameSite=Strict` Cookie 中；测试页不读写正式镜端身份。素材预取、会话创建、连续续接和结束沿用现有协议，但所有资源和会话都限定当前测试编号。测试不能修改密钥、绑定、正式素材或设备配置。
+
+测试有效期 1 小时，同时最多保留 8 个未结束测试。关闭浏览器后的实时连接由现有心跳超时停止；连续 60 秒无有效 API 访问时回收测试，到期或主动结束同样撤销凭证。撤销未确认时保留记录并继续重试，服务重启不恢复测试体验。测试与真机共享来源 SK 的实际云端额度及供应商并发限制。
 
 ## 镜状态与操作
 
@@ -213,7 +230,7 @@ if (!response.ok) throw new Error(next.message);
 | `gestureRecognition` | 下面的完整识别对象；仅待机/选材且 `live=null` 时可改 |
 | `sessionLimits` | 完整对象 `{ "credits": 30, "expireSeconds": 120 }`；积分 1–1000000 或 `null` 表示不限，有效期 1–86400 秒（不限时至少 60 秒），数值均为整数；仅待机/选材且 `live=null` 时可改 |
 
-单轮限制按镜保存，默认 30 credits / 120 秒。旧配置没有此字段时沿用服务端默认值；状态中的 `settings.sessionLimits` 返回当前镜的设置。复制设备设置包含这项限制。保存只影响随后签发的临时凭证，不修改已签发凭证；`live/session` 只读取服务器保存的限制，客户端请求里的积分或有效期不能覆盖。
+会话额度按镜保存，默认选择「无限制（自动续接）」；默认每段有效期 120 秒。旧配置没有此字段时同样使用自动续接，有效期沿用服务端配置且至少 60 秒；已保存的指定额度和有效期原样保留。状态中的 `settings.sessionLimits` 返回当前镜的设置。复制设备设置包含这项限制。保存只影响随后签发的临时凭证，不修改已签发凭证；`live/session` 只读取服务器保存的限制，客户端请求里的积分或有效期不能覆盖。
 
 `credits: null` 表示体验不限积分、自动分段续接，默认仍使用有限模式。每段签发 3000 credits 的可撤销临时凭证，有效期使用本镜 `expireSeconds`；不向 XMAX 发送 `null` 或伪造“无限”值。`live/status.perSessionLimit` 与 `credentials.perSessionLimit` 在不限模式返回每段实际的 3000。签发结果 `exhibition.continuous=true` 冻结该段的续接模式。不限体验运行期间不因 `autoReturnSeconds` 无操作返回待机；手动结束仍会结束体验。连接错误或心跳失联先停止当前段，再按协议 2 的恢复规则处理。
 
@@ -261,6 +278,7 @@ if (!response.ok) throw new Error(next.message);
 | 方法 | 路径 | 请求体 | 成功响应 |
 | --- | --- | --- | --- |
 | POST | `M/looks` | 素材元信息 + `imageBase64` + `referenceImageBase64` | 201 完整镜状态 |
+| POST | `M/looks/copy` | `{ "sourceMirrorId": "default", "sourceLookId": "commute", "mode": "clothx", "expectedRevision": 12, "prompt": "可选 Free 提示词" }` | 200 目标镜完整状态 |
 | PATCH | `M/looks/{lookId}` | 要修改的元信息、可选 `imageBase64` / `referenceImageBase64` + `expectedRevision` | 200 完整镜状态 |
 | DELETE | `M/looks/{lookId}` | `{ "expectedRevision": 12 }` | 200 完整镜状态 |
 | GET / HEAD | `M/assets/{uploadId}` | — | 200 `image/webp` |
@@ -269,6 +287,10 @@ if (!response.ok) throw new Error(next.message);
 | POST | `M/skin` | `{ "imageBase64": "…", "expectedRevision": 12 }` | 200 完整镜状态 |
 | DELETE | `M/skin` | `{ "expectedRevision": 12 }` | 200 完整镜状态，恢复默认皮肤 |
 | GET / HEAD | `M/skin/{skinId}` | — | 200 `image/webp` |
+
+`POST M/looks/copy` 的 `M` 是目标智能镜，允许复制到同镜或另一台镜的六种模式分组。追加一个新 ID 的独立素材，保留名称、双图、启用状态，合并所需分类和标签；不替换目标素材或设置，不切换当前体验模式或已有选择。空分组首次收到启用素材时建立初始选择，但不开始体验。来源素材和图片在请求开始时取快照；来源正在体验仍可复制。
+
+目标须处于 idle/select、无实时会话或素材处理，并携带目标最新 `expectedRevision`。解码期间版本变化则返回 409，复制失败不写入部分素材。图片遵守目标上传限制；库最多 100 条，分类/标签分别最多 40/80 个。Free 目标使用 `prompt`，来源已是 Free 时可省略以沿用原词；无参考图的 Free 素材仅能复制到 Free。样例图会保存为目标独立 WebP，重复复制产生独立副本。
 
 素材上传 JSON 示例，两种图片字段均应换成完整图片的 base64 或 data URL：
 

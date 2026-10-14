@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -41,7 +42,8 @@ async function create(exhibition: ExhibitionService) { return exhibition.createL
 describe('explicit exhibition XMAX path', () => {
   it('requires explicit live mode and rejects main-site session APIs without allocating credentials', async () => {
     const { exhibition, service, issue, store } = fixture();
-    expect(exhibition.liveStatus()).toMatchObject({ mode: 'demo', configured: true, perSessionLimit: 30, live: null });
+    expect(exhibition.get().settings.sessionLimits).toEqual({ credits: null, expireSeconds: 120 });
+    expect(exhibition.liveStatus()).toMatchObject({ mode: 'demo', configured: true, perSessionLimit: CONTINUOUS_SEGMENT_CREDITS, live: null });
     for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(exhibition.liveStatus()).not.toHaveProperty(field);
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_LIVE_DISABLED' });
     exhibition.command({ action: 'configure', providerMode: 'xmax' });
@@ -72,8 +74,8 @@ describe('explicit exhibition XMAX path', () => {
     expect(exhibition.get()).toEqual(started); expect(issue).not.toHaveBeenCalled();
     await expect(exhibition.createLiveSession({ deviceId, lookId: 'city', generationNumber: exhibition.get().generationNumber })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_LOOK' });
     const session = await create(exhibition);
-    expect(session).toMatchObject({ model: 'x2.0', referenceAsset: '/assets/exhibition/commute-cutout.png', refImageUrl: '', sourceKind: 'camera', pointsLimit: 30, exhibition: { lookId: 'commute', deviceId, sessionNumber: 1 } });
-    expect(issue).toHaveBeenCalledWith(30, 120); expect(store.allocated()).toBe(30);
+    expect(session).toMatchObject({ model: 'x2.0', referenceAsset: '/assets/exhibition/commute-cutout.png', refImageUrl: '', sourceKind: 'camera', pointsLimit: CONTINUOUS_SEGMENT_CREDITS, exhibition: { lookId: 'commute', deviceId, sessionNumber: 1, continuous: true } });
+    expect(issue).toHaveBeenCalledWith(CONTINUOUS_SEGMENT_CREDITS, 120); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     expect(JSON.stringify(exhibition.get())).not.toContain(session.token); expect(readFileSync(join(directory, 'exhibition.json'), 'utf8')).not.toContain(session.token);
     advance(5000); expect(exhibition.get().phase).toBe('generating');
     await expect(service.link(session.id, 'ums-test')).rejects.toMatchObject({ code: 'REFERENCE_NOT_READY' });
@@ -87,7 +89,7 @@ describe('explicit exhibition XMAX path', () => {
     const results = await Promise.allSettled([create(exhibition), exhibition.createLiveSession({ deviceId: 'screen-test-002', lookId: 'commute', generationNumber: exhibition.get().generationNumber }), create(exhibition)]);
     expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
     expect(results.filter(result => result.status === 'rejected').map(result => result.reason.code)).toEqual(['EXHIBITION_DEVICE_BUSY', 'EXHIBITION_DEVICE_BUSY']);
-    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('appends during live first-frame and heartbeat updates without replacing or extending the active session', async () => {
@@ -108,12 +110,12 @@ describe('explicit exhibition XMAX path', () => {
     expect(visitor).toEqual(expectedVisitor); expect(appended.looks).toHaveLength(4);
     expect(appended.enabledLookIds).not.toContain(appended.looks.at(-1)!.id);
     expect(store.get(session.id)).toEqual(activeRecord); expect(store.list()).toHaveLength(1);
-    expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled(); expect(store.allocated()).toBe(30);
+    expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled(); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     advance(14000); const another = await exhibition.upload({ ...input, name: '继续上传' });
     expect(another.live).toEqual(latest.live); expect(store.get(session.id).expiresAt).toBe(session.expiresAt);
     advance(6000); await exhibition.sweepLive();
     expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
-    expect(deactivate).toHaveBeenCalledTimes(1); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(deactivate).toHaveBeenCalledTimes(1); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('checks reference and heartbeat ownership, rejects private reference addresses, and locks an accepted reference', async () => {
@@ -133,7 +135,7 @@ describe('explicit exhibition XMAX path', () => {
     expect(deactivate).toHaveBeenCalledWith(session.token); expect(store.get(session.id).status).toBe('stopped');
     expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
-    exhibition.command({ action: 'resume' }); await create(exhibition); expect(store.allocated()).toBe(60);
+    exhibition.command({ action: 'resume' }); await create(exhibition); expect(store.allocated()).toBe(2 * CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('stops paused/ended/idle/replaced sessions, and permits the new outfit only after the old key stops', async () => {
@@ -146,7 +148,7 @@ describe('explicit exhibition XMAX path', () => {
     exhibition.command({ action: 'end' }); await exhibition.reconcileLive(); expect(exhibition.get()).toMatchObject({ phase: 'select', live: null });
     exhibition.command({ action: 'begin' }); session = await create(exhibition);
     exhibition.command({ action: 'idle' }); await exhibition.reconcileLive(); expect(exhibition.get()).toMatchObject({ phase: 'idle', live: null });
-    expect(deactivate).toHaveBeenCalledTimes(4); expect(store.allocated()).toBe(120);
+    expect(deactivate).toHaveBeenCalledTimes(4); expect(store.allocated()).toBe(4 * CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('switches a running camera outfit in the same experience and requires a current condition acknowledgement', async () => {
@@ -158,7 +160,7 @@ describe('explicit exhibition XMAX path', () => {
     const showcased = exhibition.get();
     expect(exhibition.command({ action: 'switch', lookId: 'commute' })).toEqual(showcased);
     await exhibition.reconcileLive();
-    expect(deactivate).not.toHaveBeenCalled(); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(deactivate).not.toHaveBeenCalled(); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
 
     const switching = exhibition.command({ action: 'switch', lookId: 'evening', expectedRevision: showcased.revision });
     expect(switching).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute',
@@ -170,7 +172,7 @@ describe('explicit exhibition XMAX path', () => {
     await exhibition.reconcileLive();
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_DEVICE_BUSY' });
     expect(deactivate).not.toHaveBeenCalled(); expect(store.get(previous.id).status).toBe('active');
-    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     advance(5_000); exhibition.liveFirstFrame(previous.id, 300);
     expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute', live: { sessionId: previous.id } });
     const intent = { deviceId, lookId: 'evening', sessionNumber: switching.sessionNumber, generationNumber: switching.generationNumber };
@@ -192,7 +194,7 @@ describe('explicit exhibition XMAX path', () => {
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_DEVICE_BUSY' });
     expect(exhibition.get()).toMatchObject({ phase: 'generating', selectedLookId: 'evening', displayedLookId: 'commute',
       live: { sessionId: previous.id, status: 'error' } });
-    expect(store.get(previous.id).status).toBe('stopping'); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
+    expect(store.get(previous.id).status).toBe('stopping'); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('retains ownership and allocation when stop is not confirmed, preventing a second screen from charging', async () => {
@@ -202,7 +204,7 @@ describe('explicit exhibition XMAX path', () => {
     expect(exhibition.get().live).toMatchObject({ status: 'error', sessionId: session.id }); expect(store.get(session.id).status).toBe('stopping');
     expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
     await expect(exhibition.createLiveSession({ deviceId: 'screen-test-002', lookId: 'commute', generationNumber: exhibition.get().generationNumber })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
-    expect(store.allocated()).toBe(30);
+    expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('revokes late credentials when the visitor ends during issuance', async () => {
@@ -217,8 +219,9 @@ describe('explicit exhibition XMAX path', () => {
     expect(deactivate).toHaveBeenCalledWith('tk-late'); expect(store.list()[0].status).toBe('stopped'); expect(exhibition.get().live).toBeNull();
   });
 
-  it('continues exhibition sessions beyond the ordinary local test limit without resetting history', async () => {
-    const { exhibition, store, issue } = fixture(); start(exhibition);
+  it('continues explicitly finite sessions beyond the former local test limit without resetting history', async () => {
+    const { exhibition, store, issue } = fixture();
+    exhibition.command({ action: 'configure', sessionLimits: { credits: 30, expireSeconds: 120 } }); start(exhibition);
     const sessions: string[] = [];
     for (let index = 0; index < 13; index++) {
       const session = await create(exhibition); sessions.push(session.id);
@@ -235,11 +238,11 @@ describe('explicit exhibition XMAX path', () => {
   it('retains unknown issuance records and ownership without claiming cloud revocation', async () => {
     const ambiguous = fixture(); start(ambiguous.exhibition); ambiguous.provider.issueKey = async () => { throw new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502); };
     await expect(create(ambiguous.exhibition)).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
-    expect(ambiguous.store.allocated()).toBe(30); expect(ambiguous.exhibition.get().live).not.toBeNull(); expect(ambiguous.store.list()[0].status).toBe('issuance_unknown');
+    expect(ambiguous.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(ambiguous.exhibition.get().live).not.toBeNull(); expect(ambiguous.store.list()[0].status).toBe('issuance_unknown');
     const before = ambiguous.store.list()[0];
     await ambiguous.service.stop(before.id); await ambiguous.service.recover();
     expect(ambiguous.store.get(before.id)).toEqual(before); expect(ambiguous.store.list()).toHaveLength(1);
-    expect(ambiguous.store.allocated()).toBe(30); expect(ambiguous.deactivate).not.toHaveBeenCalled();
+    expect(ambiguous.store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(ambiguous.deactivate).not.toHaveBeenCalled();
   });
 
   it('pauses unknown issuance once and retains its lease and allocation through repeated sweeps', async () => {
@@ -257,7 +260,7 @@ describe('explicit exhibition XMAX path', () => {
     for (let index = 0; index < 5; index++) { advance(20_000); await exhibition.sweepLive(); }
     expect(exhibition.get()).toEqual(stoppedAttempt);
     expect(store.get(id)).toMatchObject({ status: 'issuance_unknown', errorCode: 'PROVIDER_NETWORK_ERROR' });
-    expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
+    expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
   });
 
   it('keeps repeated known-key stop errors stable while allowing revocation to be retried', async () => {
@@ -266,7 +269,7 @@ describe('explicit exhibition XMAX path', () => {
     exhibition.command({ action: 'end' }); await exhibition.reconcileLive(); const failed = exhibition.get();
     for (let index = 0; index < 5; index++) { advance(20_000); await exhibition.sweepLive(); }
     expect(exhibition.get()).toEqual(failed); expect(deactivate).toHaveBeenCalledTimes(6);
-    expect(store.get(session.id).status).toBe('stopping'); expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce();
+    expect(store.get(session.id).status).toBe('stopping'); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(issue).toHaveBeenCalledOnce();
     deactivate.mockResolvedValueOnce({ status: 'inactive', consumedCredit: 1, expireTimestamp: session.expiresAt! });
     await exhibition.sweepLive();
     expect(exhibition.get()).toMatchObject({ phase: 'select', live: null });
@@ -286,7 +289,7 @@ describe('explicit exhibition XMAX path', () => {
       await exhibition.reconcileLive(); expect(deactivate).toHaveBeenCalledTimes(2);
     }
     expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
-    expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce();
+    expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(issue).toHaveBeenCalledOnce();
   });
 
   it.each(['true', 1, null, {}])('rejects an invalid stored local-ended marker %j without changing the cloud guard', async localEnded => {
@@ -299,7 +302,7 @@ describe('explicit exhibition XMAX path', () => {
     store.saveMirrorState('default', invalid, { type: 'fixture-corruption' });
     expect(() => new ExhibitionService(directory, { now, strictStorage: true }).attachLiveService(service)).toThrow('Invalid durable mirror state');
     expect(store.mirrorState('default')).toEqual(invalid);
-    expect(store.get(record.id)).toEqual(record); expect(store.allocated()).toBe(30);
+    expect(store.get(record.id)).toEqual(record); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
   });
 
@@ -307,7 +310,7 @@ describe('explicit exhibition XMAX path', () => {
     const { exhibition, service, directory, now, store } = fixture(); start(exhibition); const session = await create(exhibition);
     const recovered = new ExhibitionService(directory, { now }); recovered.attachLiveService(service); await service.recover(); await recovered.sweepLive();
     expect(recovered.get()).toMatchObject({ providerMode: 'xmax', phase: 'select', live: null, enabledLookIds: ['commute', 'city', 'evening'] });
-    expect(recovered.get().looks).toHaveLength(3); expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(30);
+    expect(recovered.get().looks).toHaveLength(3); expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('distinguishes rapid pause/resume generations so an old frame or error cannot complete the new attempt', async () => {
@@ -356,7 +359,7 @@ describe('explicit exhibition XMAX path', () => {
     expect(revoke).toHaveBeenCalledTimes(1); finishLink();
     await expect(linking).rejects.toMatchObject({ code: 'SESSION_INACTIVE' });
     finishStop(); await Promise.all([stopA, stopB]);
-    expect(store.get(session.id).providerSessionId).toBeUndefined(); expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(30);
+    expect(store.get(session.id).providerSessionId).toBeUndefined(); expect(store.get(session.id).status).toBe('stopped'); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('revokes late issuance after client request cancellation without charging an automatic retry', async () => {
@@ -368,7 +371,7 @@ describe('explicit exhibition XMAX path', () => {
     const issued = { token: 'tk-cancelled', expiresAt: new Date(Date.now() + 120000).toISOString() };
     keys.set(issued.token, { status: 'active', consumedCredit: 0, expireTimestamp: issued.expiresAt }); finish(issued);
     await expect(pending).rejects.toMatchObject({ code: 'SESSION_CANCELLED' });
-    expect(deactivate).toHaveBeenCalledWith(issued.token); expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null }); expect(store.allocated()).toBe(30);
+    expect(deactivate).toHaveBeenCalledWith(issued.token); expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null }); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('handles device errors without automatic retry and rejects stale error reports', async () => {
@@ -395,7 +398,7 @@ describe('live HTTP integration uses mock provider only', () => {
     };
     try {
       const before = await fetch(base + mirrorPath + '/live/status'); const status = await before.json();
-      expect(status).toMatchObject({ mode: 'demo', perSessionLimit: 30 });
+      expect(status).toMatchObject({ mode: 'demo', perSessionLimit: CONTINUOUS_SEGMENT_CREDITS });
       for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(status).not.toHaveProperty(field);
       await post(mirrorPath + '/command', { action: 'configure', providerMode: 'xmax' });
       expect(await post(mirrorPath + '/command', { action: 'begin' })).toMatchObject({ phase: 'generating', sessionNumber: 1, generationNumber: 1, generationReadyAt: null });

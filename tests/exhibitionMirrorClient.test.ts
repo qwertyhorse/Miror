@@ -24,6 +24,50 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { clients.splice(0).forEach(value => value.stop()); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('mirror-scoped exhibition client', () => {
+  it('copies one material to the target client without changing the source client', async () => {
+    const copied = state('west', 6);
+    copied.looks.push({ ...copied.looks[0], id: 'upload-independent', mode: 'free', prompt: '彩虹背景', source: 'upload' });
+    const fetcher = vi.fn(async (url: string) => response(url.endsWith('/looks/copy') ? copied : state(url.endsWith('/east') ? 'east' : 'west', 5)));
+    vi.stubGlobal('fetch', fetcher);
+    const east = client('east'); const west = client('west'); east.start(); west.start(); await flush();
+    const sourceBefore = east.getSnapshot().state;
+    const input = { sourceMirrorId: 'east', sourceLookId: 'commute', mode: 'free' as const, prompt: '彩虹背景', expectedRevision: 5 };
+    expect(await west.copyLook(input)).toEqual({ lookId: 'upload-independent', index: 1 });
+    const [url, init] = fetcher.mock.calls.at(-1)! as unknown as [string, RequestInit];
+    expect(url).toBe(appUrl(`/api${exhibitionApiPath('looks/copy', 'west')}`));
+    expect(init.method).toBe('POST'); expect(JSON.parse(init.body as string)).toEqual(input);
+    expect(west.getSnapshot().state).toEqual(copied);
+    expect(east.getSnapshot().state).toBe(sourceBefore);
+  });
+
+  it('does not retry a stale material copy and keeps its frozen target revision', async () => {
+    const fetcher = vi.fn(async (url: string) => url.endsWith('/looks/copy')
+      ? response({ code: 'EXHIBITION_STALE_REVISION' }, 409) : response(state('west', 8)));
+    vi.stubGlobal('fetch', fetcher);
+    const west = client('west'); west.start(); await flush();
+    expect(await west.copyLook({ sourceMirrorId: 'east', sourceLookId: 'commute', mode: 'clothx', expectedRevision: 5 })).toBeNull();
+    const mutations = fetcher.mock.calls.filter(([url]) => url.endsWith('/looks/copy')) as unknown as [string, RequestInit][];
+    expect(mutations).toHaveLength(1);
+    expect(JSON.parse(mutations[0][1].body as string).expectedRevision).toBe(5);
+    expect(west.getSnapshot()).toMatchObject({ pending: false, state: { revision: 8 }, error: '目标智能镜已更新，请刷新并核对后再复制。' });
+  });
+
+  it('allows a long material copy, rejects double submission and ignores its response after switching target', async () => {
+    const copying = deferred<Response>();
+    const fetcher = vi.fn((url: string) => url.endsWith('/looks/copy') ? copying.promise : Promise.resolve(response(state('west', 5))));
+    vi.stubGlobal('fetch', fetcher);
+    const west = client('west'); west.start(); await flush();
+    const input = { sourceMirrorId: 'east', sourceLookId: 'commute', mode: 'clothx' as const, expectedRevision: 5 };
+    const saving = west.copyLook(input);
+    const signal = (fetcher.mock.calls.at(-1)! as unknown as [string, RequestInit])[1].signal!;
+    expect(await west.copyLook(input)).toBeNull();
+    await vi.advanceTimersByTimeAsync(6000); expect(signal.aborted).toBe(false);
+    west.stop(); expect(signal.aborted).toBe(true);
+    copying.resolve(response(state('west', 6))); expect(await saving).toBeNull();
+    expect(west.getSnapshot().state?.revision).toBe(5);
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/looks/copy'))).toHaveLength(1);
+  });
+
   it('binds every mutation and copy to its initiating mirror and retains revision checks', async () => {
     let revision = 3;
     const fetcher = vi.fn(async () => response(state('east', revision++)));

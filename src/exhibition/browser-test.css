@@ -1,0 +1,6 @@
+.ex-browser-test-bar{position:fixed;z-index:20;top:12px;right:12px;display:flex;align-items:center;gap:14px;padding:8px 10px;border:1px solid #e4dcf2;border-radius:10px;background:rgba(255,255,255,.94);box-shadow:0 3px 18px #30205b0a;color:#79669a;font-size:12px}
+.ex-browser-test-bar>span,.ex-browser-test-bar>button{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.ex-browser-test-bar>button{padding:7px 9px;border:1px solid #ded3ef;border-radius:7px;background:#f8f5ff;color:#7459b4;font:inherit;cursor:pointer}
+.ex-browser-test-bar>button:focus-visible{outline:2px solid #8e70db;outline-offset:3px}
+.ex-browser-test-message h1{font-size:24px}
+@media(max-width:600px){.ex-browser-test-bar{top:8px;right:8px;padding:5px 7px;gap:9px;font-size:11px}}

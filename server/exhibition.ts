@@ -4,14 +4,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import sharp, { type OutputInfo } from 'sharp';
-import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECONDS, EXHIBITION_AUTO_SWITCH_MIN_SECONDS, EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, EXHIBITION_LOOK_IDS, EXHIBITION_UI_SKIN_PRESETS, exhibitionPromptForLook, exhibitionReferenceImage, type ExhibitionImageInfo, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionPhase, type ExhibitionState, type ExhibitionUploadLimits, type ExhibitionLiveStatus, type ExhibitionUiSkin, type ExhibitionUiSkinPreset } from '../shared/exhibition.ts';
+import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECONDS, EXHIBITION_AUTO_SWITCH_MIN_SECONDS, EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, EXHIBITION_LOOK_IDS, EXHIBITION_UI_SKIN_PRESETS, exhibitionPromptForLook, exhibitionReferenceImage, type ExhibitionImageInfo, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionLookCopyInput, type ExhibitionPhase, type ExhibitionState, type ExhibitionUploadLimits, type ExhibitionLiveStatus, type ExhibitionUiSkin, type ExhibitionUiSkinPreset } from '../shared/exhibition.ts';
 import { ApiError, type SessionRecord } from './types.ts';
 import type { TryOnService } from './service.ts';
 import { ExhibitionSkinStore } from './exhibitionSkin.ts';
 import { isExhibitionGestureSettings, resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
 import type { ReferencePreparationStatus } from '../shared/referencePreparation.ts';
 import { EXHIBITION_DEFAULT_UPLOAD_LIMITS } from '../shared/exhibition.ts';
-import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
+import { CONTINUOUS_MIN_EXPIRY_SECONDS, CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
 const GENERATION_DELAY_MS = 2_200;
 const HEARTBEAT_TIMEOUT_MS = LEASE_TTL_MS;
@@ -52,7 +52,7 @@ function checkPreparedImage(image: PreparedImage, limits: ExhibitionUploadLimits
     throw new ApiError('EXHIBITION_UPLOAD_RULES_CHANGED', `上传限制已更新：宽 ${limits.minWidth}–${limits.maxWidth} px，高 ${limits.minHeight}–${limits.maxHeight} px。请重新选择图片。`, 409);
   }
 }
-async function prepareImage(value: unknown, limits: ExhibitionUploadLimits, label: string): Promise<PreparedImage> {
+async function prepareImage(value: unknown, limits: ExhibitionUploadLimits, label: string, preserveWebp = false): Promise<PreparedImage> {
   try {
     if (typeof value !== 'string') throw new ApiError('EXHIBITION_INVALID_IMAGE', '请选择 PNG、JPEG 或 WebP 图片。');
     let encoded = value;
@@ -87,6 +87,9 @@ async function prepareImage(value: unknown, limits: ExhibitionUploadLimits, labe
         throw new ApiError('EXHIBITION_INVALID_DIMENSIONS', `图片宽度需为 ${limits.minWidth}–${limits.maxWidth} px，高度需为 ${limits.minHeight}–${limits.maxHeight} px，且总像素不超过 3200 万。`);
       }
       normalized = await decoder.rotate().webp({ quality: 95, effort: 3 }).toBuffer({ resolveWithObject: true });
+      // A copy still fully decodes and validates the image, but an already
+      // normalized WebP keeps its original bytes to avoid repeated lossy encoding.
+      if (preserveWebp && metadata.format === 'webp' && (!metadata.orientation || metadata.orientation === 1)) normalized.data = bytes;
     } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片无法完整解码，可能已损坏、格式不支持或总像素过大。');
@@ -255,6 +258,8 @@ export class ExhibitionService {
   private readonly now: () => number;
   private stored: StoredExhibition;
   private uploadsInProgress = 0;
+  private preparationsInProgress = 0;
+  private removed = false;
   private liveService?: TryOnService;
   private durable = false;
   private activeCommand?: { id: string; fingerprint: string };
@@ -311,12 +316,34 @@ export class ExhibitionService {
     } else this.commit(this.stored, '局域网交互演示已就绪，未连接 XMAX 或摄像头。', time);
   }
 
-  read(): ExhibitionState { return this.snapshotState(); }
+  read(): ExhibitionState { this.assertPresent(); return this.snapshotState(); }
   get(): ExhibitionState { this.tick(); return this.snapshotState(); }
+  assertRemovable(input: unknown): void {
+    this.tick();
+    if (!isRecord(input) || !isNonnegativeInteger(input.expectedRevision)) throw new ApiError('EXHIBITION_INVALID_REVISION', '请刷新设备后重试。');
+    this.checkRevision(input.expectedRevision);
+    // Only tokenless historical unknown issuance may be archived unchanged.
+    // Current ownership, pending issuance and any revocable credential still block.
+    const unsettledSession = this.liveService?.hasBlockingMirrorSessions(this.mirrorId);
+    if (!['idle', 'select'].includes(this.stored.state.phase) || this.stored.state.live
+      || ['active', 'paused'].includes(this.stored.state.lifecycle?.state ?? '') || this.stored.state.lifecycle?.connection === 'cleaning'
+      || this.uploadsInProgress > 0 || this.preparationsInProgress > 0 || unsettledSession) {
+      throw new ApiError('EXHIBITION_MIRROR_BUSY', '请先结束体验，等待会话停止及素材处理完成后再删除。', 409);
+    }
+  }
+  markRemoved(): void {
+    this.removed = true;
+    for (const notify of this.changes) { try { notify(); } catch { /* Removal remains committed if a subscriber has closed. */ } }
+    this.changes.clear();
+  }
+  private assertPresent(): void {
+    if (this.removed) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这台智能镜，请重新选择设备。', 404);
+  }
   sessionLimits(): ExhibitionSessionLimits {
     return resolveSessionLimits(this.stored.state.settings.sessionLimits, {
-      credits: this.liveService && 'perSessionLimit' in this.liveService ? this.liveService.perSessionLimit : DEFAULT_SESSION_LIMITS.credits,
-      expireSeconds: this.liveService && 'expireSeconds' in this.liveService ? this.liveService.expireSeconds : DEFAULT_SESSION_LIMITS.expireSeconds,
+      credits: DEFAULT_SESSION_LIMITS.credits,
+      expireSeconds: Math.max(CONTINUOUS_MIN_EXPIRY_SECONDS,
+        this.liveService && 'expireSeconds' in this.liveService ? this.liveService.expireSeconds : DEFAULT_SESSION_LIMITS.expireSeconds),
     });
   }
   credentialLimits(): { credits: number; expireSeconds: number } {
@@ -334,6 +361,7 @@ export class ExhibitionService {
   }
 
   attachLiveService(service: TryOnService) {
+    this.assertPresent();
     if (this.liveService === service) return;
     this.liveService = service;
     const store = 'options' in service ? service.options?.store : undefined;
@@ -362,6 +390,7 @@ export class ExhibitionService {
 
 
   private referenceSource(lookId: string) {
+    this.assertPresent();
     const look = this.stored.state.looks.find(item => item.id === lookId);
     if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
     const image = exhibitionReferenceImage(look);
@@ -375,8 +404,11 @@ export class ExhibitionService {
     let source: ReturnType<ExhibitionService['referenceSource']>;
     try { source = this.referenceSource(lookId); }
     catch (error) { if (this.stored.state.looks.some(look => look.id === lookId)) this.referenceSourceUnavailable(lookId); throw error; }
-    if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime);
-    return this.readyReference(lookId); // Re-read after await: removal/replacement must win.
+    this.preparationsInProgress += 1;
+    try {
+      if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime);
+      return this.readyReference(lookId); // Re-read after await: removal/replacement must win.
+    } finally { this.preparationsInProgress -= 1; }
   }
   private referenceSourceUnavailable(lookId: string): ReferencePreparationStatus {
     this.referenceIdentities.delete(lookId);
@@ -447,7 +479,9 @@ export class ExhibitionService {
     const look = state.looks.find(item => item.id === input.lookId);
     if (!look || look.id !== state.selectedLookId || !activeLookIds(state).includes(look.id)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材与当前模式或体验不一致。');
     if (!this.liveService) throw new ApiError('EXHIBITION_LIVE_UNAVAILABLE', '实时换装服务尚未连接。', 503);
-    if ('options' in this.liveService && this.liveService.options?.store.unreleasedMirror(this.mirrorId).length) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '旧连接尚未确认释放。', 409);
+    const blocked = this.liveService.hasBlockingMirrorSessions?.(this.mirrorId)
+      ?? ('options' in this.liveService && !!this.liveService.options?.store.unreleasedMirror(this.mirrorId).length);
+    if (blocked) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '旧连接尚未确认释放。', 409);
     this.referenceSource(look.id);
     const service = this.liveService;
     const sessionLimits = this.sessionLimits();
@@ -707,8 +741,11 @@ export class ExhibitionService {
   }
 
   private async reconcileLiveNow() {
-    const live = this.stored.state.live; const service = this.liveService;
-    if (!live || !service || !live.sessionId) return;
+    const service = this.liveService;
+    if (!service) return;
+    await service.reconcileMirrorSessions?.(this.mirrorId, this.stored.state.live?.sessionId ?? undefined);
+    const live = this.stored.state.live;
+    if (!live || !live.sessionId) return;
     const id = live.sessionId;
     let session = await service.get(id, false);
     let state = this.stored.state;
@@ -783,7 +820,14 @@ export class ExhibitionService {
     const filename = assetFilename(image, id, this.assetBasePath);
     try {
       if (filename) return { data: readFileSync(join(this.assetsDirectory, filename)), mime: 'image/webp' };
-      if (sampleImage(image, id)) return { data: readFileSync(fileURLToPath(new URL('../public' + image, import.meta.url))), mime: 'image/png' };
+      if (sampleImage(image, id)) {
+        try { return { data: readFileSync(fileURLToPath(new URL('../public' + image, import.meta.url))), mime: 'image/png' }; }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          // Managed LAN packages keep built-in assets in dist rather than public.
+          return { data: readFileSync(fileURLToPath(new URL('../dist' + image, import.meta.url))), mime: 'image/png' };
+        }
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -825,6 +869,7 @@ export class ExhibitionService {
   }
   private invalidateReference(id: string): void { this.referenceIdentities.delete(id); this.referenceSourceFailures.delete(id); }
   private checkUploadAvailable(): void {
+    this.assertPresent();
     if (this.uploadConcurrency.inProgress >= this.uploadConcurrency.limit) throw new ApiError('EXHIBITION_UPLOAD_BUSY', '已有素材正在处理，请稍后再试。', 429);
   }
   async upload(input: unknown): Promise<ExhibitionState> {
@@ -857,11 +902,72 @@ export class ExhibitionService {
     finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
   }
 
+  /** Appends a private material snapshot without replacing the target catalog or settings. */
+  async copyLookFrom(source: ExhibitionService, input: ExhibitionLookCopyInput): Promise<ExhibitionState> {
+    this.editableInput(input);
+    if (this.stored.state.live || this.uploadsInProgress > 0) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待目标设备的会话或素材处理结束，再复制素材。', 409);
+    if (!isMode(input.mode)) throw new ApiError('EXHIBITION_INVALID_MODE', '请选择有效的目标分组。');
+    if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`, 409);
+    this.checkUploadAvailable();
+    const sourceState = source.read();
+    const original = sourceState.looks.find(look => look.id === input.sourceLookId);
+    if (!original) throw new ApiError('EXHIBITION_INVALID_LOOK', '未找到来源素材。', 404);
+    if (original.referenceKind === 'none' && input.mode !== 'free') throw new ApiError('EXHIBITION_REFERENCE_REQUIRED', '此素材没有参考图，只能复制到 Free。');
+    const prompt = input.mode === 'free' ? freePrompt(input.prompt ?? (original.mode === 'free' ? original.prompt : undefined)) : undefined;
+    const mergeTaxonomy = () => {
+      const categories = [...this.stored.state.categories]; const tags = [...this.stored.state.tags];
+      const merge = (names: string[], value: string) => {
+        const existing = names.find(name => name.toLocaleLowerCase() === value.toLocaleLowerCase());
+        if (existing !== undefined) return existing;
+        names.push(value); return value;
+      };
+      const category = merge(categories, original.category); const lookTags = original.tags.map(tag => merge(tags, tag));
+      nameList(categories, '分类', 40, false); nameList(tags, '标签', 80, true);
+      return { categories, tags, category, lookTags };
+    };
+    mergeTaxonomy();
+    // Capture both roles before yielding: source edits/deletion during decoding
+    // must not mix image revisions or change an already accepted snapshot.
+    const displayBytes = source.readImage(original.id, original.image).data;
+    const referencePath = original.referenceImage ?? exhibitionReferenceImage(original);
+    const referenceBytes = referencePath === original.image ? displayBytes : referencePath ? source.readImage(original.id, referencePath).data : null;
+    const enabled = sourceState.enabledLookIds.includes(original.id);
+    const limits = structuredClone(this.stored.state.settings.uploadLimits);
+    this.uploadConcurrency.inProgress += 1; this.uploadsInProgress += 1;
+    const written: string[] = [];
+    try {
+      const display = await prepareImage(displayBytes.toString('base64'), limits, '展示图', true);
+      const reference = referenceBytes === displayBytes ? display : referenceBytes ? await prepareImage(referenceBytes.toString('base64'), limits, 'XMAX 参考图', true) : null;
+      this.editableInput(input);
+      if (this.stored.state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待目标设备的会话停止，再复制素材。', 409);
+      if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`, 409);
+      for (const prepared of [display, reference]) if (prepared) checkPreparedImage(prepared, this.stored.state.settings.uploadLimits);
+      const taxonomy = mergeTaxonomy();
+      const id = `upload-${randomUUID()}`;
+      const look: ExhibitionLook = { ...structuredClone(original), id, source: 'upload', mode: input.mode, prompt,
+        category: taxonomy.category, tags: taxonomy.lookTags, image: this.newImage(id, 'display', display, written), ...display.info };
+      if (reference) {
+        look.referenceImage = this.newImage(id, 'reference', reference, written);
+        look.referenceImageInfo = reference.info;
+      } else { delete look.referenceImage; delete look.referenceImageInfo; }
+      const draft = structuredClone(this.stored);
+      draft.state.looks.push(look); draft.state.categories = taxonomy.categories; draft.state.tags = taxonomy.tags;
+      if (enabled) draft.state.enabledLookIds.push(id);
+      // Keep an existing selection; only select the new item if this mode had
+      // no enabled material, as required by the persisted catalog invariant.
+      reconcileSelection(draft.state);
+      this.checkRevision(input.expectedRevision);
+      this.commit(draft, `素材「${look.name}」已复制。`, this.now());
+      return this.snapshotState();
+    } catch (error) { this.cleanupFiles(written); throw error; }
+    finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
+  }
+
   /** Copies a configuration snapshot; live ownership and history always belong to the target. */
-  copyFrom(source: ExhibitionService, input: { expectedRevision: number; copyLooks: boolean; copySettings: boolean }): ExhibitionState {
+  copyFrom(source: ExhibitionService, input: { expectedRevision: number; copyLooks: boolean; copySettings: boolean }, sourceState?: ExhibitionState): ExhibitionState {
     this.editableInput(input);
     if (this.stored.state.live || this.uploadsInProgress > 0) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待此设备的会话或素材上传结束，再复制数据。', 409);
-    const sourceState = source.get();
+    sourceState ??= source.get();
     if (input.copySettings && sourceState.providerMode === 'xmax' && !this.liveService?.status(this.mirrorId).configured) throw new ApiError('MISSING_API_KEY', '请先配置 XMAX 服务端凭证。', 503);
     // A replace operation may delete every prior uploaded file. Publish a complete
     // restorable snapshot before writing any replacement asset or state.
@@ -1025,11 +1131,14 @@ export class ExhibitionService {
   async uploadUiSkin(input: unknown): Promise<ExhibitionState> {
     const payload = this.editableInput(input);
     if (this.stored.state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再更换界面皮肤。', 409);
-    const prepared = await this.skinStore.prepare(payload.imageBase64);
-    this.editableInput(payload);
-    if (this.stored.state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再更换界面皮肤。', 409);
-    const skin = this.skinStore.install(prepared);
-    return this.updateUiSkin(skin, payload.expectedRevision as number | undefined);
+    this.uploadsInProgress += 1;
+    try {
+      const prepared = await this.skinStore.prepare(payload.imageBase64);
+      this.editableInput(payload);
+      if (this.stored.state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再更换界面皮肤。', 409);
+      const skin = this.skinStore.install(prepared);
+      return this.updateUiSkin(skin, payload.expectedRevision as number | undefined);
+    } finally { this.uploadsInProgress -= 1; }
   }
 
   removeUiSkin(input: unknown): ExhibitionState {
@@ -1045,6 +1154,7 @@ export class ExhibitionService {
 
   /** Synchronous validation and atomic rename serialize all state mutations after any image decoding. */
   command(input: unknown): ExhibitionState {
+    this.assertPresent();
     if (!isRecord(input) || input.commandId === undefined || !this.durable) return this.applyCommand(input);
     if (typeof input.commandId !== 'string' || !/^[A-Za-z0-9_-]{8,100}$/.test(input.commandId)) throw new ApiError('EXHIBITION_INVALID_COMMAND', '操作编号无效。');
     const { commandId, expectedRevision: _revision, ...payload } = input;
@@ -1239,6 +1349,7 @@ export class ExhibitionService {
   }
 
   private checkRevision(revision: unknown) {
+    this.assertPresent();
     if (revision === undefined) return;
     if (!isNonnegativeInteger(revision)) throw new ApiError('EXHIBITION_INVALID_REVISION', '状态版本无效，请刷新后重试。');
     if (revision !== this.stored.state.revision) throw new ApiError('EXHIBITION_STALE_REVISION', '屏幕状态已更新，请刷新后重试。', 409);
@@ -1284,6 +1395,7 @@ export class ExhibitionService {
     this.commit(draft, `自动切换至${this.lookName(state.selectedLookId)}。`, time);
   }
   private tick() {
+    this.assertPresent();
     if (this.renewalHandoff && (this.stored.state.phase !== 'generating' || this.stored.state.sessionNumber !== this.renewalHandoff.sessionNumber
       || this.stored.state.generationNumber !== this.renewalHandoff.generationNumber)) this.renewalHandoff = undefined;
     if (this.renewalHandoff && this.now() >= this.renewalHandoff.expiresAt) {
@@ -1314,6 +1426,7 @@ export class ExhibitionService {
     }
   }
   private commit(draft: StoredExhibition, message: string, time: number) {
+    this.assertPresent();
     const previous = this.stored.state;
     const lifecycle = draft.state.lifecycle ??= structuredClone(previous.lifecycle ?? initialLifecycle());
     if (draft.state.sessionNumber !== previous.sessionNumber) {

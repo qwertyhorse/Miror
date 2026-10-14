@@ -2,11 +2,18 @@
 .ex-mirror-console .ex-console-layout{grid-template-columns:190px minmax(0,1fr);min-height:580px}
 .ex-mirror-console .ex-mirror-nav{padding:24px 12px;background:#fbfaff;display:flex;flex-direction:column;gap:12px;align-items:stretch;justify-content:flex-start}
 .ex-mirror-list{display:flex;flex-direction:column;gap:7px}
-.ex-mirror-list>button{display:flex;align-items:center;gap:11px;padding:14px 12px;min-height:68px;width:100%;border:1px solid transparent;border-radius:9px;background:transparent;text-align:left;color:#81748f}
-.ex-mirror-list>button:hover{background:#f3effb}
-.ex-mirror-list>button.is-active{background:#eee8fc;border-color:#e2d8f8;color:#765bd0}
-.ex-mirror-list>button>svg{flex-shrink:0;stroke-width:1.7}
-.ex-mirror-list>button>span{min-width:0;display:grid;gap:5px}
+.ex-mirror-list-item{position:relative;min-width:0;border:1px solid transparent;border-radius:9px;color:#81748f}
+.ex-mirror-list-item:hover{background:#f3effb}
+.ex-mirror-list-item.is-active{background:#eee8fc;border-color:#e2d8f8;color:#765bd0}
+.ex-mirror-select{display:flex;align-items:center;gap:11px;padding:14px 11px;min-height:68px;width:100%;border:0;border-radius:8px;background:transparent;text-align:left;color:inherit}
+.ex-mirror-select>svg{flex-shrink:0;stroke-width:1.7}
+.ex-mirror-select>span{min-width:0;display:grid;gap:5px}
+.ex-mirror-list-item.is-removable .ex-mirror-select{padding-right:29px}
+.ex-mirror-delete{position:absolute;right:3px;top:7px;display:grid;place-items:center;width:27px;height:30px;padding:0;border:0;border-radius:5px;background:transparent;color:#a18ba9;opacity:0}
+.ex-mirror-list-item:hover .ex-mirror-delete,.ex-mirror-list-item:focus-within .ex-mirror-delete{opacity:1}
+.ex-mirror-delete:hover{background:#fbe9ee;color:#b44b64}
+.ex-mirror-select:focus-visible,.ex-mirror-delete:focus-visible{outline:2px solid #aa8ee4;outline-offset:2px}
+@media(hover:none){.ex-mirror-delete{opacity:1}}
 .ex-mirror-list strong{font-size:14px;overflow-wrap:anywhere;line-height:1.4}
 .ex-mirror-list small{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:400;color:#9c8dab}
 .ex-mirror-status{width:5px;height:5px;flex:none;border-radius:50%;background:#b3a6c3}
@@ -20,7 +27,7 @@
 .ex-mirror-name h1{font-size:23px;font-weight:650;line-height:1.35;overflow-wrap:anywhere}
 .ex-mirror-name .ex-icon-button{flex-shrink:0}
 .ex-mirror-heading>div:first-child{min-width:0}
-.ex-mirror-actions{display:flex;gap:8px;flex-shrink:0}
+.ex-mirror-actions{display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap}
 .ex-mirror-actions .ex-button{min-height:39px;font-size:12px;padding:9px 13px}
 .ex-mirror-tabs{display:flex;gap:25px;border-bottom:1px solid var(--ex-line);margin-bottom:24px;flex-shrink:0}
 .ex-mirror-tabs>button{display:flex;gap:8px;align-items:center;border:0;border-bottom:2px solid transparent;background:none;padding:0 2px 13px;color:#95869f;font-size:13px}
@@ -161,6 +168,9 @@
 .ex-mirror-help{color:#9988a7;font-size:12px;line-height:1.85;margin-top:17px!important}
 .ex-mirror-dialog footer{display:flex;gap:9px;justify-content:flex-end;margin-top:24px}
 .ex-mirror-dialog footer .ex-button{font-size:13px;min-height:42px}
+.ex-delete-mirror-dialog h2{overflow-wrap:anywhere}
+.ex-mirror-dialog .ex-mirror-delete-confirm{background:#b94e66;border-color:#b94e66;color:#fff}
+.ex-mirror-dialog .ex-mirror-delete-confirm:hover:not(:disabled){background:#a43f56}
 .ex-copy-options{border:0;padding:0;margin:22px 0 0}
 .ex-copy-options legend{font-size:12px;color:#8f7b9f;margin-bottom:12px;overflow-wrap:anywhere}
 .ex-copy-options>label{display:flex;gap:10px;align-items:center;padding:13px 12px;border:1px solid #e8e0f2;border-radius:7px;margin-top:8px;cursor:pointer}
@@ -214,7 +224,8 @@
   .ex-mirror-console .ex-console-layout,.ex-control-page .ex-mirror-console .ex-console-layout{display:block}
   .ex-mirror-console .ex-mirror-nav,.ex-control-page .ex-mirror-console .ex-mirror-nav{display:flex;flex-direction:column;gap:10px;padding:14px;border-right:0;border-bottom:1px solid var(--ex-line)}
   .ex-mirror-list{flex-direction:row;overflow:auto;overscroll-behavior-x:contain;scrollbar-width:thin;padding-bottom:3px}
-  .ex-mirror-list>button{width:auto;min-width:135px;max-width:210px;flex-shrink:0;min-height:58px;padding:10px}
+  .ex-mirror-list-item{width:auto;min-width:135px;max-width:210px;flex-shrink:0}
+  .ex-mirror-select{min-height:58px;padding:10px}
   .ex-mirror-list strong{font-size:12px}
   .ex-mirror-console .ex-console-nav>button.ex-add-mirror{align-self:flex-end;min-height:32px;padding:5px 12px;margin:0}
   .ex-mirror-console .ex-console-main,.ex-control-page .ex-mirror-console .ex-console-main{padding:20px 16px}

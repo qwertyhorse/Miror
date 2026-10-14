@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ExhibitionDeviceBinding, ExhibitionDeviceConnection, ExhibitionMirrorList, ExhibitionMirrorSummary, ExhibitionState } from '../shared/exhibition.ts';
+import type { ExhibitionDeviceBinding, ExhibitionDeviceConnection, ExhibitionLookCopyInput, ExhibitionMirrorList, ExhibitionMirrorSummary, ExhibitionState } from '../shared/exhibition.ts';
 import type { ExhibitionCameraStatus } from '../shared/exhibitionCamera.ts';
 import { ExhibitionService } from './exhibition.ts';
 import { ExhibitionDevices } from './exhibitionDevices.ts';
+import { BrowserTests } from './browserTests.ts';
 import type { TryOnService } from './service.ts';
 import { ApiError } from './types.ts';
 
 interface MirrorEntry { id: string; name: string; }
-interface StoredMirrors { schemaVersion: 1; defaultMirrorId: 'default'; mirrors: MirrorEntry[]; }
+interface RemovedMirrorEntry extends MirrorEntry { removedAt: number; }
+interface StoredMirrors { schemaVersion: 1; defaultMirrorId: 'default'; mirrors: MirrorEntry[]; removedMirrors?: RemovedMirrorEntry[]; }
 const MIRROR_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function mirrorName(value: unknown): string {
@@ -23,15 +25,18 @@ function mirrorName(value: unknown): string {
 export class ExhibitionMirrors {
   readonly defaultMirrorId = 'default';
   readonly devices: ExhibitionDevices;
+  readonly browserTests: BrowserTests;
   private readonly filename: string;
   private readonly directory: string;
   private readonly mirrors = new Map<string, ExhibitionService>();
   private entries: MirrorEntry[] = [];
+  private removedEntries: RemovedMirrorEntry[] = [];
   private readonly uploadConcurrency = { inProgress: 0, limit: 2 };
   private liveService?: TryOnService;
 
   constructor(private readonly dataDirectory: string, private readonly options: { now?: () => number } = {}) {
     this.devices = new ExhibitionDevices(dataDirectory, { now: options.now });
+    this.browserTests = new BrowserTests(dataDirectory, { now: options.now });
     this.filename = join(dataDirectory, 'exhibition-mirrors.json');
     this.directory = join(dataDirectory, 'exhibition-mirrors');
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
@@ -47,6 +52,15 @@ export class ExhibitionMirrors {
         return { id: value.id, name };
       });
       if (!seen.has(this.defaultMirrorId)) throw new Error('Default exhibition mirror missing');
+      if (stored.removedMirrors !== undefined) {
+        if (!Array.isArray(stored.removedMirrors)) throw new Error('Invalid removed exhibition mirrors');
+        this.removedEntries = stored.removedMirrors.map(value => {
+          if (!record(value) || typeof value.id !== 'string' || !MIRROR_ID.test(value.id) || seen.has(value.id)
+            || !Number.isSafeInteger(value.removedAt) || (value.removedAt as number) < 0) throw new Error('Invalid removed exhibition mirror');
+          seen.add(value.id);
+          return { id: value.id, name: mirrorName(value.name), removedAt: value.removedAt as number };
+        });
+      }
       for (const entry of this.entries) {
         const path = join(this.directory, entry.id);
         // A missing device is not a new blank device: fail without overwriting registered data.
@@ -59,6 +73,7 @@ export class ExhibitionMirrors {
       const entry = { id: this.defaultMirrorId, name: '智能镜 1' };
       this.install(entry, legacy);
     }
+    this.devices.retainMirrors(new Set(this.entries.map(entry => entry.id)));
   }
 
   list(): ExhibitionMirrorList { return { defaultMirrorId: this.defaultMirrorId, mirrors: this.entries.map(entry => this.summary(entry)) }; }
@@ -86,6 +101,23 @@ export class ExhibitionMirrors {
     return this.summary(entries.find(entry => entry.id === id)!);
   }
 
+  remove(id: string, input: unknown): ExhibitionMirrorList {
+    const mirror = this.getMirror(id);
+    if (id === this.defaultMirrorId) throw new ApiError('EXHIBITION_DEFAULT_MIRROR', '默认智能镜用于固定入口，不能删除。', 409);
+    mirror.assertRemovable(input);
+    const entry = this.entries.find(item => item.id === id)!;
+    const entries = this.entries.filter(item => item.id !== id);
+    const removed = [...this.removedEntries, { ...entry, removedAt: (this.options.now ?? Date.now)() }];
+    // One atomic registry commit is authoritative. Keep the complete original
+    // directory, credentials and session history for recovery; never purge them.
+    this.persist(entries, removed);
+    this.entries = entries; this.removedEntries = removed; this.mirrors.delete(id);
+    mirror.markRemoved();
+    // A crash or a failed secondary write is repaired from the registry on restart.
+    this.devices.retainMirrors(new Set(entries.map(item => item.id)));
+    return this.list();
+  }
+
   copy(targetId: string, input: unknown): ExhibitionState {
     const target = this.getMirror(targetId);
     if (!record(input) || typeof input.sourceMirrorId !== 'string' || typeof input.copyLooks !== 'boolean' || typeof input.copySettings !== 'boolean'
@@ -94,6 +126,16 @@ export class ExhibitionMirrors {
     }
     if (input.sourceMirrorId === targetId) throw new ApiError('EXHIBITION_INVALID_COPY', '请选择另一台设备作为复制来源。');
     return target.copyFrom(this.getMirror(input.sourceMirrorId), { expectedRevision: input.expectedRevision as number, copyLooks: input.copyLooks, copySettings: input.copySettings });
+  }
+
+  async copyLook(targetId: string, input: unknown): Promise<ExhibitionState> {
+    const target = this.getMirror(targetId);
+    if (!record(input) || typeof input.sourceMirrorId !== 'string' || typeof input.sourceLookId !== 'string' || !input.sourceLookId
+      || typeof input.mode !== 'string' || !Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0
+      || (input.prompt !== undefined && typeof input.prompt !== 'string')) {
+      throw new ApiError('EXHIBITION_INVALID_COPY', '请选择来源素材、目标分组，并刷新目标设备后重试。');
+    }
+    return target.copyLookFrom(this.getMirror(input.sourceMirrorId), input as unknown as ExhibitionLookCopyInput);
   }
 
   connectDevice(input: unknown): ExhibitionDeviceConnection {
@@ -149,11 +191,12 @@ export class ExhibitionMirrors {
 
   attachLiveService(service: TryOnService): void {
     this.liveService = service;
+    this.browserTests.attachLiveService(service);
     for (const mirror of this.mirrors.values()) mirror.attachLiveService(service);
   }
 
   async sweepLive(): Promise<void> {
-    await Promise.allSettled([...this.mirrors.values()].map(mirror => mirror.sweepLive()));
+    await Promise.allSettled([...this.mirrors.values()].map(mirror => mirror.sweepLive()).concat(this.browserTests.sweep()));
   }
 
   private service(path: string, id: string): ExhibitionService {
@@ -214,8 +257,8 @@ export class ExhibitionMirrors {
     if (this.entries.some(entry => entry.id !== exceptId && entry.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new ApiError('EXHIBITION_DUPLICATE_MIRROR_NAME', '设备名称已存在，请使用其他名称。', 409);
   }
 
-  private persist(entries: MirrorEntry[]): void {
-    const data: StoredMirrors = { schemaVersion: 1, defaultMirrorId: this.defaultMirrorId, mirrors: entries };
+  private persist(entries: MirrorEntry[], removedMirrors = this.removedEntries): void {
+    const data: StoredMirrors = { schemaVersion: 1, defaultMirrorId: this.defaultMirrorId, mirrors: entries, removedMirrors };
     const temporary = `${this.filename}.${randomUUID()}.tmp`;
     try { writeFileSync(temporary, JSON.stringify(data), { mode: 0o600, flag: 'wx' }); renameSync(temporary, this.filename); }
     finally { rmSync(temporary, { force: true }); }

@@ -1,14 +1,15 @@
 .ex-terminal-camera::backdrop{background:rgb(26 18 51 / .5);backdrop-filter:blur(8px)}
-.ex-terminal-camera-entry{position:absolute;top:1.5%;right:3.4%;z-index:12;max-width:27%;display:grid;justify-items:end;gap:4px}
-.ex-terminal-camera-entry>button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:36px;padding:7px 10px;border:1px solid #d9d0ed;border-radius:8px;background:#ffffffd9;color:#67558e;font:inherit;font-size:clamp(10px,2.25cqi,16px);white-space:nowrap;cursor:pointer}
-.ex-terminal-camera-entry>button svg{width:clamp(13px,3cqi,20px);height:clamp(13px,3cqi,20px)}
+.ex-has-camera-control .ex-mirror-stage{bottom:max(4%,48px)}
+.ex-has-camera-control .ex-mirror-footer{bottom:max(.4%,5px);height:max(3.2%,38px)}
+.ex-terminal-camera-entry{position:relative;flex:none;z-index:12;color:#67558e}
+.ex-terminal-camera-entry>button{display:grid;place-items:center;width:clamp(28px,5cqi,44px);height:clamp(28px,5cqi,44px);padding:0;border:0;border-radius:1cqi;background:#ffffff80;color:inherit;cursor:pointer}
+.ex-terminal-camera-entry>button svg{width:clamp(14px,2.6cqi,22px);height:clamp(14px,2.6cqi,22px)}
 .ex-terminal-camera-entry>button:hover:not(:disabled){background:#fff}
 .ex-terminal-camera-entry>button:disabled{opacity:.55;cursor:default}
 .ex-terminal-camera-entry>button:focus-visible{outline:2px solid currentColor;outline-offset:3px}
-.ex-terminal-camera-entry>span{font-size:clamp(9px,1.9cqi,13px);line-height:1.4;text-align:right;overflow-wrap:anywhere}
-.ex-terminal-camera-entry-error{border-radius:5px;padding:5px 7px;background:#fff7f7;color:#a13c4f}
+.ex-terminal-camera-entry-error{position:absolute;right:0;bottom:calc(100% + 8px);width:min(48cqi,280px);font-size:clamp(10px,1.9cqi,13px);line-height:1.4;overflow-wrap:anywhere;border-radius:5px;padding:5px 7px;background:#fff7f7;color:#a13c4f}
 .ex-mirror-minimal[data-skin="brand"] .ex-terminal-camera-entry{color:#fff}
-.ex-mirror-minimal[data-skin="brand"] .ex-terminal-camera-entry>button{background:#ffffff24;border-color:#ffffff55;color:#fff}
+.ex-mirror-minimal[data-skin="brand"] .ex-terminal-camera-entry>button{background:#ffffff1f;color:#fff}
 .ex-mirror-minimal[data-skin="brand"] .ex-terminal-camera-entry>button:hover:not(:disabled){background:#ffffff40}
 .ex-terminal-camera{box-sizing:border-box;width:min(600px,calc(100% - 48px));max-height:calc(100dvh - 48px);overflow:auto;padding:24px;border:0;border-radius:22px;background:#faf8ff;color:#382c57;box-shadow:0 20px 80px #27134b40}
 .ex-terminal-camera header,.ex-terminal-camera h2,.ex-terminal-camera footer,.ex-terminal-camera-controls{display:flex;align-items:center;gap:12px}

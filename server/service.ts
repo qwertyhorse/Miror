@@ -12,7 +12,7 @@ import { EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibit
 import { ReferenceAssets, type ReferenceStorage } from './referenceAssets.ts';
 import { referenceStorage } from './referenceStorage.ts';
 import type { ReferencePreparationStatus } from '../shared/referencePreparation.ts';
-import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
+import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_CREDENTIAL_LIMITS, isSessionLimits, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
 export interface ServiceOptions {
   provider: Provider; store: SessionStore; secrets: SecretBox;
@@ -50,9 +50,12 @@ export class TryOnService {
   private readonly referenceProviders = new Map<string, ReferenceStorage>();
   readonly perSessionLimit: number; readonly expireSeconds: number;
   private readonly stoppingSessions = new Map<string, Promise<Omit<SessionRecord, 'tokenCipher' | 'providerKeyCipher'>>>();
+  private readonly issuingMirrors = new Map<string, string>();
+  private readonly reconcilingMirrors = new Map<string, Promise<void>>();
+  private readonly orphanRetryAt = new Map<string, number>();
   constructor(readonly options: ServiceOptions) {
-    this.perSessionLimit = options.perSessionLimit === undefined ? DEFAULT_SESSION_LIMITS.credits! : options.perSessionLimit;
-    this.expireSeconds = options.expireSeconds === undefined ? DEFAULT_SESSION_LIMITS.expireSeconds : options.expireSeconds;
+    this.perSessionLimit = options.perSessionLimit === undefined ? DEFAULT_CREDENTIAL_LIMITS.credits : options.perSessionLimit;
+    this.expireSeconds = options.expireSeconds === undefined ? DEFAULT_CREDENTIAL_LIMITS.expireSeconds : options.expireSeconds;
     if (this.perSessionLimit === null || !isSessionLimits({ credits: this.perSessionLimit, expireSeconds: this.expireSeconds })) throw new Error('Invalid temporary credential configuration');
   }
   private token(record: SessionRecord): string {
@@ -67,6 +70,25 @@ export class TryOnService {
     const key = override ?? this.options.provider.credentialSnapshot?.();
     if (key && /^uk-[A-Za-z0-9_-]+$/u.test(key)) return { provider: override === undefined ? this.options.provider : this.providerForApiKey(key, region), scope: apiKeyBudgetScope(key), region, key };
     return { provider: this.options.provider, scope: this.options.store.currentBudgetScope(), region };
+  }
+  /** Independent browser ownership uses a frozen source credential, never its mutable mirror configuration. */
+  forBrowserTest(sourceMirrorId: string): TryOnService {
+    const context = this.credentialContext(sourceMirrorId);
+    if (!context.key || !/^uk-[A-Za-z0-9_-]+$/u.test(context.key) || !context.provider.configured) {
+      throw new ApiError('MISSING_API_KEY', '请先为这台智能镜配置 XMAX 密钥。', 503);
+    }
+    const key = context.key; const region = context.region;
+    // Rebuild even a default provider: its key can be changed in place after this snapshot.
+    const frozen = this.providerForApiKey(key, region);
+    const provider: Provider = {
+      configured: frozen.configured, region, credentialSnapshot: () => key,
+      forCredential: (value, nextRegion) => this.providerForApiKey(value, nextRegion),
+      issueKey: (credits, seconds) => frozen.issueKey(credits, seconds),
+      keyStatus: token => frozen.keyStatus(token),
+      deactivate: token => frozen.deactivate(token),
+      sessionStatus: (token, sessionUid) => frozen.sessionStatus(token, sessionUid),
+    };
+    return new TryOnService({ ...this.options, provider, mirrorCredentials: undefined });
   }
   private referenceContext(mirrorId: string) {
     const context = this.credentialContext(mirrorId);
@@ -124,6 +146,41 @@ export class TryOnService {
   isUnconfirmedExhibitionSession(id: string, mirrorId: string): boolean {
     this.assertSessionMirror(id, mirrorId, true);
     return this.isUnknownIssuance(this.options.store.get(id));
+  }
+  /** Archive unknown historical issuance without claiming its cloud state is stopped. */
+  hasBlockingMirrorSessions(mirrorId: string): boolean {
+    if ([...this.issuingMirrors.values()].includes(mirrorId)) return true;
+    return this.options.store.unreleasedMirror(mirrorId).some(record => record.status !== 'issuance_unknown'
+      || !!record.tokenCipher || !!record.expiresAt || !!record.providerSessionId);
+  }
+  /** Reconcile detached credentials without touching a mirror's current lease or issuing another key. */
+  reconcileMirrorSessions(mirrorId: string, currentSessionId?: string): Promise<void> {
+    const existing = this.reconcilingMirrors.get(mirrorId);
+    if (existing) return existing;
+    const pending = this.reconcileMirrorSessionsNow(mirrorId, currentSessionId).finally(() => {
+      if (this.reconcilingMirrors.get(mirrorId) === pending) this.reconcilingMirrors.delete(mirrorId);
+    });
+    this.reconcilingMirrors.set(mirrorId, pending);
+    return pending;
+  }
+  private async reconcileMirrorSessionsNow(mirrorId: string, currentSessionId?: string): Promise<void> {
+    const records = this.options.store.unreleasedMirror(mirrorId);
+    for (const id of this.orphanRetryAt.keys()) {
+      if (this.options.store.get(id).status === 'stopped') this.orphanRetryAt.delete(id);
+    }
+    await Promise.all(records.map(async record => {
+      if (record.id === currentSessionId || this.issuingMirrors.has(record.id) || !record.tokenCipher
+        || (this.orphanRetryAt.get(record.id) ?? 0) > Date.now()) return;
+      try {
+        // A previous revoke may have succeeded while its response was lost.
+        const current = await this.get(record.id);
+        if (current.status !== 'stopped' && !this.issuingMirrors.has(record.id)) await this.stop(record.id);
+      } catch { /* Keep unconfirmed records blocking until a later provider confirmation. */ }
+      finally {
+        if (this.options.store.get(record.id).status === 'stopped') this.orphanRetryAt.delete(record.id);
+        else this.orphanRetryAt.set(record.id, Date.now() + 5_000);
+      }
+    }));
   }
   status(mirrorId?: string) {
     const context = this.credentialContext(mirrorId);
@@ -184,28 +241,31 @@ export class TryOnService {
       referenceScope: createHash('sha256').update(`${context.region}:${context.scope}`).digest('hex'),
       providerRegion: context.region, ...(context.key ? { providerKeyCipher: this.options.secrets.encrypt(context.key) } : {}) };
     // Keep ambiguous issuance records for cancellation and revocation. No local cumulative budget.
-    this.options.store.reserve(record, undefined, context.scope); hooks?.onReserved?.(record.id);
+    if (extra.exhibition) this.issuingMirrors.set(record.id, extra.exhibition.mirrorId ?? 'default');
     try {
-      if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') { this.options.store.update(record.id, { status: 'stopped' }); throw new ApiError('SESSION_CANCELLED', '试穿已取消。', 409); }
-      const issued = await context.provider.issueKey(credits, limits.expireSeconds);
-      this.options.store.update(record.id, { tokenCipher: this.options.secrets.encrypt(issued.token), expiresAt: issued.expiresAt });
-      if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') {
-        await this.stop(record.id);
-        // A stop requested before issuance can still be settling without a token.
-        // Once it settles, retry with the late token and require confirmation.
-        if (this.options.store.get(record.id).status !== 'stopped') await this.stop(record.id);
-        if (this.options.store.get(record.id).status !== 'stopped') throw new ApiError('STOP_NOT_CONFIRMED', '临时凭证停止尚未确认，请重试停止。', 502);
-        throw new ApiError('SESSION_CANCELLED', '试穿已取消，临时凭证已停止。', 409);
+      this.options.store.reserve(record, undefined, context.scope); hooks?.onReserved?.(record.id);
+      try {
+        if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') { this.options.store.update(record.id, { status: 'stopped' }); throw new ApiError('SESSION_CANCELLED', '试穿已取消。', 409); }
+        const issued = await context.provider.issueKey(credits, limits.expireSeconds);
+        this.options.store.update(record.id, { tokenCipher: this.options.secrets.encrypt(issued.token), expiresAt: issued.expiresAt });
+        if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') {
+          await this.stop(record.id);
+          // A stop requested before issuance can still be settling without a token.
+          // Once it settles, retry with the late token and require confirmation.
+          if (this.options.store.get(record.id).status !== 'stopped') await this.stop(record.id);
+          if (this.options.store.get(record.id).status !== 'stopped') throw new ApiError('STOP_NOT_CONFIRMED', '临时凭证停止尚未确认，请重试停止。', 502);
+          throw new ApiError('SESSION_CANCELLED', '试穿已取消，临时凭证已停止。', 409);
+        }
+        const active = this.options.store.update(record.id, { status: 'active' });
+        return { ...this.public(active), token: issued.token, model: 'x2.0' };
+      } catch (error) {
+        const code = error instanceof ApiError ? error.code : 'PROVIDER_UNKNOWN_ERROR';
+        const current = this.options.store.get(record.id);
+        if (code !== 'SESSION_CANCELLED' && current.status !== 'stopped') this.options.store.update(record.id, { status: current.tokenCipher ? 'stopping' : 'issuance_unknown', errorCode: code });
+        this.options.store.error(record.id, code);
+        throw error instanceof ApiError ? error : new ApiError(code, 'XMax 会话签发状态未确认，请联系工作人员。', 502);
       }
-      const active = this.options.store.update(record.id, { status: 'active' });
-      return { ...this.public(active), token: issued.token, model: 'x2.0' };
-    } catch (error) {
-      const code = error instanceof ApiError ? error.code : 'PROVIDER_UNKNOWN_ERROR';
-      const current = this.options.store.get(record.id);
-      if (code !== 'SESSION_CANCELLED' && current.status !== 'stopped') this.options.store.update(record.id, { status: current.tokenCipher ? 'stopping' : 'issuance_unknown', errorCode: code });
-      this.options.store.error(record.id, code);
-      throw error instanceof ApiError ? error : new ApiError(code, 'XMax 会话签发状态未确认，请联系工作人员。', 502);
-    }
+    } finally { this.issuingMirrors.delete(record.id); }
   }
   async get(id: string, sync = true) {
     let record = this.options.store.get(id);
@@ -279,6 +339,10 @@ export class TryOnService {
       const latest = this.options.store.get(id);
       return this.public(this.options.store.update(id, { status: 'stopped', consumedCredits: Math.max(latest.consumedCredits, info.consumedCredit), expiresAt: info.expireTimestamp, errorCode: undefined }));
     } catch (error) {
+      // A failed PUT is ambiguous: its effect may already be visible to GET.
+      // Only the provider's inactive/timeout response can confirm release.
+      const verified = await this.get(id);
+      if (verified.status === 'stopped') return verified;
       const latest = this.options.store.get(id);
       if (latest.status === 'stopped') return this.public(latest);
       const code = error instanceof ApiError ? error.code : 'REVOCATION_FAILED';

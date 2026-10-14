@@ -5,6 +5,8 @@ import { EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibitionReferenceImage, type Exhib
 import { appUrl } from '../versionScope';
 import { looksFor } from './catalog';
 import type { ExhibitionController } from './useExhibition';
+import type { MirrorRegistry } from './useMirrors';
+import { CopyDialog } from './CopyDialog';
 import { ExperienceModeChips, experienceModeLabel } from './ExperienceModeChips';
 import { enableLookInOrder, useMaterialOrder } from './useMaterialOrder';
 import { MaterialActionsMenu } from './MaterialActionsMenu';
@@ -185,17 +187,18 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
   </form></dialog>;
 }
 
-interface WardrobePanelProps { controller: ExhibitionController; onSummaryChange?: (summary: string | null) => void; }
+interface WardrobePanelProps { controller: ExhibitionController; registry?: MirrorRegistry; onSummaryChange?: (summary: string | null) => void; }
 
-export function WardrobePanel({ controller, onSummaryChange }: WardrobePanelProps) {
-  return <WardrobeContent key={controller.mirrorId} controller={controller} onSummaryChange={onSummaryChange} />;
+export function WardrobePanel({ controller, registry, onSummaryChange }: WardrobePanelProps) {
+  return <WardrobeContent key={controller.mirrorId} controller={controller} registry={registry} onSummaryChange={onSummaryChange} />;
 }
 
-function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
+function WardrobeContent({ controller, registry, onSummaryChange }: WardrobePanelProps) {
   const { state, send, pending, connected } = controller;
   const [mode, setMode] = useState<ExhibitionExperienceMode>(state?.experienceMode ?? 'clothx');
   const [query, setQuery] = useState('');
   const [editor, setEditor] = useState<string | null>(null);
+  const [copyLook, setCopyLook] = useState<ExhibitionLook | null>(null);
   // Polling must not change the target or revision of an open edit/delete dialog.
   const [editorLook, setEditorLook] = useState<ExhibitionLook | undefined>();
   const [initialDelete, setInitialDelete] = useState(false);
@@ -210,10 +213,10 @@ function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
   const modeLooks = looks.filter(look => look.mode === mode);
   const configurable = !!state && ['idle', 'select'].includes(state.phase) && !state.live;
   const disabled = pending || !connected || !configurable;
-  const orderDisabled = disabled || !!query.trim() || !!editor;
+  const orderDisabled = disabled || !!query.trim() || !!editor || !!copyLook;
   const order = useMaterialOrder({ mirrorId: controller.mirrorId, revision: state?.revision ?? 0, mode, lookIds: modeLooks.map(look => look.id),
     disabled: orderDisabled, region: results, send });
-  useEffect(() => { setOpenMenuId(null); }, [mode, query, editor, disabled, order.saving, order.draggedId]);
+  useEffect(() => { setOpenMenuId(null); }, [mode, query, editor, copyLook, disabled, order.saving, order.draggedId]);
   const byId = new Map(modeLooks.map(look => [look.id, look]));
   const filtered = order.ids.flatMap(id => { const look = byId.get(id); return look && `${look.name} ${look.description}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) ? [look] : []; });
   const enabledCount = modeLooks.filter(look => state?.enabledLookIds.includes(look.id)).length;
@@ -230,13 +233,14 @@ function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
     {notice && <p role="status" className="ex-library-notice"><Check size={16} />{notice}</p>}
     {preparation.error && <div className="ex-reference-fetch-error" role="alert"><span>{preparation.error}</span><button type="button" onClick={preparation.refresh}>刷新状态</button></div>}
     {editor && <LookEditor key={editor} controller={controller} look={editorLook} initialMode={mode} initialDelete={initialDelete} close={() => setEditor(null)} saved={savedEditor} deleted={() => { setNotice('素材已删除。'); setEditor(null); }} />}
+    {copyLook && registry && <CopyDialog source={{ id: controller.mirrorId, name: registry.data?.mirrors.find(item => item.id === controller.mirrorId)?.name ?? '当前智能镜' }} registry={registry} look={copyLook} close={() => setCopyLook(null)} copied={(id, message) => { setNotice(message); if (id === controller.mirrorId) void controller.refresh(); }} />}
     <div className="ex-library-filters"><ExperienceModeChips label="按模式筛选素材" value={mode} onChange={setMode} /><label className="ex-library-search"><Search size={16} /><input aria-label="搜索素材" placeholder="搜索素材名称、说明" value={query} onChange={event => setQuery(event.target.value)} /></label><div className="ex-library-actions"><button className="ex-button ex-primary" disabled={pending || !connected} onClick={() => openEditor('upload')}><Plus size={17} />上传素材</button></div></div>
     <span id={orderHintId} className="ex-sr-only">{query.trim() ? '清空搜索后可拖动排序。' : '拖动图片或手柄排序；手柄支持方向键、Home 和 End。'}</span><span className="ex-sr-only" role="status" aria-live="polite">{order.message}</span>
     <div ref={results} className="ex-library-results" role="region" aria-label={`${experienceModeLabel(mode)} 素材列表，可纵向滚动`} tabIndex={0} {...order.regionProps}>
       {filtered.length > 0 ? <div className="ex-library-grid">{filtered.map(item => <article className={`ex-library-card${order.draggedId === item.id ? ' ex-library-card-dragging' : ''}`} key={item.id} data-material-id={item.id}>
         <div className="ex-library-image" data-material-drag-image data-draggable={!orderDisabled && !order.saving && modeLooks.length > 1} {...order.imageProps(item.id)}><img src={appUrl(item.image)} alt={`${item.name}素材`} loading="lazy" draggable={false} /><button type="button" className="ex-material-drag-handle" data-material-order-id={item.id} aria-label={`调整${item.name}顺序`} aria-describedby={orderHintId} title="调整顺序" disabled={orderDisabled || order.saving || modeLooks.length < 2} {...order.handleProps(item.id)}><GripVertical size={17} aria-hidden="true" /></button></div>
         <div className="ex-library-card-body">
-          <div className="ex-library-card-title"><h3>{item.name}</h3><div className="ex-library-card-tools"><MaterialActionsMenu name={item.name} open={openMenuId === item.id} onOpenChange={open => setOpenMenuId(open ? item.id : null)} onEdit={() => openEditor(item.id)} onDelete={() => openEditor(item.id, true)} disabled={disabled || order.saving || !!order.draggedId} /></div></div>
+          <div className="ex-library-card-title"><h3>{item.name}</h3><div className="ex-library-card-tools"><MaterialActionsMenu name={item.name} open={openMenuId === item.id} onOpenChange={open => setOpenMenuId(open ? item.id : null)} onEdit={() => openEditor(item.id)} onCopy={() => { setCopyLook({ ...item }); setNotice(''); }} onDelete={() => openEditor(item.id, true)} editDisabled={disabled} copyDisabled={!registry?.data} deleteDisabled={disabled} disabled={!connected || order.saving || !!order.draggedId} /></div></div>
           <span className="ex-material-mode">{experienceModeLabel(item.mode)}{item.referenceKind === 'none' && ' · 仅提示词'}</span>
           <ReferencePreparationBadge name={item.name} status={preparation.references[item.id]} unavailable={!!preparation.error} retrying={preparation.retrying.has(item.id)} retryError={preparation.retryErrors[item.id]} now={preparation.now} onRetry={() => { void preparation.retry(item.id); }} />
           <div className="ex-library-file-row"><p className="ex-library-file-info">{item.width ? `${item.width} × ${item.height} px · ${((item.bytes ?? 0) / 1024 / 1024).toFixed(2)} MB` : '预设示例素材'}</p><label className="ex-material-enabled-control" title={state.enabledLookIds.includes(item.id) ? '已启用' : '未启用'}><input aria-label={`启用${item.name}`} role="switch" type="checkbox" checked={state.enabledLookIds.includes(item.id)} disabled={disabled || order.saving || !!order.draggedId} onChange={event => { void send({ action: 'configure', enabledLookIds: event.target.checked ? enableLookInOrder(looks, state.enabledLookIds, item) : state.enabledLookIds.filter(id => id !== item.id) }); }} /><span aria-hidden="true" /></label></div>

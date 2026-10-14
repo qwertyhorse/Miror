@@ -198,6 +198,14 @@ export interface ExhibitionMirrorCopyInput {
   copyLooks: boolean;
   copySettings: boolean;
 }
+export interface ExhibitionLookCopyInput {
+  sourceMirrorId: string;
+  sourceLookId: ExhibitionLookId;
+  mode: ExhibitionExperienceMode;
+  expectedRevision: number;
+  /** Required when copying a non-Free material into Free. */
+  prompt?: string;
+}
 
 export interface ExhibitionLiveState {
   controllerEpoch?: number;

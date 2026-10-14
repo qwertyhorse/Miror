@@ -277,7 +277,7 @@ describe('exhibition UI skin HTTP boundary', () => {
   const headers = { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
   async function withServer(run: (base: string, mirrors: ExhibitionMirrors) => Promise<void>) {
     const mirrors = new ExhibitionMirrors(directory());
-    const unrelated = new Proxy({} as TryOnService, { get: () => { throw new Error('UI skin routes must not contact XMAX.'); } });
+    const unrelated = new Proxy({} as TryOnService, { get: (_target, property) => { if (property === 'reconcileMirrorSessions') return async () => {}; throw new Error('UI skin routes must not contact XMAX.'); } });
     const server = createApiServer(unrelated, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     try { await run(`http://127.0.0.1:${(server.address() as { port: number }).port}`, mirrors); }

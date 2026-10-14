@@ -33,11 +33,11 @@ async function fixture(limits?: ExhibitionSessionLimits) {
 }
 
 describe('per-mirror session limits', () => {
-  it('keeps finite defaults and reads resolved per-mirror settings without saving', async () => {
+  it('defaults to continuous experience and reads explicit per-mirror settings without saving', async () => {
     const f = await fixture();
-    expect(f.choice('limited').checked).toBe(true); expect(f.choice('unlimited').checked).toBe(false);
-    expect(f.input('credits')).toMatchObject({ value: '30', min: 1, max: SESSION_CREDIT_MAX, step: 1 });
-    expect(f.input('expireSeconds')).toMatchObject({ value: '120', min: 1, max: SESSION_EXPIRY_MAX, step: 1 });
+    expect(f.choice('limited').checked).toBe(false); expect(f.choice('unlimited').checked).toBe(true);
+    expect(f.inputNode('credits')).toBeUndefined();
+    expect(f.input('expireSeconds')).toMatchObject({ value: '120', min: CONTINUOUS_MIN_EXPIRY_SECONDS, max: SESSION_EXPIRY_MAX, step: 1 });
     expect(f.button('保存会话额度').disabled).toBe(true);
     f.state.settings.sessionLimits = { credits: 90, expireSeconds: 600 }; await f.render();
     expect(f.input('credits').value).toBe('90'); expect(f.input('expireSeconds').value).toBe('600');
@@ -45,7 +45,7 @@ describe('per-mirror session limits', () => {
   });
 
   it('submits explicit null for unlimited while retaining the credential expiry and revision protection', async () => {
-    const f = await fixture();
+    const f = await fixture({ credits: 30, expireSeconds: 120 });
     await f.mode('unlimited'); await f.change('expireSeconds', '3600');
     expect(f.inputNode('credits')).toBeUndefined();
     expect(f.input('expireSeconds').min).toBe(CONTINUOUS_MIN_EXPIRY_SECONDS);
@@ -59,13 +59,16 @@ describe('per-mirror session limits', () => {
 
   it('switches a persisted unlimited configuration back to finite credits', async () => {
     const f = await fixture({ credits: null, expireSeconds: 3600 });
-    await f.mode('limited'); await f.change('credits', '150'); await f.submit();
+    await f.mode('limited');
+    expect(f.input('credits')).toMatchObject({ value: '30', min: 1, max: SESSION_CREDIT_MAX, step: 1 });
+    expect(f.button('保存会话额度').disabled).toBe(false);
+    await f.change('credits', '150'); await f.submit();
     expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'configure', expectedRevision: 7, sessionLimits: { credits: 150, expireSeconds: 3600 } });
     expect(f.input('credits').value).toBe('150'); expect(f.choice('limited').checked).toBe(true);
   });
 
   it('retains an edited credit value when toggling the unsaved mode', async () => {
-    const f = await fixture(); await f.change('credits', '75');
+    const f = await fixture({ credits: 30, expireSeconds: 120 }); await f.change('credits', '75');
     await f.mode('unlimited'); await f.mode('limited');
     expect(f.input('credits').value).toBe('75'); expect(f.send).not.toHaveBeenCalled();
   });
@@ -84,17 +87,17 @@ describe('per-mirror session limits', () => {
     expect(f.send).toHaveBeenLastCalledWith({ action: 'configure', expectedRevision: 8, sessionLimits: { credits: 30, expireSeconds: 1 } });
   });
 
-  it('restores finite defaults as a draft before saving', async () => {
-    const f = await fixture({ credits: null, expireSeconds: 3600 });
+  it('restores continuous defaults as a draft before saving', async () => {
+    const f = await fixture({ credits: 90, expireSeconds: 3600 });
     await act(async () => f.button('恢复默认').onClick());
-    expect(f.choice('limited').checked).toBe(true); expect(f.input('credits').value).toBe('30');
+    expect(f.choice('unlimited').checked).toBe(true); expect(f.inputNode('credits')).toBeUndefined();
     expect(f.input('expireSeconds').value).toBe('120'); expect(f.send).not.toHaveBeenCalled();
     await f.submit(); expect(f.send.mock.calls[0][0].sessionLimits).toEqual(DEFAULT_SESSION_LIMITS);
   });
 
   it.each([['credits', '0'], ['credits', '1.5'], ['credits', String(SESSION_CREDIT_MAX + 1)], ['credits', ''],
     ['expireSeconds', '0'], ['expireSeconds', '2.5'], ['expireSeconds', String(SESSION_EXPIRY_MAX + 1)], ['expireSeconds', 'Infinity']])('rejects invalid %s=%s without a request', async (name, value) => {
-    const f = await fixture(); await f.change(name, value);
+    const f = await fixture({ credits: 30, expireSeconds: 120 }); await f.change(name, value);
     expect(f.button('保存会话额度').disabled).toBe(true); await f.submit(); expect(f.send).not.toHaveBeenCalled();
     expect(host!.find(node => node.getReactProps().role === 'alert')!.textContent).toBe(name === 'credits'
       ? '积分额度须为 1–1,000,000 的整数。' : '凭证有效期须为 1–86,400 秒的整数。');
@@ -113,7 +116,7 @@ describe('per-mirror session limits', () => {
   });
 
   it.each(['pending', 'stopPending', 'disconnected', 'positioning', 'generating', 'showcase', 'paused', 'live'] as const)('blocks saving and direct edits while %s', async reason => {
-    const f = await fixture(); await f.change('credits', '40');
+    const f = await fixture({ credits: 30, expireSeconds: 120 }); await f.change('credits', '40');
     if (reason === 'pending' || reason === 'stopPending') f.controller[reason] = true;
     else if (reason === 'disconnected') f.controller.connected = false;
     else if (reason === 'live') f.state.live = { status: 'stopping' } as ExhibitionState['live'];
@@ -138,7 +141,7 @@ describe('per-mirror session limits', () => {
   });
 
   it('discards another mirror draft and ignores its late save reply', async () => {
-    const f = await fixture(); await f.mode('unlimited');
+    const f = await fixture({ credits: 30, expireSeconds: 120 }); await f.mode('unlimited');
     let finish!: (saved: boolean) => void;
     f.send.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     await f.submit();

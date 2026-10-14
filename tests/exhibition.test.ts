@@ -193,8 +193,8 @@ describe('exhibition configuration and storage', () => {
     expect(readdirSync(directory)).toEqual(['exhibition.json']);
     const effective = restarted.get();
     const { sessionLimits, ...storedSettings } = effective.settings;
-    expect(sessionLimits).toEqual({ credits: 30, expireSeconds: 120 });
-    // Omitted limits inherit the service defaults; the public snapshot resolves them.
+    expect(sessionLimits).toEqual({ credits: null, expireSeconds: 120 });
+    // Omitted limits resolve to continuous experience without rewriting stored settings.
     expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).state).toEqual({ ...effective, settings: storedSettings });
   });
 
@@ -215,7 +215,7 @@ describe('exhibition configuration and storage', () => {
 describe('exhibition HTTP boundary and simultaneous controls', () => {
   async function withServer(run: (base: string, service: ExhibitionService) => Promise<void>) {
     const { service } = fixture();
-    const unrelatedService = new Proxy({} as TryOnService, { get: () => { throw new Error('Exhibition must not call the XMAX service.'); } });
+    const unrelatedService = new Proxy({} as TryOnService, { get: (_target, property) => { if (property === 'reconcileMirrorSessions') return async () => {}; throw new Error('Exhibition must not call the XMAX service.'); } });
     const server = createApiServer(unrelatedService, ['http://xuminghong.local:10200'], undefined, service);
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');

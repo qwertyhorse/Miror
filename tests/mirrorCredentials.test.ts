@@ -7,6 +7,7 @@ import { SecretBox, SessionStore } from '../server/store.ts';
 import { MirrorCredentialStore } from '../server/mirrorCredentials.ts';
 import { XmaxProvider } from '../server/provider.ts';
 import { TryOnService } from '../server/service.ts';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits.ts';
 import { ExhibitionMirrors } from '../server/exhibitionMirrors.ts';
 import { createApiServer } from '../server/http.ts';
 import type { SessionRecord } from '../server/types.ts';
@@ -137,7 +138,7 @@ describe('mirror credentials HTTP boundary', () => {
   it('returns safe default/configured status, saves only the chosen mirror and uses the independent credential revision', async () => {
     const f = fixture(); const a = await api(f); const before = f.mirrors.getMirror().get();
     const initial = await (await a.get()).json();
-    expect(initial).toMatchObject({ configured: true, source: 'default', revision: 0, perSessionLimit: 30 });
+    expect(initial).toMatchObject({ configured: true, source: 'default', revision: 0, perSessionLimit: CONTINUOUS_SEGMENT_CREDITS });
     for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(initial).not.toHaveProperty(field);
     const response = await a.put(); expect(response.status).toBe(200);
     const saved = await response.json(); expect(saved).toMatchObject({ source: 'mirror', revision: 1, editable: true });

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -113,7 +114,7 @@ describe('mirror terminal binding HTTP boundary', () => {
     }
     expect(mirrors.getMirror().get()).toEqual(before); expect(issue).not.toHaveBeenCalled(); expect(store.allocated()).toBe(0);
     const allowed = await request('/api/exhibition/live/session', { ...input, terminalId: device.terminalId, terminalToken: device.token });
-    expect(allowed.status).toBe(201); expect(issue).toHaveBeenCalledOnce(); expect(store.allocated()).toBe(30);
+    expect(allowed.status).toBe(201); expect(issue).toHaveBeenCalledOnce(); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('limits a bound non-default mirror to its own terminal while keeping unbound legacy behavior', async () => {

@@ -46,10 +46,10 @@ export function createBrowserTerminal(): TerminalIdentity {
 }
 const defaults: TerminalDependencies = {
   identity: async signal => {
-    const native = await request<{ native: boolean } & Partial<TerminalIdentity>>('native-identity', signal);
+    const native = await request<{ native: boolean; cameraEngine?: string } & Partial<TerminalIdentity>>('native-identity', signal);
     if (native.native) {
       if (!validIdentity(native)) throw new Error('镜端设备身份无效，请重启客户端。');
-      return { terminalId: native.terminalId, token: native.token, label: native.label, platform: 'android' };
+      return { terminalId: native.terminalId, token: native.token, label: native.label, platform: 'android', ...(native.cameraEngine === 'web' ? { cameraCapabilities: { version: 1 as const } } : {}) };
     }
     const saved = scopedLocalStorage.getItem(STORAGE_KEY);
     if (!saved) return null;
@@ -106,7 +106,7 @@ export class TerminalBindingClient {
     try {
       const identity = this.snapshot.identity;
       const sentCameraReport = this.cameraReport;
-      const result = await this.deps.connect(identity.platform === 'browser'
+      const result = await this.deps.connect((identity.platform === 'browser' || identity.cameraCapabilities?.version === 1)
         ? { ...identity, cameraCapabilities: { version: 1 }, ...(sentCameraReport ? { cameraReport: sentCameraReport } : {}) }
         : identity, scope.signal);
       if (!this.current(scope)) return;
@@ -134,7 +134,7 @@ export class TerminalBindingClient {
     const scope = this.scope;
     const identity = this.snapshot.identity;
     const binding = this.snapshot.connection;
-    if (!scope || !this.snapshot.connected || identity?.platform !== 'browser' || !binding?.cameraBindingId
+    if (!scope || !this.snapshot.connected || !(identity?.platform === 'browser' || identity?.cameraCapabilities?.version === 1) || !binding?.cameraBindingId
       || binding.mirrorId !== mirrorId || binding.terminalId !== identity.terminalId) throw new Error('请从已绑定的镜端切换摄像头。');
     const operation = new AbortController();
     const abort = () => operation.abort();
@@ -160,7 +160,7 @@ export class TerminalBindingClient {
   };
   reportCamera = (report: ExhibitionCameraReport) => {
     const connection = this.snapshot.connection;
-    if (!this.scope || !this.snapshot.connected || this.snapshot.identity?.platform !== 'browser'
+    if (!this.scope || !this.snapshot.connected || !(this.snapshot.identity?.platform === 'browser' || this.snapshot.identity?.cameraCapabilities?.version === 1)
       || connection?.mirrorId !== report.mirrorId || connection.cameraBindingId !== report.bindingId) return;
     if (!report.requestId && this.cameraReport?.requestId && ['closed', 'error', 'busy'].includes(this.cameraReport.status)) {
       // Closing a dialog releases a server gate. Never let a routine camera

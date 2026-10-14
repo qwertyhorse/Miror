@@ -3,6 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DecartProvider } from '../server/decart';
+import { MirrorCredentialStore } from '../server/mirrorCredentials';
 import { ExhibitionService } from '../server/exhibition';
 import { TryOnService } from '../server/service';
 import { SecretBox, SessionStore } from '../server/store';
@@ -26,7 +28,7 @@ afterEach(async () => {
   vi.clearAllTimers(); vi.useRealTimers();
 });
 
-function fixture(expireSeconds = 120) {
+function fixture(expireSeconds = 120, decart = false) {
   const directory = mkdtempSync(join(tmpdir(), 'openbuy-renewal-flow-'));
   const store = new SessionStore(':memory:'); const keys = new Map<string, KeyStatus>();
   cleanup.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -42,7 +44,11 @@ function fixture(expireSeconds = 120) {
   });
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!, deactivate,
     sessionStatus: async (token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: keys.get(token)!.consumedCredit }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost: async () => ['8.8.8.8'] });
+  const secrets = new SecretBox(randomBytes(32));
+  const credentials = new MirrorCredentialStore(directory, secrets);
+  if (decart) credentials.saveProvider('default', { provider: 'decart', apiKey: 'dct_fixture', expectedRevision: 0 }, true);
+  const decartFetch = vi.fn<typeof fetch>(async (_url, init) => Response.json({ apiKey: 'ek_fixture', expiresAt: new Date(Date.now() + 30_000).toISOString(), constraints: JSON.parse(init!.body as string).constraints }));
+  const service = new TryOnService({ provider, store, secrets, mirrorCredentials: credentials, decartProvider: key => new DecartProvider(key, decartFetch), resolveHost: async () => ['8.8.8.8'] });
   const exhibition = new ExhibitionService(directory, { now: () => Date.now() }); exhibition.attachLiveService(service);
   exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 90, sessionLimits: { credits: null, expireSeconds } });
   exhibition.command({ action: 'begin' });
@@ -59,7 +65,7 @@ function fixture(expireSeconds = 120) {
       return { ...clientData(created), exhibition: created.exhibition };
     }),
     reference: vi.fn(async () => new File(['garment'], 'garment.png', { type: 'image/png' })),
-    prepare: vi.fn(async () => {}), upload: vi.fn(async () => 'https://uploads.example/garment.webp'),
+    prepare: vi.fn(async () => {}), upload: vi.fn(async () => decart ? 'file_fixture' : 'https://uploads.example/garment.webp'),
     bind: vi.fn(async (id, input) => clientData(await exhibition.bindLiveReference(id, input))),
     link: vi.fn(async (id, providerSessionId) => clientData(await service.link(id, providerSessionId))),
     firstFrame: vi.fn(async (id, firstFrameMs) => {
@@ -77,8 +83,9 @@ function fixture(expireSeconds = 120) {
     commitRenewal: vi.fn(async (id, input) => exhibition.commitLiveRenewal(id, input)),
     connect: vi.fn(async (_source, local, value) => {
       callbacks.set(local.id, value);
+      if (decart) await service.decartDial(local.id, local.releaseKey);
       const sdk = { getSessionUid: vi.fn(() => `ums-flow-${local.id}`), set: vi.fn(async () => {}),
-        disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
+        disconnect: vi.fn(async () => { if (decart) service.clientReleased(local.id, local.releaseKey); }), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
       sdks.push(sdk); return sdk;
     }),
     clone: vi.fn(() => {
@@ -100,7 +107,7 @@ function fixture(expireSeconds = 120) {
     const output = { id: `remote-${controller.sessionId}` } as MediaStream;
     callbacks.get(controller.sessionId!)!.onRemoteStream(output); controller.reportRenderedFrame(output); await flush();
   };
-  return { exhibition, service, store, keys, issue, deactivate, activeKeysAtIssue, deps, sdks, statesAfterStopRoute,
+  return { exhibition, service, store, keys, issue, deactivate, activeKeysAtIssue, decartFetch, deps, sdks, statesAfterStopRoute,
     originalStop, events, connection, ready, callbacks };
 }
 
@@ -168,4 +175,23 @@ describe('continuous exhibition renewal across the real services and client life
     expect(f.deps.prepareRenewal).not.toHaveBeenCalled(); expect(f.deps.commitRenewal).not.toHaveBeenCalled();
     expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.get(firstId).status).toBe('stopped');
   });
+});
+
+
+it('renews ten Decart segments through the shared client and durable experience without overlapping or using XMAX', async () => {
+  const f = fixture(120, true);
+  for (let segment = 0; segment < 10; segment++) {
+    const connection = f.connection(); await f.ready(connection);
+    const id = connection.sessionId!;
+    expect(f.store.list().filter(row => row.status === 'active')).toHaveLength(1);
+    expect(f.exhibition.get()).toMatchObject({ phase: 'showcase', sessionNumber: 1, generationNumber: segment + 1 });
+    await vi.advanceTimersByTimeAsync(105_000);
+    expect(f.store.get(id)).toMatchObject({ status: 'stopped', releaseEvidence: 'client_transport_closed' });
+    expect(f.exhibition.get()).toMatchObject({ phase: 'generating', sessionNumber: 1, live: null });
+  }
+  f.exhibition.command({ action: 'end' }); await f.exhibition.reconcileLive();
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(f.decartFetch).toHaveBeenCalledTimes(10);
+  expect(f.issue).not.toHaveBeenCalled(); expect(f.deactivate).not.toHaveBeenCalled();
+  expect(f.deps.reportError).not.toHaveBeenCalled(); expect(f.originalStop).not.toHaveBeenCalled();
 });

@@ -340,6 +340,7 @@ export class ExhibitionService {
     if (this.removed) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这台智能镜，请重新选择设备。', 404);
   }
   sessionLimits(): ExhibitionSessionLimits {
+    if (this.durable && this.liveService?.status(this.mirrorId).providerId === 'decart') return { credits: null, expireSeconds: 120 };
     return resolveSessionLimits(this.stored.state.settings.sessionLimits, {
       credits: DEFAULT_SESSION_LIMITS.credits,
       expireSeconds: Math.max(CONTINUOUS_MIN_EXPIRY_SECONDS,
@@ -452,7 +453,7 @@ export class ExhibitionService {
   liveStatus(): ExhibitionLiveStatus {
     const status = this.liveService?.status(this.mirrorId);
     const limits = this.credentialLimits();
-    return { configured: status?.configured ?? false, mode: this.stored.state.providerMode, model: status?.model ?? 'x2.0',
+    return { providerId: status?.providerId ?? 'xmax', configured: status?.configured ?? false, mode: this.stored.state.providerMode, model: status?.model ?? 'x2.0',
       providerRegion: status?.providerRegion ?? 'global', perSessionLimit: limits.credits, expireSeconds: limits.expireSeconds,
       heartbeatTimeoutSeconds: HEARTBEAT_TIMEOUT_MS / 1000, live: structuredClone(this.stored.state.live) };
   }
@@ -739,7 +740,9 @@ export class ExhibitionService {
 
   reconcileLive(): Promise<void> {
     if (this.reconcilingLive) return this.reconcilingLive;
-    this.reconcilingLive = this.reconcileLiveNow().finally(() => { this.reconcilingLive = undefined; });
+    this.reconcilingLive = this.reconcileLiveNow().then(() => {
+      if (this.durable && ['idle', 'select'].includes(this.stored.state.phase) && !this.stored.state.live) this.liveService?.finishProviderSwitch?.(this.mirrorId);
+    }).finally(() => { this.reconcilingLive = undefined; });
     return this.reconcilingLive;
   }
 
@@ -1195,7 +1198,12 @@ export class ExhibitionService {
       case 'begin':
         requirePhase('select', 'idle');
         if (state.live) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '上一轮停止尚未确认，请重试停止后再开始。', 409);
-        requireSelection(); state.phase = 'generating'; state.sessionNumber += 1; state.generationNumber += 1; state.displayedLookId = null;
+        requireSelection();
+        if (state.providerMode === 'xmax') {
+          this.liveService?.activatePendingProvider?.(this.mirrorId);
+          if (this.liveService?.status(this.mirrorId).providerId === 'decart' && state.experienceMode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
+        }
+        state.phase = 'generating'; state.sessionNumber += 1; state.generationNumber += 1; state.displayedLookId = null;
         state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = state.providerMode === 'demo' ? `第 ${state.sessionNumber} 轮演示已开始，正在准备换装画面。` : `第 ${state.sessionNumber} 轮体验已开始，等待大屏连接实时换装。`; break;
       case 'confirm':

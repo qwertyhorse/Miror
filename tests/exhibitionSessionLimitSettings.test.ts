@@ -51,7 +51,7 @@ describe('per-mirror session limits', () => {
     expect(f.input('expireSeconds').min).toBe(CONTINUOUS_MIN_EXPIRY_SECONDS);
     expect(host!.find(node => node.nodeName === 'label' && node.textContent === '无限制（自动续接）')).toBeDefined();
     expect(host!.find(node => node.nodeName === 'label' && node.textContent === '每段有效期（秒）')).toBeDefined();
-    expect(host!.find(node => node.nodeName === 'p' && node.textContent.includes('仍受 XMAX 余额限制'))).toBeDefined();
+    expect(host!.find(node => node.nodeName === 'p' && node.textContent.includes('仍受所选服务的余额限制'))).toBeDefined();
     f.state.revision = 10; await f.render(); await f.submit();
     expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'configure', expectedRevision: 10, sessionLimits: { credits: null, expireSeconds: 3600 } });
     expect(f.choice('unlimited').checked).toBe(true); expect(f.button('保存会话额度').disabled).toBe(true);

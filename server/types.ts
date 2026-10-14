@@ -7,6 +7,9 @@ export interface SessionRequest {
   targetItemId: string; sourceId: string; sourceKind: SourceKind; sourceName: string;
 }
 export interface SessionRecord extends SessionRequest {
+  dialState?: 'issuing' | 'issued'; maxSessionDuration?: number;
+  providerId?: 'xmax' | 'decart'; model?: string; dialExpiresAt?: string; releaseAfter?: string; clientReleaseHash?: string;
+  releaseEvidence?: 'client_transport_closed' | 'bounded_expiry'; usageStatus?: 'unavailable';
   id: string; status: SessionState; pointsLimit: number; tokenCipher?: string;
   /** Permanent signing credential is encrypted and frozen for safe revocation. */
   providerKeyCipher?: string;
@@ -22,6 +25,7 @@ export interface IssuedKey { token: string; expiresAt: string; }
 export interface KeyStatus { status: 'active' | 'inactive' | 'timeout'; consumedCredit: number; expireTimestamp: string; }
 export interface ProviderSessionStatus { sessionUid: string; status: string; consumedCredit: number; }
 export interface Provider {
+  readonly kind?: 'xmax' | 'decart';
   configured: boolean;
   readonly region?: XmaxRegion;
   credentialSnapshot?(): string;

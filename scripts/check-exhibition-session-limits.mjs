@@ -57,6 +57,7 @@ await context.route('**/*', async route => {
       response = state;
     }
     else if (state && suffix === '/live/status' && request.method() === 'GET') response = { configured: false, mode: 'xmax', model: 'x2.0', providerRegion: 'global', perSessionLimit: 30, expireSeconds: 120, heartbeatTimeoutSeconds: 30, live: null };
+    else if (state && suffix === '/provider-settings' && request.method() === 'GET') response = { revision: 0, active: 'xmax', desired: 'xmax', pending: false, accounts: { xmax: { configured: false }, decart: { configured: false } } };
     else if (state && suffix === '/credentials' && request.method() === 'GET') response = { configured: false, editable: true, source: 'mirror', revision: 0, perSessionLimit: 30, region: 'global', hasUnconfirmedSession: false };
     else if (state && suffix === '/command' && request.method() === 'POST') {
       const input = request.postDataJSON();

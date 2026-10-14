@@ -5,6 +5,8 @@ const diagnosticFields = [
 
 export function safeExhibitionErrorMessage(message: string): string {
   return message.replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/(?:dct_|ek_)[A-Za-z0-9_.-]+/gi, '[凭证已隐藏]')
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[凭证已隐藏]')
     .replace(/(?:tk|uk|sk)-[A-Za-z0-9_-]+/gi, '[凭证已隐藏]')
     .replace(/(?:https?|wss?):\/\/\S+/gi, '[连接地址]')
     .trim().slice(0, 300);

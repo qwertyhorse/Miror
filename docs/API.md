@@ -448,3 +448,28 @@ HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应
 - 后台启动后自动串行准备空闲镜的素材，顺序为当前选中、已启用、其他素材；同优先级在镜子与素材间轮换，新上传或选择变化在下一轮调度生效。失败任务冷却后排在尚待准备的任务之后重试，避免连续超时阻塞正常素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。有效记录保留 1 小时，临近到期以 HEAD 检查续期，明确不存在才重新上传；网络不确定时冷却 60 秒。
 - 创建体验会话新增可选字段 `referenceScope`。客户端仅在它与准备结果 `scope` 相同且仍新鲜时复用 URL；缺字段、区域/账号变化、查找超时或未准备均回退普通 SDK 上传。现有 reference 绑定、session 关联和条件版本校验继续执行。
 - 同时最多 2 个准备任务（自动任务最多 1 个）；变更等待最多 128 个连接，超额返回 429。断开请求自动清理订阅。
+
+## 双供应商配置与 Decart 实时换装
+
+每镜的运行开关仍使用已有 `providerMode: demo | xmax`（`xmax` 在此为兼容现有终端的实时开关）；实际服务由独立配置的 `providerId: xmax | decart` 决定。`live/status` 返回实际供应商和固定模型。Decart 首期为 `lucy-vton-3.6`、标准速度、clothx 连续体验，每连接上限 120 秒；不解释或复用 XMAX 积分设置。其他模式须使用 XMAX。
+
+- `GET /api/exhibition/mirrors/:id/provider-settings`：返回 revision、active、desired、pending、applyAfterStop 和两家账号的 configured 布尔值。
+- `PUT .../provider-settings`：`{provider, expectedRevision, apiKey?}`。可选 key 仅用于配置 Decart；XMAX 沿用原 credentials 接口。空闲且没有未释放会话时立即生效；否则保存为下一次 begin 生效。更换正在使用的 Decart key 需先结束体验。
+- `POST .../provider-settings/verify`：验证已保存的 Decart 账号鉴权；不创建 RTC 或生成，不返回原始余额/账号响应。
+- `POST .../provider-settings/apply`：`{expectedRevision}`。只有匹配的待生效配置可执行，先结束体验，持久化释放后切换意图；清理完成前 active 不变，后台 sweep 在释放后自动应用。新配置保存会替代旧的切换意图。
+
+所有配置写入走现有 HTTPS 10202 表单；HTTP 网关禁止 credentials 和 provider-settings 写入。两个账号分别加密，复制镜子或素材不复制密钥。首次保存供应商配置后凭据文件升级为 schemaVersion 2，旧服务会拒绝读取；升级前备份完整运行目录，不能用旧服务或旧配置快照绕过未结束记录。只保存 XMAX 凭据时保留既有 schemaVersion 1。
+
+Decart 终端在创建实时会话时须声明 `X-Miror-Realtime: decart-v1`；缺少该能力声明返回 426，并且不签发任何 Decart token。现有 XMAX 客户端继续使用协议 2。
+
+Decart create 响应包含 `providerId`、固定 model、`releaseKey`，token 为空。后端用账号专属缓存准备 `file_*` 素材，终端绑定参考图后，通过 `POST .../sessions/:id/dial {releaseKey}` 获取一次连接的短 token。此接口校验会话归属、当前业务状态和单次拨号门禁，限制模型、受信 Origin、30 秒准入 TTL 和 120 秒单次连接时长；未知或重复签发不自动重放。永久 key 始终留在后端；短 token 和 releaseKey 不写浏览器持久存储。
+
+SDK 0.2.11 的内部重连被此 Adapter 阻止，应用已有的有界恢复和续接负责新 segment。初始连接携带完整 prompt/reference；后续选择用同一连接的完整 `set()` 条件更新，保留 latest-intent 与旧回调隔离。SDK ack 不代表视觉效果确认。
+
+客户端确认媒体传输关闭后，`POST .../sessions/:id/released {releaseKey}` 记录 `releaseEvidence: client_transport_closed`。这是受授权终端回执，不是供应商撤销/结算证明。后端 `stop` 独立阻止新拨号，但没有凭空实现 Decart revoke。终端失联或停止回执丢失时保持 stopping；记录按最后拨号准入截止 + 单连接最大时长 + 偏差余量，在最迟可能活跃期限后解除门禁，证据为 `bounded_expiry`。此路径依赖供应商执行其返回的 maxSessionDuration 约束；供应商故障不在本地承诺范围内。
+
+Decart `usageStatus: unavailable` 表明没有结算读数，旧公共记录中的 consumedCredits/pointsLimit 兼容字段不可显示为 Decart 真实用量或余额。诊断须同时保留 providerId、model、releaseEvidence，不能把客户端关闭写成云端确认撤销。
+
+Android 0.4.0 保留原生 XMAX 引擎；选择 Decart 后先释放摄像头，再进入 App 内已有 WebView 镜端，共用 Web 的 Decart Adapter 与恢复机制。终端身份和绑定继续复用，WebView 负责摄像头及远程检测。该路径需要现有最低 WebView 版本、受信 HTTPS 和系统暴露的摄像头；只被原生驱动暴露的特殊 UVC 设备不保证可用于 WebRTC。旧 APK 不具备该路径，应升级后使用 Decart。切回 XMAX 可继续由 Web 引擎处理，重新启动 App 回到原生 XMAX。
+
+交付前执行全量测试、构建、runtime/package、Android JVM/build/lint，以及 `scripts/check-exhibition-providers.mjs` 和 `scripts/check-exhibition-session-limits.mjs` 的隔离浏览器回归。模拟不证明真实服装保真、长时 RTC、云端强制截止或 Android 摄像头实机效果；这些分别保留现场验收记录。

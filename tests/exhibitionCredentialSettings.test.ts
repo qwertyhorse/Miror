@@ -1,3 +1,5 @@
+// This suite isolates the existing XMAX editor; provider settings have separate integration coverage.
+vi.mock('../src/exhibition/ProviderSettingsForm', () => ({ ProviderSettingsForm: () => null }));
 import { act, createElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionState } from '../shared/exhibition';
@@ -150,7 +152,7 @@ describe('per-mirror XMAX credential settings', () => {
     expect(destination.pathname).toBe(appUrl('/exhibition/control')); expect(destination.searchParams.get('mirror')).toBe('east');
     expect(destination.searchParams.get('credentialForm')).toBe('1'); expect(destination.hash).toBe('');
     expect(destination.searchParams.get('parentOrigin')).toBe(`http://xuminghong.local:${httpPort}`);
-    expect(frame.getReactProps().title).toBe('XMAX SK 配置');
+    expect(frame.getReactProps().title).toBe('换装服务配置');
     expect(host!.find(node => node.nodeName === 'a')).toBeUndefined();
     expect(f.fetcher).not.toHaveBeenCalled();
     expect(f.putCalls()).toHaveLength(0);
@@ -172,7 +174,7 @@ describe('per-mirror XMAX credential settings', () => {
     ]) await frameMessage(data, eventOrigin as string, eventSource);
     expect(f.controller.refresh).not.toHaveBeenCalled();
     await frameMessage({ ...base, height: 800 }, origin, source);
-    expect(frame.getReactProps().style.height).toBe(300);
+    expect(frame.getReactProps().style.height).toBe(800);
     await frameMessage({ ...base, height: 4 }, origin, source);
     expect(frame.getReactProps().style.height).toBe(68);
     await frameMessage({ ...base, saved: true, height: 87.4 }, origin, source);

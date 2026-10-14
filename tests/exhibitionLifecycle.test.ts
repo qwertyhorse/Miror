@@ -89,6 +89,27 @@ describe('experience ownership and bounded recovery', () => {
     expect(f.mirror.get().lifecycle?.controllerEpoch).toBeGreaterThan(first.lifecycle!.controllerEpoch);
     expect(f.provider.issueKey).toHaveBeenCalledTimes(2);
   });
+  it.each(['cleanup', 'end', 'pause', 'next'])('rechecks semantic ownership after concurrent %s while reading the failure record', async action => {
+    const f = fixture(); f.start(); const session = await f.connect(); const before = f.mirror.get();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const originalGet = f.service.get.bind(f.service);
+    vi.spyOn(f.service, 'get').mockImplementationOnce(async id => { await gate; return originalGet(id, false); });
+    const pending = f.mirror.reportLiveError({ deviceId: f.owner, sessionId: session.id, lookId: before.selectedLookId,
+      sessionNumber: before.sessionNumber, generationNumber: before.generationNumber, reason: 'rtc_failed', message: 'RTC failed' });
+    const outcome = pending.then(value => ({ value, error: null }), error => ({ value: null, error }));
+    if (action !== 'cleanup') f.mirror.command({ action });
+    await f.service.stop(session.id); await f.mirror.reconcileLive(); release();
+    const result = await outcome;
+    if (action === 'cleanup') {
+      expect(result.error).toBeNull();
+      expect(result.value).toMatchObject({ phase: 'generating', live: null, lifecycle: { connection: 'recovering', experienceId: before.lifecycle!.experienceId } });
+      f.advance(1100); await f.connect(); expect(f.provider.issueKey).toHaveBeenCalledTimes(2);
+    } else {
+      expect(result.error).toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+      expect(f.provider.issueKey).toHaveBeenCalledTimes(1);
+    }
+  });
   it('ends immediately and rejects a late recovery report even when the stop response is delayed', async () => {
     const f = fixture(); f.start(); const old = await f.connect(); const state = f.mirror.get();
     f.mirror.command({ action: 'end', expectedRevision: -1 });

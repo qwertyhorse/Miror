@@ -222,11 +222,27 @@ describe('exhibition live client lifecycle', () => {
     await f.controller.start(); await flush();
     expect(f.deps.reportError).toHaveBeenCalledOnce();
     const report = f.deps.reportError.mock.calls[0][0];
+    expect(report.reason).toBe('rtc_failed');
     expect(report.message).toContain('local_publish_failed'); expect(report.message).toContain('publish');
     expect(report.message).not.toMatch(/tk-secret|sk-secret|example\.test/);
     expect(f.events.status).toHaveBeenCalledWith('error', '摄像头画面未能上传，请检查镜端网络后重试。');
     expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.deps.create).toHaveBeenCalledOnce();
     expect(f.sdk.set).not.toHaveBeenCalled(); expect(f.originalStop).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ code: 'INVALID_API_KEY' }, 'provider_rejected'],
+    [{ code: 'SESSION_ERROR', details: { http_status: 403 } }, 'provider_rejected'],
+    [{ code: 'WEB_RTC_ERROR', details: { reason_code: 'local_outbound_track_ended' } }, 'camera_lost'],
+    [{ code: 'UNKNOWN_ERROR' }, 'rtc_failed'],
+  ])('classifies early connection failure from evidence: %j', async (error, reason) => {
+    const f = fixture();
+    f.deps.connect.mockImplementationOnce(async (_stream, _local, callbacks) => {
+      callbacks.onError('connection failed', error); throw error;
+    });
+    await f.controller.start(); await flush();
+    expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ reason }));
+    expect(f.deps.stop).toHaveBeenCalledOnce();
   });
 
   it('reports a remote output timeout separately from local camera failure without another generation', async () => {

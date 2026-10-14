@@ -590,9 +590,15 @@ export class ExhibitionLiveConnection {
   }
   private failSdk(cause: unknown, fallbackMessage: string, operation = this.activeOperation) {
     const failure = exhibitionLiveFailure(cause, fallbackMessage);
-    if (!this.sdk) return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '', operation);
-    const code = (cause as { code?: string })?.code ?? '';
-    const reason = /AUTH|CREDIT|QUOTA|BALANCE|INVALID/.test(code) ? 'provider_rejected' : 'rtc_failed';
+    const error = cause && typeof cause === 'object' ? cause as { code?: unknown; details?: { http_status?: unknown; reason_code?: unknown } } : undefined;
+    const code = typeof error?.code === 'string' ? error.code.toUpperCase() : '';
+    const rejected = /AUTH|CREDIT|QUOTA|BALANCE|INVALID/.test(code) || [401, 403].includes(Number(error?.details?.http_status));
+    // SDK callbacks can precede resolution of connect(), before this.sdk exists.
+    // The stage identifies RTC ownership; object assignment is not a failure type.
+    const connectionStarted = !!this.sdk || this.failureStage === 'connect_sdk';
+    if (!connectionStarted) return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '', operation);
+    const reason: StopReason = error?.details?.reason_code === 'local_outbound_track_ended' ? 'camera_lost'
+      : rejected ? 'provider_rejected' : 'rtc_failed';
     return this.fail(failure.message, `reason=${reason}; client_stage=${this.failureStage}; ${failure.diagnostic ?? ''}`, operation);
   }
   private async fail(message: string, diagnostic = '', operation = this.activeOperation) {

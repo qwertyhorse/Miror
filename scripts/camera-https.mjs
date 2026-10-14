@@ -50,7 +50,7 @@ export function createCameraRequestHandler({ port = CAMERA_PORT, targetPort = WE
       response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       response.end(JSON.stringify({ gateway: 'camera-https', protocol: 'https', cameraUrl: CAMERA_URL, cameraIpUrls: [...allowedHosts].filter(host => isIP(host) && host !== '127.0.0.1').map(host => `https://${host}:${port}/v1.1/exhibition/screen`) })); return;
     }
-    const credentials = /^\/v1\.1\/api\/exhibition\/mirrors\/[a-z0-9][a-z0-9-]{0,63}\/credentials$/.test(decodeURIComponent(url.pathname));
+    const credentials = /^\/v1\.1\/api\/exhibition\/mirrors\/[a-z0-9][a-z0-9-]{0,63}\/(?:credentials|provider-settings(?:\/(?:verify|apply))?)$/.test(decodeURIComponent(url.pathname));
     const credentialForm = url.pathname === '/v1.1/exhibition/control' && url.searchParams.get('credentialForm') === '1';
     const responseHeaders = credentialForm ? { 'content-security-policy': `frame-ancestors 'self' ${[HTTP_PORT, HTTP_COMPAT_PORT, EXHIBITION_PORT].map(httpPort => `http://${url.hostname}:${httpPort}`).join(' ')}` } : {};
     proxyRequest(request, response, { targetPort: credentials ? credentialsPort : targetPort, protocol: 'https', camera: true, responseHeaders });

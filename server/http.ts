@@ -22,7 +22,7 @@ function browserTestRouteAllowed(method: string, path: string): boolean {
   return ['/command', '/live/session', '/live/heartbeat', '/live/error'].includes(path)
     || /^\/references\/[^/]+(?:\/retry)?$/.test(path)
     || /^\/live\/session\/[a-f0-9-]{36}\/(?:reference|condition(?:\/applied)?|renewal(?:\/commit)?)$/.test(path)
-    || /^\/sessions\/[a-f0-9-]{36}\/(?:stop|link|first-frame)$/.test(path);
+    || /^\/sessions\/[a-f0-9-]{36}\/(?:stop|link|first-frame|dial|released)$/.test(path);
 }
 
 function json(response: ServerResponse, status: number, body: unknown) {
@@ -106,6 +106,18 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           return json(response, 201, { mirror: created.mirror, expiresAt: created.expiresAt });
         }
         if (mirrorRoute && !path && request.method === 'DELETE') return json(response, 200, mirrors!.remove(mirrorId, await readBody()));
+        if (mirrorRoute && path === '/provider-settings' && !browserTest) {
+          if (request.method === 'GET') return json(response, 200, currentService.providerSettings(mirrorId));
+          if (request.method === 'PUT') return json(response, 200, currentService.saveProviderSettings(mirrorId, await readBody(2048), current.credentialsEditable()));
+        }
+        if (mirrorRoute && path === '/provider-settings/apply' && !browserTest && request.method === 'POST') {
+          const input = await readBody(2048); currentService.requestProviderSwitch(mirrorId, input.expectedRevision);
+          current.command({ action: 'end' }); await current.reconcileLive();
+          return json(response, 200, currentService.providerSettings(mirrorId));
+        }
+        if (mirrorRoute && path === '/provider-settings/verify' && !browserTest && request.method === 'POST') {
+          await readBody(2048); return json(response, 200, await currentService.verifyProvider(mirrorId));
+        }
         if (mirrorRoute && path === '/credentials') {
           if (request.method === 'GET') return json(response, 200, { ...currentService.mirrorCredentialsStatus(mirrorId, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
           if (request.method === 'PUT') {
@@ -173,6 +185,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await readBody()));
         if (request.method === 'POST' && path === '/live/session') {
           if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
+          if (current.liveStatus().providerId === 'decart' && request.headers['x-miror-realtime'] !== 'decart-v1') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请升级镜端以使用 Decart。', 426);
           const input = await readBody(); let localId: string | undefined;
           if (!browserTest) {
             mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
@@ -204,11 +217,13 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
             ? await current.liveConditionApplied(liveCondition[1], input)
             : await current.updateLiveCondition(liveCondition[1], input));
         }
-        const session = /^\/sessions\/([a-f0-9-]{36})(?:\/(stop|link|first-frame))?$/.exec(path);
+        const session = /^\/sessions\/([a-f0-9-]{36})(?:\/(stop|link|first-frame|dial|released))?$/.exec(path);
         if (mirrorRoute && session) {
           const [, id, action] = session;
           currentService.assertSessionMirror(id, mirrorId, true);
           if (!action && request.method === 'GET') return json(response, 200, await currentService.get(id));
+          if (action === 'dial' && request.method === 'POST') { const input = await readBody(); await current.reconcileLive(); return json(response, 200, await currentService.decartDial(id, input.releaseKey, request.headers.origin)); }
+          if (action === 'released' && request.method === 'POST') { const input = await readBody(); const result = currentService.clientReleased(id, input.releaseKey); await current.reconcileLive(); return json(response, 200, result); }
           if (action === 'stop' && request.method === 'POST') { const stopped = await currentService.stop(id); await current.reconcileLive(); return json(response, 200, stopped); }
           if (action === 'link' && request.method === 'POST') { const input = await readBody(); return json(response, 200, await currentService.link(id, input.providerSessionId as string)); }
           if (action === 'first-frame' && request.method === 'POST') { const input = await readBody(); const framed = await currentService.firstFrame(id, input.firstFrameMs as number); current.liveFirstFrame(id, framed.firstFrameMs!); return json(response, 200, framed); }

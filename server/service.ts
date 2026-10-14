@@ -1,3 +1,5 @@
+import { DecartProvider } from './decart.ts';
+import { DECART_MODEL, isDecartReference } from '../shared/providers.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -21,6 +23,7 @@ export interface ServiceOptions {
   referenceStorage?: (key: string, region: XmaxRegion) => ReferenceStorage;
   resolveHost?: (host: string) => Promise<string[]>;
   mirrorCredentials?: MirrorCredentialStore;
+  decartProvider?: (key: string) => DecartProvider;
   providerForApiKey?: (apiKey: string, region?: XmaxRegion) => Provider;
 }
 export function publicAddress(address: string): boolean {
@@ -62,8 +65,31 @@ export class TryOnService {
     if (!record.tokenCipher) throw new ApiError('SESSION_NOT_READY', '会话尚未签发临时凭证。', 409);
     return this.options.secrets.decrypt(record.tokenCipher);
   }
-  private providerForApiKey(apiKey: string, region: XmaxRegion = 'global'): Provider { return this.options.providerForApiKey?.(apiKey, region) ?? this.options.provider.forCredential?.(apiKey, region) ?? new XmaxProvider(apiKey, undefined, region); }
+  private providerForApiKey(apiKey: string, region: XmaxRegion = 'global'): Provider { if (apiKey.startsWith('dct_')) return this.decart(apiKey); return this.options.providerForApiKey?.(apiKey, region) ?? this.options.provider.forCredential?.(apiKey, region) ?? new XmaxProvider(apiKey, undefined, region); }
+  private decart(key: string) { return this.options.decartProvider?.(key) ?? new DecartProvider(key); }
+  providerSettings(mirrorId: string) { return this.options.mirrorCredentials?.providerSettings(mirrorId, this.options.provider.configured); }
+  activatePendingProvider(mirrorId: string) {
+    if (!this.providerSettings(mirrorId)?.pending) return;
+    if (this.hasBlockingMirrorSessions(mirrorId)) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '上一轮连接正在释放，请稍候。', 409);
+    this.options.mirrorCredentials?.activateProvider(mirrorId);
+  }
+  saveProviderSettings(mirrorId: string, input: { provider?: unknown; apiKey?: unknown; expectedRevision?: unknown }, editable: boolean) {
+    if (!this.options.mirrorCredentials) throw new ApiError('SETTINGS_UNAVAILABLE', '当前服务不支持设置。', 503);
+    if (input.apiKey && this.providerSettings(mirrorId)?.active === 'decart' && !editable) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请先结束体验，再更换当前服务的密钥。', 409);
+    return this.options.mirrorCredentials.saveProvider(mirrorId, input, editable && !this.hasBlockingMirrorSessions(mirrorId), this.options.provider.configured);
+  }
+  requestProviderSwitch(mirrorId: string, revision: unknown) { this.options.mirrorCredentials?.requestProviderSwitch(mirrorId, revision); }
+  finishProviderSwitch(mirrorId: string) { if (this.providerSettings(mirrorId)?.applyAfterStop && !this.hasBlockingMirrorSessions(mirrorId)) this.options.mirrorCredentials?.activateProvider(mirrorId); }
+  async verifyProvider(mirrorId: string) {
+    const key = this.options.mirrorCredentials?.decartKey(mirrorId);
+    await this.decart(key ?? '').verify(); return { authenticated: true, model: DECART_MODEL, generationStarted: false };
+  }
   private credentialContext(mirrorId?: string): { provider: Provider; scope: string; region: XmaxRegion; key?: string } {
+    if (mirrorId !== undefined && this.providerSettings(mirrorId)?.active === 'decart') {
+      const key = this.options.mirrorCredentials?.decartKey(mirrorId) ?? '';
+      return { provider: this.decart(key), scope: apiKeyBudgetScope(key), region: 'global', key };
+    }
+    if (this.options.provider.kind === 'decart') { const key = this.options.provider.credentialSnapshot!(); return { provider: this.options.provider, scope: apiKeyBudgetScope(key), region: 'global', key }; }
     const override = mirrorId === undefined ? undefined : this.options.mirrorCredentials?.apiKey(mirrorId);
     const config = mirrorId === undefined ? undefined : this.options.mirrorCredentials?.configuration(mirrorId);
     const region = override === undefined ? this.options.provider.region ?? 'global' : config?.region ?? 'global';
@@ -74,12 +100,13 @@ export class TryOnService {
   /** Independent browser ownership uses a frozen source credential, never its mutable mirror configuration. */
   forBrowserTest(sourceMirrorId: string): TryOnService {
     const context = this.credentialContext(sourceMirrorId);
-    if (!context.key || !/^uk-[A-Za-z0-9_-]+$/u.test(context.key) || !context.provider.configured) {
+    if (!context.key || ! /^(?:uk-|dct_)[A-Za-z0-9_-]+$/u.test(context.key) || !context.provider.configured) {
       throw new ApiError('MISSING_API_KEY', '请先为这台智能镜配置 XMAX 密钥。', 503);
     }
     const key = context.key; const region = context.region;
     // Rebuild even a default provider: its key can be changed in place after this snapshot.
     const frozen = this.providerForApiKey(key, region);
+    if (frozen.kind === 'decart') return new TryOnService({ ...this.options, provider: frozen, mirrorCredentials: undefined });
     const provider: Provider = {
       configured: frozen.configured, region, credentialSnapshot: () => key,
       forCredential: (value, nextRegion) => this.providerForApiKey(value, nextRegion),
@@ -92,7 +119,7 @@ export class TryOnService {
   }
   private referenceContext(mirrorId: string) {
     const context = this.credentialContext(mirrorId);
-    const scope = createHash('sha256').update(`${context.region}:${context.scope}`).digest('hex');
+    const scope = createHash('sha256').update(`${context.provider.kind === 'decart' ? 'decart:' : ''}${context.region}:${context.scope}`).digest('hex');
     return { ...context, scope };
   }
   readyReference(mirrorId: string, bytes: Buffer, mime: string) {
@@ -109,7 +136,7 @@ export class TryOnService {
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return null;
     let provider = this.referenceProviders.get(context.scope);
     if (!provider) {
-      provider = this.options.referenceStorage?.(context.key, context.region) ?? referenceStorage(context.key, context.region);
+      provider = context.provider.kind === 'decart' ? this.decart(context.key).references() : this.options.referenceStorage?.(context.key, context.region) ?? referenceStorage(context.key, context.region);
       this.referenceProviders.set(context.scope, provider);
       while (this.referenceProviders.size > 16) this.referenceProviders.delete(this.referenceProviders.keys().next().value!);
     }
@@ -133,7 +160,7 @@ export class TryOnService {
     return context.provider;
   }
   public(record: SessionRecord) {
-    const { tokenCipher: _secret, providerKeyCipher: _providerSecret, ...safe } = record;
+    const { tokenCipher: _secret, providerKeyCipher: _providerSecret, clientReleaseHash: _releaseSecret, ...safe } = record;
     return safe.exhibition ? { ...safe, exhibition: { ...safe.exhibition, mirrorId: safe.exhibition.mirrorId ?? 'default' } } : safe;
   }
   /** Check immutable session ownership before reading provider state or mutating a session. */
@@ -169,7 +196,7 @@ export class TryOnService {
       if (this.options.store.get(id).status === 'stopped') this.orphanRetryAt.delete(id);
     }
     await Promise.all(records.map(async record => {
-      if (record.id === currentSessionId || this.issuingMirrors.has(record.id) || !record.tokenCipher
+      if (record.id === currentSessionId || this.issuingMirrors.has(record.id) || (!record.tokenCipher && record.providerId !== 'decart')
         || (this.orphanRetryAt.get(record.id) ?? 0) > Date.now()) return;
       try {
         // A previous revoke may have succeeded while its response was lost.
@@ -184,7 +211,7 @@ export class TryOnService {
   }
   status(mirrorId?: string) {
     const context = this.credentialContext(mirrorId);
-    return { configured: context.provider.configured, model: 'x2.0', providerRegion: context.region,
+    return { configured: context.provider.configured, model: context.provider.kind === 'decart' ? DECART_MODEL : 'x2.0', providerId: context.provider.kind ?? 'xmax', providerRegion: context.region,
       perSessionLimit: this.perSessionLimit,
       activeSessions: this.options.store.list().filter(s => ['reserved', 'active', 'stopping', 'issuance_unknown'].includes(s.status) && (mirrorId === undefined || (s.exhibition && (s.exhibition.mirrorId ?? 'default') === mirrorId))).map(s => this.public(s)),
     };
@@ -198,7 +225,8 @@ export class TryOnService {
   }
   mirrorCredentialsStatus(mirrorId: string, editable = true): ExhibitionCredentialsStatus {
     const config = this.options.mirrorCredentials?.configuration(mirrorId) ?? { revision: 0, hasOverride: false, region: 'global' as const };
-    const context = this.credentialContext(mirrorId);
+    const xmaxKey = this.options.mirrorCredentials?.apiKey(mirrorId);
+    const context = { provider: xmaxKey ? this.providerForApiKey(xmaxKey, config.region) : this.options.provider, region: config.hasOverride ? config.region : this.options.provider.region ?? 'global' };
     return { configured: context.provider.configured, source: config.hasOverride ? 'mirror' : 'default', revision: config.revision, region: context.region,
       hasUnconfirmedSession: this.options.store.list().some(row => row.exhibition && (row.exhibition.mirrorId ?? 'default') === mirrorId && (row.status === 'issuance_unknown' || this.isUnknownIssuance(row))),
       editable: editable && !!this.options.mirrorCredentials && this.canChangeMirrorCredentials(mirrorId), perSessionLimit: this.perSessionLimit };
@@ -234,11 +262,13 @@ export class TryOnService {
     if (!isSessionLimits(limits)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请设置有效的单轮积分上限与凭证有效期。');
     const credits = limits.credits ?? CONTINUOUS_SEGMENT_CREDITS;
     const context = this.credentialContext(extra.exhibition ? extra.exhibition.mirrorId ?? 'default' : undefined);
-    if (!context.provider.configured) throw new ApiError('MISSING_API_KEY', '尚未配置 XMax 服务端凭证。', 503);
+    if (!context.provider.configured) throw new ApiError('MISSING_API_KEY', '请先配置所选换装服务的密钥。', 503);
+    const decart = context.provider.kind === 'decart';
+    if (decart && extra.exhibition?.mode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
     const now = new Date().toISOString();
-    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: credits,
+    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: decart ? Number.MAX_SAFE_INTEGER : credits, ...(decart ? { providerId: 'decart' as const, model: DECART_MODEL, usageStatus: 'unavailable' as const } : {}),
       refImageUrl: reference, referenceAsset, referenceVersion: 0, consumedCredits: 0, resultAvailable: false, verification: 'none', createdAt: now, updatedAt: now,
-      referenceScope: createHash('sha256').update(`${context.region}:${context.scope}`).digest('hex'),
+      referenceScope: createHash('sha256').update(`${context.provider.kind === 'decart' ? 'decart:' : ''}${context.region}:${context.scope}`).digest('hex'),
       providerRegion: context.region, ...(context.key ? { providerKeyCipher: this.options.secrets.encrypt(context.key) } : {}) };
     // Keep ambiguous issuance records for cancellation and revocation. No local cumulative budget.
     if (extra.exhibition) this.issuingMirrors.set(record.id, extra.exhibition.mirrorId ?? 'default');
@@ -246,8 +276,11 @@ export class TryOnService {
       this.options.store.reserve(record, undefined, context.scope); hooks?.onReserved?.(record.id);
       try {
         if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') { this.options.store.update(record.id, { status: 'stopped' }); throw new ApiError('SESSION_CANCELLED', '试穿已取消。', 409); }
-        const issued = await context.provider.issueKey(credits, limits.expireSeconds);
-        this.options.store.update(record.id, { tokenCipher: this.options.secrets.encrypt(issued.token), expiresAt: issued.expiresAt });
+        const releaseKey = decart ? randomUUID() : undefined;
+        const seconds = Math.max(10, Math.min(3600, limits.expireSeconds));
+        const issued = decart ? { token: '', expiresAt: new Date(Date.now() + seconds * 1000).toISOString() } : await context.provider.issueKey(credits, limits.expireSeconds);
+        if (decart) this.options.store.update(record.id, { maxSessionDuration: seconds, clientReleaseHash: createHash('sha256').update(releaseKey!).digest('hex') });
+        this.options.store.update(record.id, { ...(decart ? {} : { tokenCipher: this.options.secrets.encrypt(issued.token) }), expiresAt: issued.expiresAt });
         if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') {
           await this.stop(record.id);
           // A stop requested before issuance can still be settling without a token.
@@ -257,11 +290,11 @@ export class TryOnService {
           throw new ApiError('SESSION_CANCELLED', '试穿已取消，临时凭证已停止。', 409);
         }
         const active = this.options.store.update(record.id, { status: 'active' });
-        return { ...this.public(active), token: issued.token, model: 'x2.0' };
+        return { ...this.public(active), token: issued.token, model: decart ? DECART_MODEL : 'x2.0', ...(releaseKey ? { releaseKey } : {}) };
       } catch (error) {
         const code = error instanceof ApiError ? error.code : 'PROVIDER_UNKNOWN_ERROR';
         const current = this.options.store.get(record.id);
-        if (code !== 'SESSION_CANCELLED' && current.status !== 'stopped') this.options.store.update(record.id, { status: current.tokenCipher ? 'stopping' : 'issuance_unknown', errorCode: code });
+        if (code !== 'SESSION_CANCELLED' && current.status !== 'stopped') this.options.store.update(record.id, { status: decart && !current.tokenCipher ? 'stopped' : current.tokenCipher ? 'stopping' : 'issuance_unknown', errorCode: code });
         this.options.store.error(record.id, code);
         throw error instanceof ApiError ? error : new ApiError(code, 'XMax 会话签发状态未确认，请联系工作人员。', 502);
       }
@@ -269,6 +302,10 @@ export class TryOnService {
   }
   async get(id: string, sync = true) {
     let record = this.options.store.get(id);
+    if (record.providerId === 'decart') {
+      if (record.status !== 'stopped' && record.releaseAfter && Date.parse(record.releaseAfter) <= Date.now()) this.options.store.update(id, { status: 'stopped', releaseEvidence: 'bounded_expiry' });
+      return this.public(this.options.store.get(id));
+    }
     if (sync && record.tokenCipher) {
       try {
         const provider = this.sessionProvider(record);
@@ -287,10 +324,10 @@ export class TryOnService {
     if (record.exhibition && record.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能关联供应商会话。', 409);
     const promptOnlyExhibition = record.exhibition?.mode === 'free' && record.referenceAsset === '' && record.refImageUrl === '';
     if (!record.refImageUrl && !promptOnlyExhibition) throw new ApiError('REFERENCE_NOT_READY', '请先上传并绑定服装参考图。', 409);
-    if (!/^ums-[A-Za-z0-9_-]+$/.test(uid)) throw new ApiError('INVALID_PROVIDER_SESSION', '供应商会话 ID 格式无效。');
+    if (!(record.providerId === 'decart' ? /^[A-Za-z0-9_-]{1,200}$/ : /^ums-[A-Za-z0-9_-]+$/).test(uid)) throw new ApiError('INVALID_PROVIDER_SESSION', '供应商会话 ID 格式无效。');
     if (record.providerSessionId && record.providerSessionId !== uid) throw new ApiError('SESSION_LINK_IMMUTABLE', '同一会话不可更换供应商会话 ID。', 409);
     if (this.options.store.list().some(s => s.id !== id && s.providerSessionId === uid)) throw new ApiError('SESSION_ALREADY_LINKED', '供应商会话已关联其他本地记录。', 409);
-    const info = await this.sessionProvider(record).sessionStatus(this.token(record), uid);
+    const info = record.providerId === 'decart' ? { consumedCredit: 0 } : await this.sessionProvider(record).sessionStatus(this.token(record), uid);
     // Re-check after await; another request may have stopped the exhibition or won the same link.
     const latest = this.options.store.get(id);
     if (record.exhibition && latest.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能关联供应商会话。', 409);
@@ -304,6 +341,29 @@ export class TryOnService {
     if (!record.providerSessionId) throw new ApiError('SESSION_NOT_LINKED', '请先关联供应商会话。', 409);
     if (typeof firstFrameMs !== 'number' || !Number.isFinite(firstFrameMs) || firstFrameMs < 0 || firstFrameMs > 120_000) throw new ApiError('INVALID_INPUT', '首帧耗时无效。');
     return this.public(this.options.store.update(id, { firstFrameMs: record.firstFrameMs ?? firstFrameMs }));
+  }
+  private assertReleaseKey(record: SessionRecord, releaseKey: unknown) {
+    if (record.providerId !== 'decart' || typeof releaseKey !== 'string' || !record.clientReleaseHash || createHash('sha256').update(releaseKey).digest('hex') !== record.clientReleaseHash)
+      throw new ApiError('EXHIBITION_OWNER_MISMATCH', '连接授权无效。', 409);
+  }
+  async decartDial(id: string, releaseKey: unknown, origin?: string) {
+    const record = this.options.store.get(id); this.assertReleaseKey(record, releaseKey);
+    if (record.status !== 'active' || record.dialState || !isDecartReference(record.refImageUrl) || !record.providerKeyCipher) throw new ApiError('SESSION_INACTIVE', '连接授权已失效，请重新开始。', 409);
+    // Persist an upper bound before the request: a response lost during issuance must never block forever.
+    const seconds = record.maxSessionDuration!;
+    this.options.store.update(id, { dialState: 'issuing', releaseAfter: new Date(Date.now() + (seconds + 50) * 1000).toISOString() });
+    const grant = await this.decart(this.options.secrets.decrypt(record.providerKeyCipher)).issue(seconds, origin);
+    const latest = this.options.store.get(id);
+    if (latest.status !== 'active') { this.options.store.update(id, { status: 'stopped' }); throw new ApiError('SESSION_INACTIVE', '体验已结束。', 409); }
+    this.options.store.update(id, { dialState: 'issued', dialExpiresAt: grant.dialExpiresAt, releaseAfter: new Date(Date.parse(grant.dialExpiresAt) + (seconds + 5) * 1000).toISOString() });
+    return { token: grant.token, expiresAt: grant.dialExpiresAt };
+  }
+  clientReleased(id: string, releaseKey: unknown) {
+    const record = this.options.store.get(id);
+    if (record.providerId !== 'decart' || typeof releaseKey !== 'string' || !record.clientReleaseHash || createHash('sha256').update(releaseKey).digest('hex') !== record.clientReleaseHash)
+      throw new ApiError('EXHIBITION_OWNER_MISMATCH', '连接释放回执无效。', 409);
+    // Client transport evidence is explicit; this is not a provider revocation or billing receipt.
+    return this.public(this.options.store.update(id, { status: 'stopped', releaseEvidence: 'client_transport_closed' }));
   }
   stop(id: string): Promise<Omit<SessionRecord, 'tokenCipher' | 'providerKeyCipher'>> {
     const existing = this.stoppingSessions.get(id);
@@ -323,7 +383,7 @@ export class TryOnService {
     if (!['stopped', 'stopping'].includes(record.status)) this.options.store.update(id, { status: 'stopping' });
   }
   private isUnknownIssuance(record: SessionRecord): boolean {
-    return !record.tokenCipher && (record.status === 'issuance_unknown' || (record.status === 'stopping' && !!record.errorCode));
+    return record.providerId !== 'decart' && !record.tokenCipher && (record.status === 'issuance_unknown' || (record.status === 'stopping' && !!record.errorCode));
   }
   private async stopNow(id: string) {
     const record = this.options.store.get(id);
@@ -332,6 +392,10 @@ export class TryOnService {
       return this.public(record.status === 'issuance_unknown' ? record : this.options.store.update(id, { status: 'issuance_unknown' }));
     }
     this.options.store.update(id, { status: 'stopping' });
+    if (record.providerId === 'decart') {
+      if (!record.dialState) this.options.store.update(id, { status: 'stopped' });
+      return this.get(id);
+    }
     if (!record.tokenCipher) return this.public(this.options.store.get(id));
     try {
       const info = await this.sessionProvider(record).deactivate(this.token(record));
@@ -356,7 +420,12 @@ export class TryOnService {
     if (!record.exhibition || record.exhibition.deviceId !== input.deviceId || record.exhibition.lookId !== input.lookId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前设备或服装与会话不匹配。', 409);
     if (record.exhibition.mode === 'free' && record.referenceAsset === '') throw new ApiError('EXHIBITION_REFERENCE_NOT_REQUIRED', '此 Free 素材仅使用提示词，不能绑定封面或参考图。', 409);
     if (record.status !== 'active' || record.providerSessionId || record.refImageUrl) throw new ApiError('EXHIBITION_REFERENCE_LOCKED', '展会参考图已锁定或会话已结束。', 409);
-    const refImageUrl = boundedText(input.refImageUrl, '参考图链接', 4096); const url = httpsUrl(refImageUrl);
+    const refImageUrl = boundedText(input.refImageUrl, '参考图链接', 4096);
+    if (record.providerId === 'decart') {
+      if (!isDecartReference(refImageUrl)) throw new ApiError('INVALID_REMOTE_URL', 'Decart 素材引用无效。');
+      return this.public(this.options.store.update(id, { refImageUrl, referenceVersion: 1 }));
+    }
+    const url = httpsUrl(refImageUrl);
     const addresses = await (this.options.resolveHost ? this.options.resolveHost(url.hostname) : lookup(url.hostname, { all: true }).then(rows => rows.map(row => row.address)));
     if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ApiError('REFERENCE_ADDRESS_BLOCKED', '参考图必须是 SDK 上传后可访问的云端链接。');
     const latest = this.options.store.get(id);
@@ -365,8 +434,8 @@ export class TryOnService {
   }
   async recover() {
     for (const record of this.options.store.list()) {
-      if (['reserved', 'stopping'].includes(record.status) && !record.tokenCipher) this.options.store.update(record.id, { status: 'issuance_unknown', errorCode: record.errorCode ?? 'RESTART_DURING_ISSUANCE' });
-      if (record.tokenCipher && ['active', 'stopping', 'reserved'].includes(record.status)) {
+      if (record.providerId !== 'decart' && ['reserved', 'stopping'].includes(record.status) && !record.tokenCipher) this.options.store.update(record.id, { status: 'issuance_unknown', errorCode: record.errorCode ?? 'RESTART_DURING_ISSUANCE' });
+      if ((record.tokenCipher || record.providerId === 'decart') && ['active', 'stopping', 'reserved'].includes(record.status)) {
         try { await this.stop(record.id); } catch { /* persisted stopping state; never claim revocation succeeded */ }
       }
     }
@@ -403,7 +472,8 @@ export class TryOnService {
     const stale = () => new ApiError('EXHIBITION_STALE_GENERATION', '素材选择已更新，请使用当前素材。', 409);
     if (!isCurrent() || input.generationNumber < record.exhibition.generationNumber || (input.generationNumber === record.exhibition.generationNumber && !sameCondition(record))) throw stale();
     if (input.generationNumber === record.exhibition.generationNumber) return this.public(record);
-    if (!noReference) {
+    if (record.providerId === 'decart' && !isDecartReference(refImageUrl)) throw new ApiError('INVALID_REMOTE_URL', 'Decart 素材引用无效。');
+    if (!noReference && record.providerId !== 'decart') {
       const url = httpsUrl(refImageUrl);
       const addresses = await (this.options.resolveHost ? this.options.resolveHost(url.hostname) : lookup(url.hostname, { all: true }).then(rows => rows.map(row => row.address)));
       if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ApiError('REFERENCE_ADDRESS_BLOCKED', '参考图必须是 SDK 上传后可访问的云端链接。');

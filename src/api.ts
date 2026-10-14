@@ -4,6 +4,8 @@ import type { XmaxRegion } from '../shared/xmax';
 /** The fields used to verify and close a smart-mirror generation session. */
 export interface SessionData {
   id: string;
+  providerId?: 'xmax' | 'decart';
+  releaseKey?: string;
   providerRegion?: XmaxRegion;
   referenceScope?: string;
   status: string;
@@ -30,7 +32,7 @@ export class ApiError extends Error {
 export async function api<T>(path: string, method = 'GET', payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(appUrl(`/api${path}`), {
     method,
-    headers: { 'X-Miror-Protocol': '2', ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-Miror-Protocol': '2', 'X-Miror-Realtime': 'decart-v1', ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: payload !== undefined ? JSON.stringify(payload) : undefined,
     cache: 'no-store',
     signal,

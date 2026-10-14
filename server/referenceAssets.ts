@@ -1,3 +1,4 @@
+import { isDecartReference } from '../shared/providers.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,6 +14,7 @@ export interface ReferenceStorage {
 }
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 export function safeReferenceUrl(value: string): boolean {
+  if (isDecartReference(value)) return true;
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash

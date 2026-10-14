@@ -3,6 +3,7 @@ package ai.openbuy.exhibition
 import android.Manifest
 import android.app.Activity
 import android.app.Dialog
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -312,6 +313,15 @@ class NativeExhibitionActivity : Activity() {
                     (latest.optJSONObject("lifecycle")?.optLong("retryAt", 0) ?: 0) <= System.currentTimeMillis() &&
                     activeKey !in attempted && latest.optLong("generationNumber") > (stoppedGeneration[id] ?: -1) &&
                     !stopBusy && !cameraSettingsOpen && !controller.hasReleaseFailure && live == null && (!needsCamera || cameraReady)
+                if (roundJob == null && canConnect && id != null) provider = api.liveStatus(id)
+                if (roundJob == null && !cameraSettingsOpen && !stopBusy && provider?.string("providerId") == "decart") {
+                    controller.disconnect()
+                    cameraReady = false
+                    if (controller.hasReleaseFailure) { error = "摄像头释放未确认，请重试。"; render(); delay(1000); continue }
+                    prefs.edit().putString("screen-url", screenUrl).apply()
+                    startActivity(Intent(this@NativeExhibitionActivity, MainActivity::class.java))
+                    awaitCancellation()
+                }
                 if (roundJob == null && canConnect) {
                     val owner = api
                     controller.disconnect()

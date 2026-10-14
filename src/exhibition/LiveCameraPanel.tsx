@@ -51,7 +51,7 @@ export function StreamVideo({ stream, mirrored = false, className = '', label = 
 
 const statusLabel: Record<ExhibitionLiveController['status'], string> = {
   off: '摄像头未开启', opening: '等待摄像头权限', preview: '本地预览已开启', preparing: '正在准备服装素材',
-  connecting: '正在连接 XMAX', running: 'XMAX 实时换装中', stopping: '正在停止换装', error: '需要检查连接', 'other-device': '另一台大屏正在体验',
+  connecting: '正在连接换装服务', running: '实时换装中', stopping: '正在停止换装', error: '需要检查连接', 'other-device': '另一台大屏正在体验',
 };
 export function LiveCameraPanel({ live, compact = false, mirrorId = 'default' }: { live: ExhibitionLiveController; compact?: boolean; mirrorId?: string }) {
   const cameraHost = window.location.hostname;

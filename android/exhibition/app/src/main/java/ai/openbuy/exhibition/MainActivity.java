@@ -119,6 +119,7 @@ public final class MainActivity extends Activity {
             body.put("token", terminalToken);
             body.put("label", terminalLabel());
             body.put("platform", "android");
+            body.put("cameraEngine", "web");
             return nativeResponse(200, "OK", body.toString());
         } catch (JSONException error) {
             return nativeResponse(503, "Unavailable", "{\"native\":true,\"error\":\"设备标识暂时不可用，请重启应用后重试。\"}");

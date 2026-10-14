@@ -230,6 +230,7 @@ export function isExhibitionLocallyEnded(state: Pick<ExhibitionState, 'phase' | 
   return ['idle', 'select'].includes(state.phase) && state.live?.status === 'error' && state.live.localEnded === true;
 }
 export interface ExhibitionLiveStatus {
+  providerId?: 'xmax' | 'decart';
   configured: boolean;
   providerRegion?: XmaxRegion;
   mode: 'demo' | 'xmax';

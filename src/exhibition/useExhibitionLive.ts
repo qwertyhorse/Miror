@@ -1,3 +1,5 @@
+import { connectDecart } from './decartRealtime';
+import { isDecartReference } from '../../shared/providers';
 import { TerminalLease, HEARTBEAT_INTERVAL_MS, HEARTBEAT_REQUEST_MS, type StopReason } from '../../shared/exhibitionLifecycle';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type CreatedSession, type SessionData } from '../api';
@@ -36,7 +38,7 @@ export interface ExhibitionLiveDeps {
   preparedReference?: (input: LiveInput, signal: AbortSignal) => Promise<{ url: string; scope: string; freshUntil: number } | null>;
   create: (input: LiveInput) => Promise<LiveSession>;
   reference: (input: LiveInput, signal: AbortSignal) => Promise<File>;
-  upload: (file: File, token: string, signal: AbortSignal, region?: XmaxRegion) => Promise<string>;
+  upload: (file: File, token: string, signal: AbortSignal, region?: XmaxRegion, input?: LiveInput, local?: LiveSession) => Promise<string>;
   bind: (id: string, input: { deviceId: string; lookId: string; refImageUrl: string }, signal: AbortSignal) => Promise<SessionData>;
   updateCondition?: (id: string, input: ConditionInput, signal: AbortSignal) => Promise<SessionData>;
   conditionApplied?: (id: string, input: ConditionInput & { referenceVersion: number }, signal: AbortSignal) => Promise<unknown>;
@@ -73,7 +75,13 @@ function liveDefaults(mirrorId: string): ExhibitionLiveDeps {
       throw new Error('参考图不可用，请重新上传有效图片。');
     return new File([blob], `garment.${blob.type.split('/')[1]}`, { type: blob.type });
   },
-  upload: async (file, token, signal, region = 'global') => {
+  upload: async (file, token, signal, region = 'global', input, local) => {
+    if (local?.providerId === 'decart') {
+      if (!input) throw new Error('缺少素材信息。');
+      const result = await api<{ reference: { url: string; scope: string } | null }>(path(`references/${encodeURIComponent(input.lookId)}`), 'POST', {}, signal);
+      if (!result.reference || result.reference.scope !== local.referenceScope || !isDecartReference(result.reference.url)) throw new Error('素材准备失败，请重试。');
+      return result.reference.url;
+    }
     if (!cachedFiles || cachedFiles.token !== token || cachedFiles.region !== region) {
       const entry = { token, region, promise: createFilesClient(token, region) };
       cachedFiles = entry;
@@ -86,6 +94,7 @@ function liveDefaults(mirrorId: string): ExhibitionLiveDeps {
   updateCondition: (id, input, signal) => api(path(`live/session/${encodeURIComponent(id)}/condition`), 'POST', input, signal),
   conditionApplied: (id, input, signal) => api(path(`live/session/${encodeURIComponent(id)}/condition/applied`), 'POST', input, signal),
   connect: async (source, local, callbacks) => {
+    if (local.providerId === 'decart') return connectDecart(source, local, callbacks, () => api(sessionPath(local.id, 'dial'), 'POST', { releaseKey: local.releaseKey }), () => api(sessionPath(local.id, 'released'), 'POST', { releaseKey: local.releaseKey }));
     const { createXmaxClient, models } = await exhibitionSdk(local.providerRegion);
     const client = createXmaxClient({ apiKey: local.token, locale: 'zh-CN', telemetry: false });
     const options = {
@@ -328,7 +337,7 @@ export class ExhibitionLiveConnection {
       this.expiryTimer = setTimeout(() => void this.fail('正在恢复连接。', 'reason=credential_expired'), Math.min(lifetime, 2147483647));
       this.events.refresh();
       this.failureStage = 'prepare_sdk';
-      await this.deps.prepare(providerRegion);
+      if (local.providerId !== 'decart') await this.deps.prepare(providerRegion);
       if (this.closed) return;
       let refImageUrl: string | undefined;
       if (hasReference) {
@@ -338,7 +347,7 @@ export class ExhibitionLiveConnection {
           refImageUrl = prepared.url; this.emitDiagnostic('reference_cache_hit', operation);
         } else {
           file ??= await this.deps.reference(input, this.controller.signal);
-          refImageUrl = await this.deps.upload(file, local.token, this.controller.signal, providerRegion);
+          refImageUrl = await this.deps.upload(file, local.token, this.controller.signal, providerRegion, input, this.local);
         }
         if (this.closed) return;
         if (!prepared || prepared.scope !== local.referenceScope || prepared.freshUntil <= Date.now()) this.emitDiagnostic('upload_ready', operation);
@@ -457,7 +466,7 @@ export class ExhibitionLiveConnection {
     if (this.closed) controller.abort();
     try {
       const ready = await deadline(this.deps.preparedReference(input, controller.signal), 1500);
-      return ready && /^https:\/\//.test(ready.url) && ready.freshUntil > Date.now() ? ready : null;
+      return ready && (/^https:\/\//.test(ready.url) || isDecartReference(ready.url)) && ready.freshUntil > Date.now() ? ready : null;
     } catch { return null; }
     finally { controller.abort(); this.controller.signal.removeEventListener('abort', abort); }
   }
@@ -481,7 +490,7 @@ export class ExhibitionLiveConnection {
           const file = await deadline(this.deps.reference(input, controller.signal), 15_000);
           if (this.closed || !this.local) throw new Error('本次体验已结束。');
           if (operation) { this.emitDiagnostic('reference_ready', operation); this.emitDiagnostic('upload_started', operation); }
-          const uploaded = await deadline(this.deps.upload(file, this.local.token, controller.signal, this.local.providerRegion), 20_000);
+          const uploaded = await deadline(this.deps.upload(file, this.local.token, controller.signal, this.local.providerRegion, input, this.local), 20_000);
           if (operation) this.emitDiagnostic('upload_ready', operation);
           return uploaded;
         } finally { controller.abort(); if (this.referenceControllers.get(key) === controller) this.referenceControllers.delete(key); this.controller.signal.removeEventListener('abort', abort); }
@@ -592,12 +601,12 @@ export class ExhibitionLiveConnection {
     const failure = exhibitionLiveFailure(cause, fallbackMessage);
     const error = cause && typeof cause === 'object' ? cause as { code?: unknown; details?: { http_status?: unknown; reason_code?: unknown } } : undefined;
     const code = typeof error?.code === 'string' ? error.code.toUpperCase() : '';
-    const rejected = /AUTH|CREDIT|QUOTA|BALANCE|INVALID/.test(code) || [401, 403].includes(Number(error?.details?.http_status));
+    const rejected = /AUTH|CREDIT|QUOTA|BALANCE|INVALID|REQUEST_REJECTED/.test(code) || [401, 403].includes(Number(error?.details?.http_status));
     // SDK callbacks can precede resolution of connect(), before this.sdk exists.
     // The stage identifies RTC ownership; object assignment is not a failure type.
     const connectionStarted = !!this.sdk || this.failureStage === 'connect_sdk';
     if (!connectionStarted) return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '', operation);
-    const reason: StopReason = error?.details?.reason_code === 'local_outbound_track_ended' ? 'camera_lost'
+    const reason: StopReason = error?.details?.reason_code === 'credential_expired' ? 'credential_expired' : error?.details?.reason_code === 'local_outbound_track_ended' ? 'camera_lost'
       : rejected ? 'provider_rejected' : 'rtc_failed';
     return this.fail(failure.message, `reason=${reason}; client_stage=${this.failureStage}; ${failure.diagnostic ?? ''}`, operation);
   }
@@ -641,7 +650,10 @@ export class ExhibitionLiveConnection {
         // Start both independently, and drain resources that arrive while an
         // earlier stop is awaiting confirmation. Failed resources retry only
         // after another explicit stop, never in an unbounded loop.
-        if (sdk && !this.sdkDisconnected) tasks.push(deadline(Promise.resolve().then(() => sdk.disconnect())).then(() => { this.sdkDisconnected = true; }));
+        if (local?.providerId === 'decart' && sdk && !this.sdkDisconnected) {
+          try { await deadline(sdk.disconnect()); this.sdkDisconnected = true; } catch { confirmed = false; }
+        }
+        if (sdk && !this.sdkDisconnected && local?.providerId !== 'decart') tasks.push(deadline(Promise.resolve().then(() => sdk.disconnect())).then(() => { this.sdkDisconnected = true; }));
         if (local && !this.credentialStopped) tasks.push(deadline(Promise.resolve().then(() => this.deps.stop(local.id)), 15000).then(result => {
           if (result.status !== 'stopped') throw new Error('stop-unconfirmed');
           this.credentialStopped = true;
@@ -806,9 +818,9 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   }, [refreshStatus]);
   useEffect(() => {
     if (!active || !secure || state?.providerMode !== 'xmax' || !liveStatus?.configured
-      || !isXmaxRegion(liveStatus.providerRegion)) return;
+      || liveStatus.providerId === 'decart' || !isXmaxRegion(liveStatus.providerRegion)) return;
     return prepareExhibitionEntry(liveStatus.providerRegion);
-  }, [identity, active, secure, state?.providerMode, liveStatus?.configured, liveStatus?.providerRegion]);
+  }, [identity, active, secure, state?.providerMode, liveStatus?.configured, liveStatus?.providerRegion, liveStatus?.providerId]);
   useEffect(() => {
     if (!active || (previousMode.current === 'xmax' && state?.providerMode !== 'xmax') || previousExperience.current !== state?.experienceMode) stopCamera();
     previousMode.current = state?.providerMode; previousExperience.current = state?.experienceMode;

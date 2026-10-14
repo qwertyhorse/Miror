@@ -68,7 +68,7 @@ export function SessionLimitSettings({ controller }: { controller: ExhibitionCon
       {!displayed.unlimited && <label htmlFor={`${id}-credits`}><span>积分额度</span><input id={`${id}-credits`} name="credits" type="number" inputMode="numeric" min={1} max={SESSION_CREDIT_MAX} step={1} required value={displayed.credits} disabled={disabled} onChange={event => { const credits = event.target.value; edit(value => ({ ...value, credits })); }} /></label>}
       <label htmlFor={`${id}-expiry`}><span>{expiryLabel}</span><input id={`${id}-expiry`} name="expireSeconds" type="number" inputMode="numeric" min={minimumExpiry} max={SESSION_EXPIRY_MAX} step={1} required value={displayed.expireSeconds} disabled={disabled} onChange={event => { const expireSeconds = event.target.value; edit(value => ({ ...value, expireSeconds })); }} /></label>
     </div>
-    {displayed.unlimited && <p id={`${id}-unlimited-note`} className="ex-session-limit-note">每段使用独立临时凭证，到期自动续接；可随时结束体验。续接可能短暂停顿，仍受 XMAX 余额限制。</p>}
+    {displayed.unlimited && <p id={`${id}-unlimited-note`} className="ex-session-limit-note">每段使用独立临时凭证，到期自动续接；可随时结束体验。续接可能短暂停顿，仍受所选服务的余额限制。</p>}
     <div className="ex-session-limit-actions">
       <button className="ex-button ex-primary" type="submit" disabled={disabled || !valid || stale || !changed}>{saving ? '保存中…' : '保存会话额度'}</button>
       <button className="ex-button" type="button" disabled={disabled} onClick={() => edit(() => makeDraft(DEFAULT_SESSION_LIMITS, currentKey))}>恢复默认</button>

@@ -1,3 +1,4 @@
+import { ProviderSettingsForm } from './ProviderSettingsForm';
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Check } from 'lucide-react';
 import { isExhibitionLocallyEnded, type ExhibitionCredentialsStatus } from '../../shared/exhibition';
@@ -13,7 +14,7 @@ interface Props { controller: ExhibitionController; live: ExhibitionLiveControll
 const FRAME_MESSAGE = 'openbuy:mirror-credential';
 const HTTP_PARENT_PORTS = new Set(['10200', '10201', '10601']);
 const REGIONS: readonly { value: XmaxRegion; label: string }[] = [{ value: 'cn', label: '国内版' }, { value: 'global', label: '国际版' }];
-const frameHeight = (height: number) => Math.max(68, Math.min(300, Math.ceil(height)));
+const frameHeight = (height: number) => Math.max(68, Math.min(800, Math.ceil(height)));
 const currentPageUrl = () => new URL(typeof window === 'undefined' ? 'http://xuminghong.local:10200/v1.1/exhibition/control' : window.location.href);
 
 function secureFormUrl(mirrorId: string) {
@@ -85,7 +86,7 @@ function CredentialFrame({ controller, live }: Props) {
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);
   }, [mirrorId, url.origin]);
-  return <div id="mirror-sk-settings" className="ex-credential-frame-wrap"><iframe ref={frame} title="XMAX SK 配置" className="ex-credential-frame" src={url.href} style={{ height }} /></div>;
+  return <div id="mirror-sk-settings" className="ex-credential-frame-wrap"><iframe ref={frame} title="换装服务配置" className="ex-credential-frame" src={url.href} style={{ height }} /></div>;
 }
 
 function CredentialSettings({ controller, live, embedded = false }: Props) {
@@ -222,6 +223,7 @@ function CredentialSettings({ controller, live, embedded = false }: Props) {
   }
 
   return <div id="mirror-sk-settings" ref={section} className="ex-mirror-credentials">
+    <ProviderSettingsForm key={mirrorId} mirrorId={mirrorId} onSaved={() => { if (embedded) notifyParent(mirrorId, { saved: true }); void live.refreshStatus(); void controller.refresh(); }} />
     <div className="ex-credential-heading"><label htmlFor="mirror-xmax-sk">XMAX SK</label><span className="ex-credential-status">{!status ? '读取中…' : !status.configured ? '未配置' : status.source === 'mirror' ? '已配置' : '默认 SK'}</span>
       {currentRegion && <span className="ex-credential-current" data-current-region={currentRegion}>{`当前：${REGIONS.find(option => option.value === currentRegion)!.label}`}</span>}
       {regionChanged && <span className="ex-credential-unsaved" role="status">未保存</span>}

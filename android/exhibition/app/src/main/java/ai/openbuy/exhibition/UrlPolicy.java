@@ -18,6 +18,7 @@ public final class UrlPolicy {
     // Exact origins verified in installed @xmaxai/sdk-global 1.1.13 and @volcengine/rtc 4.69.2.
     // These are subresources only. Dynamic COS buckets require separate verification.
     private static final Set<String> SDK_HOSTS = new HashSet<>(Arrays.asList(
+        "api.decart.ai", "platform.decart.ai", "lk.decart.ai",
         "api.xmaxai.com", "api.xmax.ai", "log.xmaxai.com", "api.xmax.cloud",
         "access.rtc.volcvideo.com", "access2-hl.rtc.volcvideo.com", "common.rtc.volcvideo.com",
         "rtcg-access.volcvideos.com", "rtcg.volcvideos.com",
@@ -160,7 +161,7 @@ public final class UrlPolicy {
         if (sameOrigin(configuredUrl, candidate)) return true;
         try {
             URI uri = parseHttpUrl(candidate);
-            return uri.getScheme().equalsIgnoreCase("https") && effectivePort(uri) == 443 && SDK_HOSTS.contains(host(uri));
+            return uri.getScheme().equalsIgnoreCase("https") && effectivePort(uri) == 443 && (SDK_HOSTS.contains(host(uri)) || host(uri).matches("[a-z0-9-]+\\.lkc\\.decart\\.ai"));
         } catch (IllegalArgumentException error) { return false; }
     }
 

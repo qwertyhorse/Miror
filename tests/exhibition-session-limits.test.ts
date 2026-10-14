@@ -185,7 +185,7 @@ describe('per-mirror finite session limits', () => {
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
     const post = (path: string, value: unknown, headers: Record<string, string> = {}) => fetch(base + path, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
+      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
     });
     try {
       expect(await (await fetch(base)).json()).toMatchObject({ settings: { sessionLimits: { credits: 40, expireSeconds: 200 } } });
@@ -220,7 +220,7 @@ function prepare(exhibition: ExhibitionService, id: string, overrides: Record<st
   return exhibition.prepareLiveRenewal(id, { deviceId, sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, ...overrides });
 }
 function due(context: Awaited<ReturnType<typeof runningContinuous>>) {
-  context.advance(105_000); context.exhibition.heartbeat({ deviceId, sessionId: context.session.id });
+  for (let i = 0; i < 7; i++) { context.advance(15_000); context.exhibition.heartbeat({ deviceId, sessionId: context.session.id }); }
 }
 
 describe('continuous experience renewal', () => {
@@ -276,11 +276,11 @@ describe('continuous experience renewal', () => {
   it('does not renew finite rounds or connecting sessions without a genuine first frame', async () => {
     const context = fixture(); const { exhibition, advance } = context;
     exhibition.command({ action: 'configure', sessionLimits: { credits: null, expireSeconds: 120 } });
-    start(exhibition); const session = await create(exhibition); advance(105_000); exhibition.heartbeat({ deviceId, sessionId: session.id });
+    start(exhibition); const session = await create(exhibition); for (let i = 0; i < 7; i++) { advance(15_000); exhibition.heartbeat({ deviceId, sessionId: session.id }); }
     await expect(prepare(exhibition, session.id)).rejects.toMatchObject({ code: 'EXHIBITION_RENEWAL_UNAVAILABLE' });
     const finite = fixture(); start(finite.exhibition); const finiteSession = await create(finite.exhibition);
     finite.store.update(finiteSession.id, { firstFrameMs: 400, providerSessionId: 'ums-finite' }); finite.exhibition.liveFirstFrame(finiteSession.id, 400);
-    finite.advance(105_000); finite.exhibition.heartbeat({ deviceId, sessionId: finiteSession.id });
+    for (let i = 0; i < 7; i++) { finite.advance(15_000); finite.exhibition.heartbeat({ deviceId, sessionId: finiteSession.id }); }
     await expect(prepare(finite.exhibition, finiteSession.id)).rejects.toMatchObject({ code: 'EXHIBITION_RENEWAL_UNAVAILABLE' });
   });
 
@@ -288,7 +288,7 @@ describe('continuous experience renewal', () => {
     for (const ending of ['expired', 'inactive', 'error'] as const) {
       const context = await runningContinuous(); const { exhibition, session, keys, service, store } = context;
       keys.get(session.token)!.consumedCredit = 2970; await service.get(session.id);
-      if (ending === 'expired') { context.advance(120_000); exhibition.heartbeat({ deviceId, sessionId: session.id }); }
+      if (ending === 'expired') { for (let i = 0; i < 8; i++) { context.advance(15_000); exhibition.heartbeat({ deviceId, sessionId: session.id }); } }
       else if (ending === 'inactive') { keys.get(session.token)!.status = 'inactive'; await service.get(session.id); }
       else store.update(session.id, { status: 'error' });
       expect(exhibition.get().live?.renewalDue).toBeUndefined();
@@ -302,7 +302,7 @@ describe('continuous experience renewal', () => {
     const server = createApiServer(service, [origin], undefined, mirrors); server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors`;
     const post = (mirrorId: string, path: string, input: unknown, requestOrigin = origin) => fetch(`${base}/${mirrorId}${path}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: requestOrigin }, body: JSON.stringify(input),
+      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: requestOrigin }, body: JSON.stringify(input),
     });
     try {
       const state = exhibition.get(); const path = `/live/session/${session.id}/renewal`;
@@ -350,7 +350,7 @@ describe('continuous experience renewal', () => {
     for (const heartbeat of [false, true]) {
       const context = await runningContinuous(); const { exhibition, service, session, advance, issue } = context; due(context);
       const { renewalId } = await prepare(exhibition, session.id); await service.stop(session.id);
-      advance(15_000); if (heartbeat) exhibition.heartbeat({ deviceId, sessionId: session.id });
+      advance(10_000); if (heartbeat) exhibition.heartbeat({ deviceId, sessionId: session.id }); advance(10_000);
       await exhibition.sweepLive();
       await expect(exhibition.commitLiveRenewal(session.id, { deviceId, renewalId })).rejects.toMatchObject({ code: 'EXHIBITION_RENEWAL_UNAVAILABLE' });
       expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null }); expect(issue).toHaveBeenCalledTimes(1);
@@ -360,7 +360,7 @@ describe('continuous experience renewal', () => {
   it('pauses a lost handoff, and preserves a failed new issuance without trying another segment', async () => {
     const context = await runningContinuous(); const { exhibition, service, session, advance, issue } = context; due(context);
     const { renewalId } = await prepare(exhibition, session.id); await service.stop(session.id);
-    await exhibition.commitLiveRenewal(session.id, { deviceId, renewalId }); advance(15_000);
+    await exhibition.commitLiveRenewal(session.id, { deviceId, renewalId }); advance(20_000);
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' }); expect(issue).toHaveBeenCalledTimes(1);
     const failed = await runningContinuous(); due(failed);
     const plan = await prepare(failed.exhibition, failed.session.id); await failed.service.stop(failed.session.id);
@@ -369,7 +369,7 @@ describe('continuous experience renewal', () => {
     await expect(create(failed.exhibition)).rejects.toMatchObject({ code: 'PROVIDER_UNKNOWN_ERROR' });
     await failed.exhibition.sweepLive();
     expect(failed.exhibition.get()).toMatchObject({ phase: 'paused', live: { status: 'error' } });
-    await expect(create(failed.exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
+    await expect(create(failed.exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_RECOVERY_REQUIRED' });
     expect(failed.issue).toHaveBeenCalledTimes(2);
   });
 
@@ -378,9 +378,9 @@ describe('continuous experience renewal', () => {
     // This test uses the stored setting to restore the regular 90-second timeout before the next round.
     exhibition.command({ action: 'end' }); await context.service.stop(session.id); await exhibition.sweepLive();
     exhibition.command({ action: 'configure', autoReturnSeconds: 90 }); exhibition.command({ action: 'begin' });
-    const active = await create(exhibition); advance(95_000); exhibition.heartbeat({ deviceId, sessionId: active.id });
+    const active = await create(exhibition); for (let i = 0; i < 19; i++) { advance(5_000); exhibition.heartbeat({ deviceId, sessionId: active.id }); }
     expect(exhibition.get().phase).toBe('generating');
-    advance(15_000); await exhibition.sweepLive();
+    advance(20_000); await exhibition.sweepLive();
     expect(store.get(active.id).status).toBe('stopped'); expect(exhibition.get().phase).toBe('paused'); expect(issue).toHaveBeenCalledTimes(2);
   });
 });

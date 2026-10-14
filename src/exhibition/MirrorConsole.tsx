@@ -1,3 +1,5 @@
+import { exhibitionApiPath } from './mirrorApi';
+import { appUrl } from '../versionScope';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Check, Copy, ExternalLink, Monitor, Pencil, Play, Plus, RotateCcw, Settings, Image, SkipBack, SkipForward, Square, Wifi, WifiOff, X } from 'lucide-react';
 import { isExhibitionLocallyEnded, type ExhibitionMirrorSummary } from '../../shared/exhibition';
@@ -195,6 +197,9 @@ function MirrorConsoleContent({ controller, live, mirror, registry, selectMirror
                 {!look && <p className="ex-no-mode-material" role="status">请在素材管理中为 {experienceModeLabel(state.experienceMode)} 上传并启用素材后再开始体验。</p>}
                 <MirrorDeviceBinding key={mirror.id} mirror={mirror} controller={controller} registry={registry} />
                 <DeviceSettings controller={controller} live={live} mirrorId={mirror.id} />
+                {state.lifecycle?.connection === 'recovering' && <p role="status">正在恢复连接</p>}
+                {state.lifecycle?.connection === 'needs_assistance' && <p role="status">请检查设备后继续体验</p>}
+                <a className="ex-button" href={appUrl('/api' + exhibitionApiPath('diagnostics', mirror.id))} download={`miror-${mirror.id}-diagnostics.json`}>导出体验诊断</a>
                 <details className="ex-device-log"><summary><span>最近操作</span><strong>{state.logs[0]?.message ?? '等待开始体验'}</strong></summary><ol>{state.logs.map(log => <li key={log.id}><time>{new Date(log.time).toLocaleTimeString('zh-CN', { hour12: false })}</time><span>{log.message}</span></li>)}</ol></details>
               </div>
             </div>

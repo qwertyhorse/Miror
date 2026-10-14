@@ -30,7 +30,7 @@ export class ApiError extends Error {
 export async function api<T>(path: string, method = 'GET', payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(appUrl(`/api${path}`), {
     method,
-    headers: payload !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: { 'X-Miror-Protocol': '2', ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: payload !== undefined ? JSON.stringify(payload) : undefined,
     cache: 'no-store',
     signal,

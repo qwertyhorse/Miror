@@ -61,7 +61,7 @@ await context.route('**/*', async route => {
     else if (state && suffix === '/command' && request.method() === 'POST') {
       const input = request.postDataJSON();
       assert.equal(input.action, 'configure', 'Only settings configuration is permitted');
-      assert.deepEqual(Object.keys(input).sort(), ['action', 'expectedRevision', 'sessionLimits']);
+      assert.deepEqual(Object.keys(input).sort(), ['action', 'commandId', 'expectedRevision', 'sessionLimits']);
       assert.equal(input.expectedRevision, state.revision, 'UI carries the current revision');
       assert.equal(state.phase, 'idle'); assert.equal(state.live, null);
       assert.ok(input.sessionLimits.credits === null || (Number.isSafeInteger(input.sessionLimits.credits) && input.sessionLimits.credits >= 1 && input.sessionLimits.credits <= 1_000_000));
@@ -162,6 +162,15 @@ try {
   assert.ok(report.api.filter(item => item.method !== 'GET').every(item => item.path.endsWith('/command')));
   assert.equal(report.configure.length, 4); assert.ok(report.configure.every(item => item.mirrorId === 'default'));
   report.checks.push('Restore is a finite draft until saved; all mutations remain in-memory configuration requests');
+  states.default.lifecycle = { protocol: 2, experienceId: 'browser-fixture', state: 'active', controllerEpoch: 2, terminalRevision: 0, policyVersion: 1, connection: 'recovering', recoveryAttempts: [], consecutiveFailures: 0 };
+  states.default.revision++;
+  await page.getByRole('status').filter({ hasText: '正在恢复连接' }).waitFor();
+  await page.screenshot({ path: path.join(output, 'lifecycle-recovering.png'), fullPage: true });
+  states.default.lifecycle.connection = 'needs_assistance'; states.default.revision++;
+  await page.getByRole('status').filter({ hasText: '请检查设备后继续体验' }).waitFor();
+  assert.equal(await page.getByRole('link', { name: '导出体验诊断' }).getAttribute('download'), 'miror-default-diagnostics.json');
+  await page.screenshot({ path: path.join(output, 'lifecycle-assistance.png'), fullPage: true });
+  report.checks.push('Recovery and assistance are distinct, and diagnostics have a downloadable per-mirror entry');
   report.status = 'passed';
 } catch (error) {
   report.status = 'failed'; report.error = error.stack;

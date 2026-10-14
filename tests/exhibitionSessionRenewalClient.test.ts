@@ -96,7 +96,7 @@ describe('planned continuous-session renewal in the mirror client', () => {
     const f = fixture(); const pending = deferred<{ renewalId: string }>();
     f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
     await f.ready(); await vi.advanceTimersByTimeAsync(99_000); f.due();
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     expect(f.deps.prepareRenewal).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(f.deps.prepareRenewal).toHaveBeenCalledOnce(); expect(f.deps.stop).not.toHaveBeenCalled();
@@ -198,10 +198,10 @@ describe('planned continuous-session renewal in the mirror client', () => {
     expect(f.deps.commitRenewal).not.toHaveBeenCalled(); expect(f.deps.reportError).toHaveBeenCalledOnce();
   });
 
-  it('cancels a pending renewal after heartbeat failure', async () => {
+  it('cancels a pending renewal when ownership is explicitly revoked', async () => {
     const f = fixture(); const pending = deferred<{ renewalId: string }>(); f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
     await f.ready(); await vi.advanceTimersByTimeAsync(104_999);
-    f.deps.heartbeat.mockRejectedValueOnce(new Error('backend unavailable'));
+    f.deps.heartbeat.mockRejectedValueOnce(Object.assign(new Error('owner revoked'), { code: 'EXHIBITION_OWNER_MISMATCH' }));
     await vi.advanceTimersByTimeAsync(1); pending.resolve({ renewalId: 'planned-renewal' }); await flush();
     expect(f.deps.commitRenewal).not.toHaveBeenCalled(); expect(f.deps.stop).toHaveBeenCalledOnce();
     expect(f.deps.reportError).toHaveBeenCalledOnce();
@@ -211,7 +211,7 @@ describe('planned continuous-session renewal in the mirror client', () => {
     const f = fixture(); const pending = deferred<void>(); f.sdk.disconnect.mockImplementationOnce(() => pending.promise);
     await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
     const callsDuringCleanup = f.deps.heartbeat.mock.calls.length;
-    f.deps.heartbeat.mockRejectedValueOnce(new Error('backend unavailable during cleanup'));
+    f.deps.heartbeat.mockRejectedValueOnce(Object.assign(new Error('owner revoked during cleanup'), { code: 'EXHIBITION_OWNER_MISMATCH' }));
     await vi.advanceTimersByTimeAsync(5_000);
     expect(f.deps.heartbeat).toHaveBeenCalledTimes(callsDuringCleanup + 1);
     pending.resolve(); await flush();

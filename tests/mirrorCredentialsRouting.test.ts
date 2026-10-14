@@ -215,7 +215,7 @@ describe('per-mirror credential routing and persistent session history', () => {
     expect(f.service.saveMirrorCredentials('east', { apiKey: keyB, region: 'cn', expectedRevision: 1 }, exhibition.credentialsEditable())).toMatchObject({ revision: 2, editable: true, hasUnconfirmedSession: true, region: 'cn' });
     expect(exhibition.get()).toEqual(paused); expect(f.store.get(record.id)).toEqual(record);
     expect(() => exhibition.command({ action: 'resume' })).toThrowError(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
-    await expect(createLive()).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
+    await expect(createLive()).rejects.toMatchObject({ code: 'EXHIBITION_RECOVERY_REQUIRED' });
     expect(f.store.allocated(apiKeyBudgetScope(keyA))).toBe(30); expect(f.store.allocated(apiKeyBudgetScope(keyB))).toBe(0);
     expect(f.store.currentBudgetScope()).toBe(apiKeyBudgetScope(keyDefault)); expect(issue).toHaveBeenCalledOnce(); expect(f.requests).toHaveLength(0);
     await f.service.recover();

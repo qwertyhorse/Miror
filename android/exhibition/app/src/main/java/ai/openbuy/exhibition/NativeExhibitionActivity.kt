@@ -216,16 +216,18 @@ class NativeExhibitionActivity : Activity() {
         var currentPosition = position
         try {
             while (isActive) {
+                if (attempted.size > 128) attempted.remove(attempted.first())
                 val latest = state
                 val id = mirrorId
                 val activeKey = if (id != null && latest != null) generationKey(id, latest) else null
                 val currentSelection = selectedLook(latest)
                 val reusable = latest != null && currentSelection != null && round?.canReuse(latest, currentSelection) == true
-                val valid = healthy && latest?.string("providerMode") == "xmax" &&
+                val valid = latest?.string("providerMode") == "xmax" &&
                     latest.string("phase") in listOf("generating", "showcase") &&
                     runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position
                 if (roundJob != null && (!valid || roundJob?.isCompleted == true)) {
                     roundJob?.cancelAndJoin()
+                    if (round?.cleanupConfirmed == false) { previewFailed = true; error = "停止状态未确认，请重试停止。" }
                     roundJob = null
                     round = null
                     cameraReady = false
@@ -245,8 +247,9 @@ class NativeExhibitionActivity : Activity() {
                     cameraReady = false
                     render()
                 }
-                val canConnect = healthy && id != null && latest != null && look != null &&
+                val canConnect = healthy && !previewFailed && id != null && latest != null && look != null &&
                     latest.string("phase") == "generating" && latest.string("providerMode") == "xmax" &&
+                    (latest.optJSONObject("lifecycle")?.optLong("retryAt", 0) ?: 0) <= System.currentTimeMillis() &&
                     activeKey !in attempted && latest.optLong("generationNumber") > (stoppedGeneration[id] ?: -1) &&
                     !stopBusy && live == null && (!needsCamera || cameraReady)
                 if (roundJob == null && canConnect) {
@@ -431,6 +434,7 @@ class NativeExhibitionActivity : Activity() {
         status = label("连接后台…", 12, MUTED, false).apply {
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             setOnClickListener {
+                if ((state?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0) { command("keepalive"); return@setOnClickListener }
                 if (round != null) { if (round?.retryUpdate() == true) { error = ""; render() }; return@setOnClickListener }
                 previewFailed = false; cameraReady = false; error = ""
                 if (!hasCameraPermission()) requestPermissions(arrayOf(Manifest.permission.CAMERA), 41)
@@ -490,6 +494,7 @@ class NativeExhibitionActivity : Activity() {
         title.text = if (bound) mirrorName else "OpenBuy"
         modeLabel.text = mapOf("free" to "Free", "charx" to "CharX", "clothx" to "ClothX", "vibex" to "VibeX", "dimx" to "DimX", "mox" to "MoX")[mode] ?: "ClothX"
         status.text = when {
+            (snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 -> "即将返回待机，点此继续体验"
             error.isNotBlank() -> error
             !healthy -> "连接后台…"
             !bound -> "待绑定"

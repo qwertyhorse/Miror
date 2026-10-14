@@ -127,6 +127,8 @@ describe('exhibition experience lifecycle', () => {
     advance(12_799);
     expect(service.get().phase).toBe('showcase');
     advance(1);
+    expect(service.get()).toMatchObject({ phase: 'showcase', lifecycle: { idleEndsAt: expect.any(Number) } });
+    advance(15_000);
     const idle = service.get();
     expect(idle).toMatchObject({ phase: 'idle', displayedLookId: null, generationReadyAt: null });
     expect(service.get().revision).toBe(idle.revision);

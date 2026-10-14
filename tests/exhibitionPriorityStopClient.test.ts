@@ -74,7 +74,7 @@ describe('priority manual stop requests', () => {
     expect(beginSignal.aborted).toBe(true); expect(client.getSnapshot().stopPending).toBe(true);
     const commands = fetcher.mock.calls.filter(([, init]) => init?.method === 'POST');
     expect(commands.map(([, init]) => JSON.parse(init!.body as string).action)).toEqual(['begin', 'end']);
-    expect(JSON.parse(commands[1][1]!.body as string)).toEqual({ action: 'end' });
+    expect(JSON.parse(commands[1][1]!.body as string)).toEqual({ action: 'end', commandId: expect.any(String) });
     expect(await client.send({ action: 'begin' })).toBe(false);
     begin.resolve(response(state(999, 'generating'))); expect(await starting).toBe(false);
     stop.resolve(response(state(3))); expect(await stopping).toBe(true);

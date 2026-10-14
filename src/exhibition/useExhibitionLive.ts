@@ -1,3 +1,4 @@
+import { TerminalLease, HEARTBEAT_INTERVAL_MS, HEARTBEAT_REQUEST_MS, type StopReason } from '../../shared/exhibitionLifecycle';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type CreatedSession, type SessionData } from '../api';
 import { appUrl } from '../versionScope';
@@ -46,7 +47,7 @@ export interface ExhibitionLiveDeps {
   heartbeat: (id: string, deviceId: string, signal: AbortSignal) => Promise<unknown>;
   prepareRenewal?: (id: string, input: { deviceId: string; sessionNumber: number; generationNumber: number }, signal: AbortSignal) => Promise<{ renewalId: string }>;
   commitRenewal?: (id: string, input: { deviceId: string; renewalId: string }, signal: AbortSignal) => Promise<unknown>;
-  reportError: (input: { deviceId: string; sessionId?: string; lookId: string; sessionNumber: number; generationNumber: number; message: string }) => Promise<unknown>;
+  reportError: (input: { deviceId: string; sessionId?: string; lookId: string; sessionNumber: number; generationNumber: number; message: string; reason?: StopReason }) => Promise<unknown>;
   clone: (stream: MediaStream) => MediaStream;
   now: () => number;
   prepare: (region?: XmaxRegion) => Promise<unknown>;
@@ -131,6 +132,8 @@ export class ExhibitionLiveConnection {
   private readonly referenceControllers = new Map<string, AbortController>();
   private attemptedSequence = 0;
   private updating?: Promise<void>;
+  private submittedKey = '';
+  private submittedVersion = -1;
   private updateController?: AbortController;
   private references = new Map<string, Promise<string>>();
   private warming = false;
@@ -138,6 +141,9 @@ export class ExhibitionLiveConnection {
   private startedAt = 0;
   private controller = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
+  private readonly lease = new TerminalLease();
+  private leaseTimer?: ReturnType<typeof setTimeout>;
+  private heartbeatFailures = 0;
   private heartbeatTimer?: ReturnType<typeof setTimeout>;
   private expiryTimer?: ReturnType<typeof setTimeout>;
   private renewalTimer?: ReturnType<typeof setTimeout>;
@@ -176,16 +182,39 @@ export class ExhibitionLiveConnection {
       receive({ type, at: this.deps.now(), operationId: operation.operationId, context: { ...operation.context }, ...(reason ? { reason } : {}) });
     } catch { /* Diagnostics must never affect generation or cleanup. */ }
   }
+  private watchLease() {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = setTimeout(() => {
+      if (!this.closed) void this.fail('大屏与后台连接中断，已停止本次换装。', 'reason=lease_expired');
+    }, this.lease.remaining());
+  }
   private async heartbeat() {
     if (this.closed || !this.local) return;
+    const sentAt = performance.now();
+    const request = new AbortController();
+    const signal = AbortSignal.any([request.signal, this.controller.signal]);
     try {
-      const result = await deadline(this.deps.heartbeat(this.local.id, this.input.deviceId, this.controller.signal), 6000);
-      if (!this.closed && result && typeof result === 'object' && 'live' in result) {
-        const live = result.live as { renewalDue?: boolean } | null;
-        if (live?.renewalDue === true) void this.renew();
+      const result = await deadline(this.deps.heartbeat(this.local.id, this.input.deviceId, signal), HEARTBEAT_REQUEST_MS);
+      if (this.closed) return;
+      this.lease.acknowledge(sentAt); this.watchLease(); this.heartbeatFailures = 0;
+      if (result && typeof result === 'object' && 'live' in result) {
+        const live = result.live as { renewalDue?: boolean; sessionId?: string; deviceId?: string } | null;
+        if (!live || (live.sessionId && live.sessionId !== this.local.id) || (live.deviceId && live.deviceId !== this.input.deviceId)) {
+          await this.fail('设备占用已结束。', 'reason=lease_expired'); return;
+        }
+        if (live.renewalDue === true) void this.renew();
       }
-      if (!this.closed) this.heartbeatTimer = setTimeout(() => void this.heartbeat(), 5000);
-    } catch { if (!this.closed) await this.fail('大屏与后台连接中断，已停止本次换装。'); }
+      if (!this.closed) this.heartbeatTimer = setTimeout(() => void this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+    } catch (cause) {
+      if (this.closed) return;
+      const code = (cause as { code?: string })?.code;
+      if (code === 'EXHIBITION_OWNER_MISMATCH' || this.lease.remaining() <= 0) {
+        await this.fail('大屏与后台连接中断，已停止本次换装。', 'reason=lease_expired');
+      } else {
+        this.heartbeatFailures++;
+        this.heartbeatTimer = setTimeout(() => void this.heartbeat(), Math.min(4000, 1000 * 2 ** Math.min(2, this.heartbeatFailures - 1)));
+      }
+    } finally { request.abort(); }
   }
   /** Continue only a planned, healthy segment; disconnects never enter this path. */
   private renew(): Promise<void> {
@@ -201,10 +230,19 @@ export class ExhibitionLiveConnection {
     let heartbeatFailure = false;
     const keepLease = async () => {
       if (controller.signal.aborted) return;
+      const request = new AbortController();
       try {
-        await deadline(this.deps.heartbeat(local.id, this.input.deviceId, controller.signal), 6000);
-        if (!controller.signal.aborted) pulse = setTimeout(() => void keepLease(), 5000);
-      } catch { if (!controller.signal.aborted) { heartbeatFailure = true; controller.abort(); } }
+        const sentAt = performance.now();
+        await deadline(this.deps.heartbeat(local.id, this.input.deviceId, AbortSignal.any([controller.signal, request.signal])), HEARTBEAT_REQUEST_MS);
+        if (controller.signal.aborted) return;
+        this.lease.acknowledge(sentAt);
+        if (!controller.signal.aborted) pulse = setTimeout(() => void keepLease(), HEARTBEAT_INTERVAL_MS);
+      } catch (cause) {
+        if (!controller.signal.aborted) {
+          if (this.lease.remaining() <= 0 || (cause as { code?: string })?.code === 'EXHIBITION_OWNER_MISMATCH') { heartbeatFailure = true; controller.abort(); }
+          else pulse = setTimeout(() => void keepLease(), 1000);
+        }
+      } finally { request.abort(); }
     };
     try {
       // Finish an accepted selection before freezing the renewal's generation.
@@ -250,7 +288,7 @@ export class ExhibitionLiveConnection {
     this.startedAt = this.deps.now();
     this.emitDiagnostic('experience_started', operation);
     this.events.status('preparing');
-    this.timer = setTimeout(() => void this.fail('换装连接超时，请检查网络后由工作人员重新开始。', `client_stage=${this.failureStage}`), 45000);
+    this.timer = setTimeout(() => void this.fail('换装连接超时，正在恢复。', `reason=rtc_failed; client_stage=${this.failureStage}`), 45000);
     try {
       const mode = input.mode ?? 'clothx';
       const hasReference = input.referenceKind !== 'none';
@@ -264,6 +302,7 @@ export class ExhibitionLiveConnection {
       if (hasReference) this.emitDiagnostic('reference_ready', operation);
       this.failureStage = 'create_session';
       this.emitDiagnostic('credential_started', operation);
+      const allocationSentAt = performance.now();
       const local = await this.deps.create(input);
       this.emitDiagnostic('credential_ready', operation);
       this.local = local;
@@ -282,10 +321,11 @@ export class ExhibitionLiveConnection {
         throw new Error('服务区域无效，请联系工作人员。');
       const providerRegion = local.providerRegion ?? 'global';
       this.local = { ...local, providerRegion };
+      this.lease.acknowledge(allocationSentAt); this.watchLease();
       void this.heartbeat();
       const lifetime = Date.parse(local.expiresAt) - Date.now();
       if (!(lifetime > 0)) throw new Error('本次换装凭证已过期，请重新开始。');
-      this.expiryTimer = setTimeout(() => void this.fail('本次换装时长已结束，请由工作人员开始下一次体验。'), Math.min(lifetime, 2147483647));
+      this.expiryTimer = setTimeout(() => void this.fail('正在恢复连接。', 'reason=credential_expired'), Math.min(lifetime, 2147483647));
       this.events.refresh();
       this.failureStage = 'prepare_sdk';
       await this.deps.prepare(providerRegion);
@@ -316,14 +356,14 @@ export class ExhibitionLiveConnection {
       this.failureStage = 'connect_sdk';
       if (mode !== 'mox') {
         this.inputStream = this.deps.clone(input.stream!);
-        this.inputStream.getVideoTracks().forEach(track => { track.onended = () => { if (!this.closed) void this.fail('摄像头已断开，已停止本次体验。'); }; });
+        this.inputStream.getVideoTracks().forEach(track => { track.onended = () => { if (!this.closed) void this.fail('摄像头已断开，已停止本次体验。', 'reason=camera_lost'); }; });
       }
       this.emitDiagnostic('rtc_started', operation);
       const sdk = await this.deps.connect(mode === 'mox' ? file! : this.inputStream!, this.local, {
         onRemoteStream: stream => { if (!this.closed) { this.remoteStream = stream; if (this.begun) this.events.stream(stream); } },
         onRemoteVideoFirstFrame: () => this.reportFirstFrame(),
         onPresentationChange: value => { if (!this.closed) this.events.presentation?.(value); },
-        onRoomEvent: event => { if (!this.closed && this.begun && mode !== 'mox' && event.event === 'video_completed') void this.fail('本次换装已结束，请由工作人员继续体验。'); },
+        onRoomEvent: event => { if (!this.closed && this.begun && mode !== 'mox' && event.event === 'video_completed') void this.fail('本次换装已结束，请由工作人员继续体验。', 'reason=mox_completed'); },
         onError: (message, error) => {
           if (!this.closed) void this.failSdk(error ?? { code: 'UNKNOWN_ERROR', message }, '换装服务连接失败，请由工作人员重试。');
         },
@@ -488,6 +528,8 @@ export class ExhibitionLiveConnection {
       this.attemptedSequence = sequence;
       const controller = new AbortController(); this.updateController = controller;
       const stale = () => this.closed || sequence !== this.updateSequence;
+      let dispatched = false;
+      let sdkEnded = false;
       try {
         const local = this.local!;
         const hasReference = input.referenceKind !== 'none';
@@ -514,7 +556,7 @@ export class ExhibitionLiveConnection {
           || meta.deviceId !== input.deviceId || meta.lookId !== input.lookId || meta.sessionNumber !== input.sessionNumber
           || meta.generationNumber !== input.generationNumber || (meta.mode ?? 'clothx') !== (input.mode ?? 'clothx') || meta.prompt !== prompt)
           throw new Error('换装条件校验失败，请重新选择素材。');
-        // Store the accepted version before set(), so a rejected set can be retried idempotently.
+        // Retain the accepted reference version; an uncertain SDK submission closes this segment.
         this.local = { ...local, ...bound, exhibition: meta };
         operation.context = { ...operation.context, sessionId: bound.id, referenceVersion: bound.referenceVersion };
         this.emitDiagnostic('bind_ready', operation);
@@ -522,7 +564,12 @@ export class ExhibitionLiveConnection {
         // null explicitly clears the previous reference; omission would merge and retain it in the SDK.
         // Do not time out and overlap an unresolved set: expiry/stop aborts the whole connection.
         this.emitDiagnostic('sdk_set_started', operation);
-        await this.sdk!.set({ prompt, refImageUrl: hasReference ? refImageUrl : null });
+        if (this.submittedKey !== liveInputKey(input) || this.submittedVersion !== bound.referenceVersion) {
+          dispatched = true;
+          await deadline(this.sdk!.set({ prompt, refImageUrl: hasReference ? refImageUrl : null }), 15_000);
+          sdkEnded = true;
+          this.submittedKey = liveInputKey(input); this.submittedVersion = bound.referenceVersion;
+        }
         this.emitDiagnostic('sdk_set_resolved', operation);
         if (stale()) continue;
         await deadline(this.deps.conditionApplied!(local.id, { ...intent, referenceVersion: bound.referenceVersion }, controller.signal));
@@ -532,6 +579,7 @@ export class ExhibitionLiveConnection {
         this.events.updateError?.(''); this.events.status('running'); this.events.refresh();
         void this.warmReferences();
       } catch (cause) {
+        if (dispatched && !sdkEnded) { await this.fail('换装结果未确认，正在恢复连接。', 'reason=command_unknown', operation); return; }
         if (stale()) continue;
         this.emitDiagnostic('failed', operation, 'update_error');
         const message = cause instanceof Error ? safeExhibitionErrorMessage(cause.message) : '素材切换失败，请重试。';
@@ -542,12 +590,16 @@ export class ExhibitionLiveConnection {
   }
   private failSdk(cause: unknown, fallbackMessage: string, operation = this.activeOperation) {
     const failure = exhibitionLiveFailure(cause, fallbackMessage);
-    return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '', operation);
+    if (!this.sdk) return this.fail(failure.message, failure.diagnostic ? `client_stage=${this.failureStage}; ${failure.diagnostic}` : '', operation);
+    const code = (cause as { code?: string })?.code ?? '';
+    const reason = /AUTH|CREDIT|QUOTA|BALANCE|INVALID/.test(code) ? 'provider_rejected' : 'rtc_failed';
+    return this.fail(failure.message, `reason=${reason}; client_stage=${this.failureStage}; ${failure.diagnostic ?? ''}`, operation);
   }
   private async fail(message: string, diagnostic = '', operation = this.activeOperation) {
     if (this.closed) return;
-    this.emitDiagnostic('failed', operation, 'provider_error');
-    const payload = { deviceId: this.input.deviceId, sessionId: this.local?.id, lookId: this.input.lookId, sessionNumber: this.input.sessionNumber, generationNumber: this.input.generationNumber,
+    const reason = /reason=([a-z_]+)/.exec(diagnostic)?.[1] as StopReason | undefined;
+    this.emitDiagnostic('failed', operation, reason ?? 'provider_error');
+    const payload = { ...(reason ? { reason } : {}), deviceId: this.input.deviceId, sessionId: this.local?.id, lookId: this.input.lookId, sessionNumber: this.input.sessionNumber, generationNumber: this.input.generationNumber,
       message: safeExhibitionErrorMessage(diagnostic ? `${message} ${diagnostic}` : message) };
     this.events.status('error', message);
     // Both paths start immediately; a hung SDK must never delay credential deactivation.
@@ -568,7 +620,7 @@ export class ExhibitionLiveConnection {
     this.controller.abort();
     this.supersedePreparation?.();
     this.updateController?.abort(); this.references.clear(); this.pendingWarmInput = undefined;
-    clearTimeout(this.timer); clearTimeout(this.heartbeatTimer); clearTimeout(this.expiryTimer); clearTimeout(this.renewalTimer);
+    clearTimeout(this.timer); clearTimeout(this.leaseTimer); clearTimeout(this.heartbeatTimer); clearTimeout(this.expiryTimer); clearTimeout(this.renewalTimer);
     this.inputStream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     this.inputStream = undefined; this.events.stream(null); this.events.interaction?.(null); this.events.presentation?.(null);
     this.stopping = (async () => {
@@ -632,6 +684,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   current.current = { state, active, refresh, identity };
   const camera = useRef<MediaStream | null>(null);
   const connection = useRef<ExhibitionLiveConnection | null>(null);
+  const retiring = useRef<ExhibitionLiveConnection | null>(null);
   const cameraRequest = useRef(0);
   const mounted = useRef(true);
   const failedKey = useRef('');
@@ -658,7 +711,18 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   const stopCamera = useCallback(() => {
     cameraRequest.current++;
     cameraCaptureRequest.current?.abort(); cameraCaptureRequest.current = null;
-    if (connection.current) { void connection.current.stop(); connection.current = null; }
+    const previous = connection.current;
+    if (previous) {
+      connection.current = null; retiring.current = previous;
+      void previous.stop().then(confirmed => {
+        if (retiring.current !== previous) return;
+        if (confirmed) retiring.current = null;
+        if (mounted.current) {
+          if (confirmed) setRetryEpoch(value => value + 1);
+          else { setStatus('error'); setError('停止状态未确认，请重试停止。'); }
+        }
+      });
+    }
     camera.current?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     camera.current = null;
     if (mounted.current) { setCameraStream(null); setOutputStream(null); setInteraction(null); setPresentation(null); setUpdateError(''); setOpening(false); setStatus('off'); }
@@ -767,7 +831,16 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     } : null;
     const reusable = !!input && !!existing?.canReuse(input);
     if (existing && (!wantsLive || occupied || (existing.key !== desiredKey && !reusable) || (!mox && !cameraStream))) {
-      connection.current = null; void existing.stop(); setOutputStream(null); setInteraction(null); setPresentation(null);
+      connection.current = null; retiring.current = existing;
+      void existing.stop().then(confirmed => {
+        if (retiring.current !== existing) return;
+        if (confirmed) retiring.current = null;
+        if (mounted.current && current.current.identity === identity) {
+          if (confirmed) setRetryEpoch(value => value + 1);
+          else { setStatus('error'); setError('停止状态未确认，请重试停止。'); }
+        }
+      });
+      setOutputStream(null); setInteraction(null); setPresentation(null);
       setUpdateError('');
       if (mounted.current) setStatus(cameraStream ? 'preview' : 'off');
     }
@@ -782,11 +855,10 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       if (!selectionPending && currentState.phase === 'generating' && currentState.live?.sessionId === existing.sessionId) void existing.update(input!);
       return;
     }
-    if (selectionPending || currentState.phase !== 'generating' || (!mox && (!cameraStream || cameraStream !== camera.current)) || connection.current || failedKey.current === desiredKey || manuallyStoppedKey.current === desiredKey) return;
+    if (retiring.current || selectionPending || currentState.phase !== 'generating' || (!mox && (!cameraStream || cameraStream !== camera.current)) || connection.current || failedKey.current === desiredKey || manuallyStoppedKey.current === desiredKey) return;
     // Polling can see the new outfit while the command is still releasing the
     // old lease. Wait for that release instead of allocating against its revision.
-    if (currentState.live && (currentState.live.generationNumber !== currentState.generationNumber
-      || currentState.live.lookId !== currentState.selectedLookId)) return;
+    if (currentState.live) return;
     if (!input) return;
     setError(''); setUpdateError('');
     const next = new ExhibitionLiveConnection(input, {
@@ -803,8 +875,14 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       refresh: () => { if (mounted.current && current.current.identity === identity) { void current.current.refresh(); void refreshStatus(); } },
       get diagnostic() { return diagnosticCallback.current ? (event: DiagnosticEventInput) => diagnosticCallback.current?.(event) : undefined; },
     });
+    if (state?.lifecycle?.retryAt && state.lifecycle.retryAt > Date.now()) return;
     connection.current = next; void next.start();
   }, [identity, active, selectionPending, state?.phase, state?.providerMode, state?.experienceMode, state?.selectedLookId, state?.sessionNumber, state?.generationNumber, state?.live?.deviceId, state?.live?.sessionId, cameraStream, deviceId, refreshStatus, retryEpoch, terminal?.terminalId, terminal?.token]);
+  useEffect(() => {
+    if (!state?.lifecycle?.retryAt || state.lifecycle.connection !== 'recovering') return;
+    const timer = setTimeout(() => setRetryEpoch(value => value + 1), Math.max(0, state.lifecycle.retryAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [state?.lifecycle?.retryAt, state?.lifecycle?.connection]);
   const retryUpdate = useCallback(async () => {
     const round = current.current.state;
     const existing = connection.current;
@@ -815,7 +893,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   const retry = useCallback(async () => {
     if (!mounted.current || !current.current.active) return false;
     const owner = current.current.identity;
-    const previous = connection.current;
+    const previous = connection.current ?? retiring.current;
     const round = current.current.state;
     if (camera.current?.getVideoTracks().some(track => track.readyState === 'live')) {
       // A cloud connection failure does not invalidate the local camera grant.
@@ -829,6 +907,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     setOpening(true); setError(''); setStatus('opening');
     // A user retry must release the previous credential before opening a new capture.
     if (previous && !(await previous.stop())) { if (mounted.current && current.current.identity === owner) { setOpening(false); setStatus('error'); setError('停止状态未确认，请联系工作人员。'); } return false; }
+    if (retiring.current === previous) retiring.current = null;
     await current.current.refresh();
     const latest = current.current.state;
     const leftRound = round && !['idle', 'select'].includes(round.phase)
@@ -855,9 +934,13 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     const round = current.current.state;
     const stoppedKey = round ? `${owner.mirrorId}:${round.sessionNumber}:${round.generationNumber}:${round.selectedLookId}` : '';
     manuallyStoppedKey.current = stoppedKey;
-    const previous = connection.current;
+    const previous = connection.current ?? retiring.current;
     setOutputStream(null); setInteraction(null); setPresentation(null); setError(''); setUpdateError(''); setStatus('stopping');
     const confirmed = previous ? await previous.stop() : true;
+    if (confirmed && retiring.current === previous) {
+      retiring.current = null;
+      if (mounted.current && current.current.identity === owner) setRetryEpoch(value => value + 1);
+    }
     const latest = current.current.state;
     const latestKey = latest ? `${owner.mirrorId}:${latest.sessionNumber}:${latest.generationNumber}:${latest.selectedLookId}` : '';
     if (mounted.current && current.current.identity === owner && latestKey === stoppedKey) {

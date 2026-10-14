@@ -147,12 +147,31 @@ describe('exhibition live client lifecycle', () => {
     const pending = deferred<string>(); f.deps.upload.mockImplementationOnce(() => pending.promise);
     const starting = f.controller.start(); await flush();
     expect(f.deps.heartbeat).toHaveBeenCalledTimes(1);
-    f.deps.heartbeat.mockRejectedValueOnce(new Error('owner lost'));
+    f.deps.heartbeat.mockRejectedValueOnce(Object.assign(new Error('owner lost'), { code: 'EXHIBITION_OWNER_MISMATCH' }));
     await vi.advanceTimersByTimeAsync(5000);
     expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
     pending.resolve('https://reference.example/late.png'); await starting;
     expect(f.deps.connect).not.toHaveBeenCalled();
     expect(f.deps.create).toHaveBeenCalledTimes(1);
+  });
+  it('keeps healthy video through one transient heartbeat failure and resumes heartbeats', async () => {
+    const f = fixture(); await f.controller.start();
+    f.controller.reportFirstFrame(); await flush();
+    f.deps.heartbeat.mockRejectedValueOnce(new Error('temporary network loss'));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(f.controller.stopped).toBe(false);
+    expect(f.deps.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(f.deps.heartbeat.mock.calls.length).toBeGreaterThan(2);
+    expect(f.deps.connect).toHaveBeenCalledOnce();
+  });
+  it('stops at the lease deadline even when heartbeat requests never finish', async () => {
+    const f = fixture(); await f.controller.start(); f.controller.reportFirstFrame(); await flush();
+    f.deps.heartbeat.mockImplementation(() => new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(20_001);
+    expect(f.controller.stopped).toBe(true);
+    expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
+    expect(f.deps.create).toHaveBeenCalledOnce();
   });
   it('rejects the wrong device/garment metadata without sending camera frames', async () => {
     const f = fixture();

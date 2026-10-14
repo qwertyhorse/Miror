@@ -136,6 +136,8 @@ describe('exhibition upload validation and persistence', () => {
     }
     const { service, advance } = fixture(); service.command({ action: 'configure', autoReturnSeconds: 15 }); service.command({ action: 'begin' });
     advance(14000); await service.upload(uploadInput(bytes)); advance(1000);
+    expect(service.get().lifecycle?.idleEndsAt).toBeDefined();
+    advance(15000);
     expect(service.get().phase).toBe('idle');
   });
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ExhibitionService } from '../server/exhibition.ts';
@@ -159,17 +159,17 @@ describe('manual stop races', () => {
     await expect(f.exhibition.reportLiveError({ deviceId: lease.deviceId, sessionId: record.id, lookId: lease.lookId,
       sessionNumber: ended.sessionNumber, generationNumber: ended.generationNumber, message: 'isolated late error' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
     expect(f.exhibition.get()).toEqual(next); expect(f.store.get(record.id)).toEqual(record);
-    const created = await f.create();
-    expect(created.id).not.toBe(record.id); expect(f.store.get(record.id)).toEqual(record);
-    expect(f.issue).toHaveBeenCalledTimes(2); expect(f.store.allocated()).toBe(60); expect(f.revoke).not.toHaveBeenCalled();
+    await expect(f.create()).rejects.toMatchObject({ code: 'EXHIBITION_LIVE_STOP_PENDING' });
+    expect(f.store.get(record.id)).toEqual(record);
+    expect(f.issue).toHaveBeenCalledTimes(1); expect(f.store.allocated()).toBe(30); expect(f.revoke).not.toHaveBeenCalled();
   });
 
   it('checks the cloud record before recovering a stored local-ended marker for a known token', async () => {
     const f = fixture(); const session = await f.create();
     f.revoke.mockRejectedValue(new ApiError('PROVIDER_NETWORK_ERROR', 'isolated timeout', 502));
     f.exhibition.command({ action: 'end' }); await f.exhibition.reconcileLive();
-    const filename = join(f.directory, 'exhibition.json'); const stored = JSON.parse(readFileSync(filename, 'utf8'));
-    stored.state.live.localEnded = true; writeFileSync(filename, JSON.stringify(stored));
+    const stored = JSON.parse(JSON.stringify(f.store.mirrorState('default')));
+    stored.state.live.localEnded = true; f.store.saveMirrorState('default', stored, { type: 'fixture-corruption' });
     f.store.update(session.id, { status: 'issuance_unknown' });
     const loaded = new ExhibitionService(f.directory); loaded.attachLiveService(f.service);
     const before = loaded.get(); const record = f.store.get(session.id);

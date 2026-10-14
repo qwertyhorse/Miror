@@ -30,7 +30,7 @@ async function fixture() {
   cleanup.push(async () => { const closed = once(server, 'close'); server.closeAllConnections(); server.close(); await closed; store.close(); await rm(directory, { force: true, recursive: true }); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const get = (path: string, signal?: AbortSignal) => fetch(base + path, { signal });
-  const post = (path: string, body = {}) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://127.0.0.1:5173', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const post = (path: string, body = {}) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://127.0.0.1:5173', 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return { get, post, upload, storage, issue, mirror: mirrors.getMirror(), rotate: () => { key = 'uk-fixture-account-b'; } };
 }
 it('prepares original material without a generation key, persists its scope into a session, and isolates account rotation', async () => {

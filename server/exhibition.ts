@@ -1,3 +1,4 @@
+import { LEASE_TTL_MS, initialLifecycle, admitRecovery, isStopReason, isExperienceLifecycle, type StopReason } from '../shared/exhibitionLifecycle.ts';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,7 +13,7 @@ import type { ReferencePreparationStatus } from '../shared/referencePreparation.
 import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
 const GENERATION_DELAY_MS = 2_200;
-const HEARTBEAT_TIMEOUT_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = LEASE_TTL_MS;
 const RENEWAL_PREPARE_WINDOW_MS = 20_000;
 const MAX_LOGS = 40;
 const MAX_LOOKS = 100;
@@ -28,7 +29,7 @@ const SAMPLE_LOOKS: ExhibitionLook[] = [
 ];
 
 interface StoredExhibition {
-  schemaVersion: 3;
+  schemaVersion: 3 | 4;
   state: ExhibitionState;
   lastCommandAt: number;
   pausedPhase: 'showcase' | 'generating' | null;
@@ -78,7 +79,7 @@ function nameList(value: unknown, label: string, maximum: number, allowEmpty: bo
   return names;
 }
 function normalizeStored(value: unknown, assetBasePath: string): StoredExhibition | null {
-  if (!isRecord(value) || !isRecord(value.state) || ![1, 2, 3].includes(value.schemaVersion as number)) return null;
+  if (!isRecord(value) || !isRecord(value.state) || ![1, 2, 3, 4].includes(value.schemaVersion as number)) return null;
   const migrated = structuredClone(value);
   if (migrated.schemaVersion === 1) {
     const state = migrated.state as Record<string, unknown>;
@@ -112,6 +113,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
   }
   if (isRecord(state.live) && state.live.generationNumber === undefined) state.live.generationNumber = state.generationNumber;
   try {
+    if ((migrated.schemaVersion === 4 || state.lifecycle !== undefined) && !isExperienceLifecycle(state.lifecycle)) return null;
     const categories = nameList(state.categories, '分类', 40, false);
     const tags = nameList(state.tags, '标签', 80, true);
     if (!Array.isArray(state.looks) || state.looks.length > MAX_LOOKS || !isMode(state.experienceMode)) return null;
@@ -166,6 +168,9 @@ export class ExhibitionService {
   private stored: StoredExhibition;
   private uploadsInProgress = 0;
   private liveService?: TryOnService;
+  private durable = false;
+  private activeCommand?: { id: string; fingerprint: string };
+
   private reconcilingLive?: Promise<void>;
   private renewalPlan?: LiveRenewalPlan;
   private renewalReceipt?: LiveRenewalPlan & { nextGeneration: number };
@@ -217,6 +222,7 @@ export class ExhibitionService {
     } else this.commit(this.stored, '局域网交互演示已就绪，未连接 XMAX 或摄像头。', time);
   }
 
+  read(): ExhibitionState { return this.snapshotState(); }
   get(): ExhibitionState { this.tick(); return this.snapshotState(); }
   sessionLimits(): ExhibitionSessionLimits {
     return resolveSessionLimits(this.stored.state.settings.sessionLimits, {
@@ -238,7 +244,33 @@ export class ExhibitionService {
     return state;
   }
 
-  attachLiveService(service: TryOnService) { this.liveService = service; }
+  attachLiveService(service: TryOnService) {
+    if (this.liveService === service) return;
+    this.liveService = service;
+    const store = 'options' in service ? service.options?.store : undefined;
+    if (!store?.mirrorState) return;
+    const persisted = store.mirrorState(this.mirrorId);
+    if (persisted !== undefined) {
+      const restored = normalizeStored(persisted, this.assetBasePath);
+      if (!restored) throw new Error('Invalid durable mirror state');
+      this.stored = restored;
+    }
+    this.durable = true;
+    const draft = structuredClone(this.stored);
+    draft.schemaVersion = 4;
+    draft.state.lifecycle ??= initialLifecycle();
+    if (!['idle', 'select'].includes(draft.state.phase)) {
+      this.reset(draft, 'select');
+      draft.state.lifecycle.state = 'ended'; draft.state.lifecycle.reason = 'shutdown';
+      draft.state.lifecycle.terminalRevision++; draft.state.lifecycle.controllerEpoch++;
+      if (draft.state.live) { draft.state.live.localEnded = true; draft.state.live.stopReason = 'shutdown'; }
+    }
+    if (JSON.stringify(draft) !== JSON.stringify(this.stored)) this.commit(draft, '体验状态已载入，旧连接核对完成后可开始。', this.now());
+    else store.saveMirrorState(this.mirrorId, draft, { type: 'loaded', revision: draft.state.revision });
+  }
+
+  diagnosticTimeline() { return this.liveService?.options?.store?.mirrorEvents(this.mirrorId) ?? []; }
+
 
   private referenceSource(lookId: string) {
     const look = this.stored.state.looks.find(item => item.id === lookId);
@@ -317,19 +349,27 @@ export class ExhibitionService {
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(deviceId)) throw new ApiError('EXHIBITION_INVALID_DEVICE', '设备 ID 无效。');
     this.tick(); await this.reconcileLive(); this.checkRevision(input.expectedRevision);
     const state = this.stored.state;
+    if (state.lifecycle?.retryAt && this.now() < state.lifecycle.retryAt) throw new ApiError('EXHIBITION_RECOVERY_WAIT', '正在恢复连接，请稍候。', 409);
+    if (state.lifecycle?.connection === 'needs_assistance') throw new ApiError('EXHIBITION_RECOVERY_REQUIRED', '请检查设备后继续体验。', 409);
     if (state.providerMode !== 'xmax') throw new ApiError('EXHIBITION_LIVE_DISABLED', '请先在后台明确启用 XMAX 实时模式。', 409);
     if (state.phase !== 'generating') throw new ApiError('EXHIBITION_INVALID_PHASE', '请先开始体验，再连接实时换装。', 409);
     if (input.generationNumber !== state.generationNumber) throw new ApiError('EXHIBITION_STALE_GENERATION', '本轮换装已更新，请等待大屏同步。', 409);
     if (state.live) throw new ApiError('EXHIBITION_DEVICE_BUSY', '已有大屏占用本轮体验，请先结束或等待会话停止。', 409);
+    if (state.lifecycle?.ownerDeviceId && state.lifecycle.ownerDeviceId !== deviceId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前体验仍由原大屏持有。', 409);
     if (this.renewalHandoff && (this.renewalHandoff.deviceId !== deviceId || this.renewalHandoff.sessionNumber !== state.sessionNumber || this.renewalHandoff.generationNumber !== state.generationNumber)) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '续接只允许原大屏连接。', 409);
     const look = state.looks.find(item => item.id === input.lookId);
     if (!look || look.id !== state.selectedLookId || !activeLookIds(state).includes(look.id)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材与当前模式或体验不一致。');
     if (!this.liveService) throw new ApiError('EXHIBITION_LIVE_UNAVAILABLE', '实时换装服务尚未连接。', 503);
+    if ('options' in this.liveService && this.liveService.options?.store.unreleasedMirror(this.mirrorId).length) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '旧连接尚未确认释放。', 409);
     if (look.source === 'upload') this.asset(look.id);
     const service = this.liveService;
     const sessionLimits = this.sessionLimits();
     const live = { deviceId, generationNumber: state.generationNumber, sessionId: null as string | null, lookId: look.id, status: 'preparing' as const, updatedAt: this.now(), heartbeatAt: this.now() };
     const draft = structuredClone(this.stored); draft.state.live = live;
+    const lifecycle = draft.state.lifecycle ??= initialLifecycle();
+    lifecycle.controllerEpoch++; lifecycle.connection = 'connecting'; delete lifecycle.healthySince; lifecycle.ownerDeviceId = deviceId;
+    delete lifecycle.retryAt; delete lifecycle.reason;
+    draft.state.live.controllerEpoch = lifecycle.controllerEpoch;
     this.commit(draft, '大屏已占用本轮体验，正在申请受限 XMAX 临时凭证。', this.now());
     this.renewalHandoff = undefined;
     let reservedId: string | undefined;
@@ -354,7 +394,10 @@ export class ExhibitionService {
       if (failed.state.live?.deviceId === deviceId && failed.state.live.generationNumber === state.generationNumber) {
         if (!reservedId) failed.state.live = null;
         else { failed.state.live.status = 'error'; failed.state.live.error = error instanceof Error ? error.message : '实时会话连接失败。'; }
-        if (failed.state.phase === 'generating' && failed.state.generationNumber === state.generationNumber) { failed.state.phase = 'paused'; failed.pausedPhase = 'generating'; }
+        if (failed.state.phase === 'generating' && failed.state.generationNumber === state.generationNumber) {
+          if (failed.state.lifecycle) { failed.state.lifecycle.connection = 'needs_assistance'; failed.state.lifecycle.reason = reservedId && service.isUnconfirmedExhibitionSession?.(reservedId, this.mirrorId) ? 'issue_unknown' : 'provider_rejected'; }
+          failed.state.phase = 'paused'; failed.pausedPhase = 'generating';
+        }
         this.commit(failed, '实时连接未完成，请检查错误后手动继续或结束。', this.now());
       }
       await this.reconcileLive(); throw error;
@@ -363,6 +406,7 @@ export class ExhibitionService {
 
   heartbeat(input: unknown): ExhibitionState {
     if (!isRecord(input) || !this.stored.state.live || input.deviceId !== this.stored.state.live.deviceId || input.sessionId !== this.stored.state.live.sessionId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前大屏并未持有这个实时会话。', 409);
+    if (this.now() - this.stored.state.live.heartbeatAt >= HEARTBEAT_TIMEOUT_MS) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '设备占用已过期，请重新连接。', 409);
     this.stored.state.live.heartbeatAt = this.now();
     return this.get();
   }
@@ -443,15 +487,45 @@ export class ExhibitionService {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_SESSION', '错误报告无效。');
     const deviceId = shortText(input.deviceId, '设备 ID', 100);
     const state = this.stored.state;
-    if (state.providerMode !== 'xmax' || !['generating', 'showcase'].includes(state.phase) || input.lookId !== state.selectedLookId || input.sessionNumber !== state.sessionNumber || input.generationNumber !== state.generationNumber
-      || (input.sessionId && !state.live) || (state.live && (state.live.deviceId !== deviceId || state.live.sessionId !== input.sessionId))) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '错误报告不属于当前体验。', 409);
-    const message = shortText(input.message, '错误说明', 300).replace(/(?:tk|uk)-[A-Za-z0-9_-]+/g, '[凭证已隐藏]').replace(/https?:\/\/\S+/g, '[连接地址]');
-    const draft = structuredClone(this.stored); draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; draft.state.generationReadyAt = null;
-    if (draft.state.live) { draft.state.live.status = 'error'; draft.state.live.error = message; }
-    this.commit(draft, `实时体验已暂停：${message}`, this.now());
-    await this.reconcileLive();
-    if (this.stored.state.sessionNumber === input.sessionNumber && this.stored.state.generationNumber === input.generationNumber) this.commit(structuredClone(this.stored), `请检查后手动继续：${message}`, this.now());
+    const reason: StopReason = isStopReason(input.reason) ? input.reason : 'provider_rejected';
+    const recovering = ['rtc_failed', 'credential_expired', 'segment_exhausted', 'lease_expired', 'command_unknown'].includes(reason);
+    const record = typeof input.sessionId === 'string' ? await this.liveService?.get(input.sessionId, false) : undefined;
+    if (this.stored.state !== state || state.providerMode !== 'xmax'
+      || !['generating', 'showcase', ...(recovering && state.lifecycle?.reason !== 'staff_pause' ? ['paused'] : [])].includes(state.phase)
+      || input.sessionNumber !== state.sessionNumber || input.generationNumber !== state.generationNumber || input.lookId !== state.selectedLookId
+      || (recovering && record && (record.exhibition?.deviceId !== deviceId || record.exhibition?.sessionNumber !== state.sessionNumber
+        || (record.exhibition?.mirrorId ?? 'default') !== this.mirrorId))
+      || (state.live && (state.live.deviceId !== deviceId || state.live.sessionId !== input.sessionId)))
+      throw new ApiError('EXHIBITION_OWNER_MISMATCH', '错误报告不属于当前体验。', 409);
+    const message = shortText(input.message, '错误说明', 300).replace(/(?:tk|uk|sk)-[A-Za-z0-9_-]+/gi, '[凭证已隐藏]').replace(/https?:\/\/\S+/g, '[连接地址]');
+    const draft = structuredClone(this.stored); const lifecycle = draft.state.lifecycle ??= initialLifecycle();
+    if (lifecycle.reason === reason && lifecycle.connection === 'recovering') return this.get();
+    if (recovering && record && lifecycle.state === 'paused' && lifecycle.reason !== 'staff_pause') lifecycle.state = 'active';
+    lifecycle.reason = reason;
+    const planned = (reason === 'credential_expired' && !!record?.expiresAt && Date.parse(record.expiresAt) <= this.now() + 20_000)
+      || (reason === 'segment_exhausted' && !!record && record.consumedCredits >= record.pointsLimit);
+    if (['credential_expired', 'segment_exhausted'].includes(reason) && !planned) throw new ApiError('EXHIBITION_RECOVERY_NOT_DUE', '当前凭证尚未达到续接条件。', 409);
+    const admitted = recovering && !!record && draft.state.experienceMode !== 'mox' && admitRecovery(lifecycle, this.now(), planned);
+    lifecycle.connection = admitted ? 'recovering' : 'needs_assistance';
+    if (admitted) {
+      draft.state.phase = 'generating'; lifecycle.retryAt = this.now() + (planned ? 0 : Math.min(4000, 1000 * lifecycle.consecutiveFailures));
+    } else { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; }
+    draft.state.generationReadyAt = null;
+    if (draft.state.live) { draft.state.live.status = 'error'; draft.state.live.error = message; draft.state.live.stopReason = reason; }
+    this.commit(draft, admitted ? `正在恢复连接：${message}` : `需要处理：${message}`, this.now());
+    if (!draft.state.live && admitted && record?.status === 'stopped') this.finishRecovery(deviceId);
+    else await this.reconcileLive();
     return this.get();
+  }
+
+  private finishRecovery(deviceId: string) {
+    const draft = structuredClone(this.stored); const lifecycle = draft.state.lifecycle;
+    if (lifecycle?.state !== 'active' || lifecycle.connection !== 'recovering') return;
+    draft.state.live = null; draft.state.phase = 'generating'; draft.state.generationNumber++;
+    draft.state.generationReadyAt = null; draft.state.autoSwitchAt = null;
+    lifecycle.ownerDeviceId = deviceId;
+    this.renewalHandoff = { deviceId, sessionNumber: draft.state.sessionNumber, generationNumber: draft.state.generationNumber, expiresAt: this.now() + HEARTBEAT_TIMEOUT_MS };
+    this.commit(draft, '旧连接已释放，正在恢复当前选择。', this.now());
   }
 
   async bindLiveReference(id: string, input: unknown) {
@@ -532,6 +606,7 @@ export class ExhibitionService {
     if (!live || !['connecting', 'running'].includes(live.status) || live.generationNumber !== this.stored.state.generationNumber || live.sessionId !== id || this.stored.state.providerMode !== 'xmax' || this.stored.state.phase !== 'generating' || live.lookId !== this.stored.state.selectedLookId) return;
     const draft = structuredClone(this.stored);
     draft.state.phase = 'showcase'; draft.state.displayedLookId = live.lookId;
+    if (draft.state.lifecycle) { draft.state.lifecycle.connection = 'running'; draft.state.lifecycle.healthySince = this.now(); }
     draft.state.live!.status = 'running'; draft.state.live!.firstFrameMs = firstFrameMs; draft.state.live!.updatedAt = this.now();
     this.commit(draft, `${this.lookName(live.lookId)}已收到 XMAX 实时首帧。`, this.now());
   }
@@ -568,6 +643,8 @@ export class ExhibitionService {
         if (!localEnded) { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; delete draft.state.live!.localEnded; }
         draft.state.generationReadyAt = null;
         draft.state.live!.status = 'error'; draft.state.live!.error = message; draft.state.live!.updatedAt = this.now();
+        draft.state.live!.stopReason = 'issue_unknown';
+        if (!localEnded && draft.state.lifecycle) { draft.state.lifecycle.reason = 'issue_unknown'; draft.state.lifecycle.connection = 'needs_assistance'; }
         this.commit(draft, message, this.now());
       }
       return;
@@ -589,17 +666,23 @@ export class ExhibitionService {
         const draft = structuredClone(this.stored);
         if (draft.state.live?.sessionId !== id) return;
         draft.state.live.status = 'stopping'; draft.state.live.updatedAt = this.now();
+        const priorReason = draft.state.lifecycle?.reason;
+        const explicitReason = priorReason && ['user_end', 'staff_pause', 'idle_end', 'shutdown'].includes(priorReason) ? priorReason : undefined;
+        const reason: StopReason = explicitReason ?? (ownerLost ? 'lease_expired' : expired ? 'credential_expired' : exhausted ? 'segment_exhausted' : draft.state.lifecycle?.reason ?? 'mode_changed');
+        draft.state.live.stopReason = reason;
+        if (draft.state.lifecycle) draft.state.lifecycle.reason = reason;
         this.commit(draft, ownerLost ? '大屏心跳中断，正在停用 XMAX 临时凭证。' : '正在停止上一轮实时会话。', this.now());
       }
       try { session = await service.stop(id); }
       catch (error) {
         const failed = structuredClone(this.stored);
         const message = error instanceof Error ? error.message : '停止尚未确认。';
-        if (failed.state.live?.sessionId === id && (failed.state.live.status !== 'error' || failed.state.live.error !== message)) { failed.state.live.status = 'error'; failed.state.live.error = message; this.commit(failed, '实时会话停止尚未确认，禁止再次签发。', this.now()); }
+        if (failed.state.live?.sessionId === id && (failed.state.live.status !== 'error' || failed.state.live.error !== message)) { failed.state.live.status = 'error'; failed.state.live.error = message; failed.state.live.stopReason = 'stop_unknown'; this.commit(failed, '实时会话停止尚未确认，禁止再次签发。', this.now()); }
         return;
       }
     }
     if (session.status === 'stopped' && this.stored.state.live?.sessionId === id) {
+      if (this.stored.state.lifecycle?.connection === 'recovering' && this.stored.state.lifecycle.state === 'active') { this.finishRecovery(live.deviceId); return; }
       const draft = structuredClone(this.stored); draft.state.live = null;
       if (!interrupted && session.exhibition?.sessionNumber === draft.state.sessionNumber && ['generating', 'showcase'].includes(draft.state.phase)) { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; draft.state.generationReadyAt = null; }
       this.commit(draft, 'XMAX 临时凭证已停止，设备占用已释放。', this.now());
@@ -848,8 +931,27 @@ export class ExhibitionService {
 
   /** Synchronous validation and atomic rename serialize all state mutations after any image decoding. */
   command(input: unknown): ExhibitionState {
+    if (!isRecord(input) || input.commandId === undefined || !this.durable) return this.applyCommand(input);
+    if (typeof input.commandId !== 'string' || !/^[A-Za-z0-9_-]{8,100}$/.test(input.commandId)) throw new ApiError('EXHIBITION_INVALID_COMMAND', '操作编号无效。');
+    const { commandId, expectedRevision: _revision, ...payload } = input;
+    const fingerprint = createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b))))).digest('hex');
+    const prior = this.liveService!.options.store.commandFingerprint(this.mirrorId, commandId);
+    if (prior !== undefined) {
+      if (prior !== fingerprint) throw new ApiError('EXHIBITION_COMMAND_CONFLICT', '操作编号已用于其他操作。', 409);
+      return this.snapshotState();
+    }
+    this.tick();
+    this.activeCommand = { id: commandId, fingerprint };
+    try {
+      const result = this.applyCommand(input, false);
+      this.liveService!.options.store.saveMirrorState(this.mirrorId, this.stored, { type: 'command', commandId, action: input.action, revision: result.revision }, this.activeCommand);
+      return result;
+    } finally { this.activeCommand = undefined; }
+  }
+  private applyCommand(input: unknown, advanceTime = true): ExhibitionState {
     if (!isRecord(input) || typeof input.action !== 'string') throw new ApiError('EXHIBITION_INVALID_COMMAND', '请选择有效的展会操作。');
-    this.tick(); this.checkRevision(input.expectedRevision);
+    if (advanceTime) this.tick();
+    if (!['end', 'idle', 'pause'].includes(input.action)) this.checkRevision(input.expectedRevision);
     const draft = structuredClone(this.stored); const state = draft.state; const time = this.now(); let message: string;
     if (state.live?.renewal && ['switch', 'next', 'previous', 'select'].includes(input.action)) throw new ApiError('EXHIBITION_RENEWAL_PENDING', '正在续接体验，请稍候再换装。', 409);
     const isLookId = (id: unknown): id is string => typeof id === 'string' && state.looks.some(look => look.id === id);
@@ -857,6 +959,8 @@ export class ExhibitionService {
     const requireSelection = () => { if (state.selectedLookId === null || !currentModeIds.includes(state.selectedLookId)) throw new ApiError('EXHIBITION_NO_ENABLED_LOOKS', '当前模式暂无启用素材，请先上传并启用素材。', 409); };
     const requirePhase = (...phases: ExhibitionPhase[]) => { if (!phases.includes(state.phase)) throw new ApiError('EXHIBITION_INVALID_PHASE', '当前体验阶段无法执行此操作。', 409); };
     switch (input.action) {
+      case 'keepalive':
+        requirePhase('generating', 'showcase'); message = '继续当前体验。'; break;
       case 'select':
         requirePhase('select', 'idle');
         if (!isLookId(input.lookId) || !currentModeIds.includes(input.lookId)) throw new ApiError('EXHIBITION_INVALID_LOOK', '这份素材不属于当前模式或尚未启用。');
@@ -876,6 +980,7 @@ export class ExhibitionService {
         if (!isLookId(input.lookId) || !currentModeIds.includes(input.lookId)) throw new ApiError('EXHIBITION_INVALID_LOOK', '这份素材不属于当前模式或尚未启用。');
         // Tapping the current outfit must not restart or allocate another live session.
         if (input.lookId === state.selectedLookId) return this.snapshotState();
+        state.settings.switchMode = 'manual'; state.autoSwitchAt = null;
         state.selectedLookId = input.lookId; state.phase = 'generating'; state.generationNumber += 1;
         state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
@@ -883,15 +988,18 @@ export class ExhibitionService {
       case 'previous': {
         requirePhase('generating', 'showcase'); requireSelection(); const current = currentModeIds.indexOf(state.selectedLookId!); const direction = input.action === 'next' ? 1 : -1;
         if (currentModeIds.length === 1) return this.snapshotState();
+        state.settings.switchMode = 'manual'; state.autoSwitchAt = null;
         state.selectedLookId = currentModeIds[(current + direction + currentModeIds.length) % currentModeIds.length];
         state.phase = 'generating'; state.generationNumber += 1; state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
       }
       case 'pause':
+        state.lifecycle ??= initialLifecycle(); state.lifecycle.reason = 'staff_pause'; state.lifecycle.terminalRevision++;
         requirePhase('generating', 'showcase'); draft.pausedPhase = state.phase as 'generating' | 'showcase';
         draft.pausedRemainingMs = state.generationReadyAt === null ? 0 : Math.max(0, state.generationReadyAt - time);
         state.phase = 'paused'; state.generationReadyAt = null; message = '工作人员已暂停本轮演示。'; break;
       case 'resume':
+        if (state.lifecycle) { state.lifecycle.connection = 'idle'; delete state.lifecycle.retryAt; delete state.lifecycle.reason; }
         requirePhase('paused');
         if (state.live) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '上一轮停止尚未确认，请重试停止后再继续。', 409);
         requireSelection(); if (!draft.pausedPhase) throw new ApiError('EXHIBITION_INVALID_PHASE', '没有可以继续的演示，请重新开始。', 409);
@@ -899,6 +1007,7 @@ export class ExhibitionService {
         draft.pausedPhase = null; draft.pausedRemainingMs = 0; message = '本轮演示已继续。'; break;
       case 'end':
       case 'idle': {
+        state.lifecycle ??= initialLifecycle(); state.lifecycle.reason = 'user_end';
         const phase = input.action === 'end' ? 'select' : 'idle';
         const unknown = state.live?.sessionId && this.liveService?.isUnconfirmedExhibitionSession?.(state.live.sessionId, this.mirrorId) === true;
         if (unknown && state.phase === phase && state.live?.localEnded === true && state.live.status === 'error') return this.snapshotState();
@@ -1008,6 +1117,7 @@ export class ExhibitionService {
       || (materialChanged && !this.keepsLiveConnection(state))) ? live.sessionId : undefined;
     const locallyEnded = live?.localEnded === true && live.status === 'error' && live.sessionId && this.liveService?.isUnconfirmedExhibitionSession?.(live.sessionId, this.mirrorId) === true;
     if (interruptedSession && live && !locallyEnded) { delete live.localEnded; live.status = 'stopping'; live.updatedAt = time; }
+    if (state.lifecycle) delete state.lifecycle.idleEndsAt;
     draft.lastCommandAt = time; this.commit(draft, message, time);
     // Block delayed reference/link/signing completions before awaiting revocation.
     if (interruptedSession) this.liveService?.cancelExhibitionSession(interruptedSession, this.mirrorId);
@@ -1072,7 +1182,16 @@ export class ExhibitionService {
     const continuousExperience = this.sessionLimits().credits === null && state.providerMode === 'xmax'
       && ['generating', 'showcase'].includes(state.phase) && (!!state.live || !!this.renewalHandoff);
     if (!automaticExperience && !continuousExperience && state.phase !== 'idle' && state.phase !== 'paused' && state.settings.autoReturnSeconds > 0 && time - lastCommandAt >= state.settings.autoReturnSeconds * 1_000) {
-      const draft = structuredClone(this.stored); this.reset(draft, 'idle'); this.commit(draft, '长时间未操作，大屏已自动返回待机。', time);
+      const draft = structuredClone(this.stored);
+      const lifecycle = draft.state.lifecycle ??= initialLifecycle();
+      const idleDeadline = lastCommandAt + state.settings.autoReturnSeconds * 1_000 + 15_000;
+      if (['generating', 'showcase'].includes(state.phase) && !lifecycle.idleEndsAt && time < idleDeadline) {
+        lifecycle.idleEndsAt = idleDeadline;
+        this.commit(draft, '即将返回待机，可继续当前体验。', time);
+      } else if (!lifecycle.idleEndsAt || time >= lifecycle.idleEndsAt) {
+        lifecycle.reason = 'idle_end'; delete lifecycle.idleEndsAt;
+        this.reset(draft, 'idle'); this.commit(draft, '长时间未操作，大屏已自动返回待机。', time);
+      }
     } else if (state.providerMode === 'demo' && state.phase === 'generating' && state.generationReadyAt !== null && time >= state.generationReadyAt) {
       const draft = structuredClone(this.stored); draft.state.phase = 'showcase'; draft.state.displayedLookId = draft.state.selectedLookId; draft.state.generationReadyAt = null;
       this.commit(draft, `${this.lookName(draft.state.selectedLookId)}演示图已展示。`, time);
@@ -1081,13 +1200,40 @@ export class ExhibitionService {
     }
   }
   private commit(draft: StoredExhibition, message: string, time: number) {
+    const previous = this.stored.state;
+    const lifecycle = draft.state.lifecycle ??= structuredClone(previous.lifecycle ?? initialLifecycle());
+    if (draft.state.sessionNumber !== previous.sessionNumber) {
+      lifecycle.experienceId = randomUUID(); lifecycle.state = 'active'; lifecycle.connection = 'idle';
+      delete lifecycle.reason; delete lifecycle.retryAt; delete lifecycle.ownerDeviceId;
+    } else if (['idle', 'select'].includes(draft.state.phase)) {
+      if (lifecycle.state === 'active' || lifecycle.state === 'paused') lifecycle.terminalRevision++;
+      lifecycle.state = lifecycle.experienceId ? 'ended' : 'idle';
+      lifecycle.connection = draft.state.live ? 'cleaning' : 'idle';
+    } else if (draft.state.phase === 'paused') lifecycle.state = lifecycle.reason === 'staff_pause' ? 'paused' : 'active';
+    else lifecycle.state = 'active';
+    if (draft.state.live?.status === 'running' && lifecycle.connection !== 'recovering') {
+      lifecycle.connection = 'running'; lifecycle.healthySince ??= time;
+    }
     if (!this.autoSwitchEligible(draft.state, time)) draft.state.autoSwitchAt = null;
     else if (draft.state.autoSwitchAt == null) draft.state.autoSwitchAt = time + (draft.state.settings.autoSwitchSeconds ?? EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS) * 1_000;
     draft.state.revision = this.stored.state.revision + 1; draft.state.updatedAt = time;
+    message = message.replace(/(?:tk|uk|sk)-[A-Za-z0-9_-]+/gi, '[凭证已隐藏]').replace(/(?:https?|wss?):\/\/\S+/gi, '[连接地址]');
+    if (draft.state.live?.error) draft.state.live.error = draft.state.live.error.replace(/(?:tk|uk|sk)-[A-Za-z0-9_-]+/gi, '[凭证已隐藏]').replace(/(?:https?|wss?):\/\/\S+/gi, '[连接地址]');
     draft.state.logs = [{ id: randomUUID(), time, message }, ...draft.state.logs].slice(0, MAX_LOGS);
-    const temporary = `${this.filename}.${process.pid}.${randomUUID()}.tmp`;
-    try { writeFileSync(temporary, JSON.stringify(draft), { mode: 0o600, flag: 'wx' }); renameSync(temporary, this.filename); this.stored = draft; }
-    finally { rmSync(temporary, { force: true }); }
+    if (this.durable) {
+      const life = draft.state.lifecycle;
+      this.liveService!.options.store.saveMirrorState(this.mirrorId, draft, {
+        type: 'transition', time, revision: draft.state.revision, phase: draft.state.phase,
+        experienceId: life.experienceId, segmentId: draft.state.live?.sessionId ?? null,
+        controllerEpoch: life.controllerEpoch, terminalRevision: life.terminalRevision,
+        connection: life.connection, reason: life.reason ?? null, cleanupReason: draft.state.live?.stopReason ?? null, message,
+      }, this.activeCommand);
+      this.stored = draft;
+    } else {
+      const temporary = `${this.filename}.${process.pid}.${randomUUID()}.tmp`;
+      try { writeFileSync(temporary, JSON.stringify(draft), { mode: 0o600, flag: 'wx' }); renameSync(temporary, this.filename); this.stored = draft; }
+      finally { rmSync(temporary, { force: true }); }
+    }
     for (const listener of this.changes) listener();
   }
 }

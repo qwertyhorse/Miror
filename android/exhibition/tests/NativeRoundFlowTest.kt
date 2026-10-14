@@ -215,7 +215,32 @@ fun main() = runBlocking {
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
-        println("Native round flow passed: 12 isolated flows, $assertions assertions; no supplier SDK or live service calls.")
+        RoundFixture("clothx").use { fixture ->
+            val controller = NativeXmaxController(fixture.events)
+            val running = startRound(fixture, controller)
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                fixture.heartbeatFailures.set(1)
+                withTimeout(8_000) { while (fixture.events.count { it == "heartbeat" } < 3) delay(20) }
+                verify(!running.failure.isCompleted, "Transient heartbeat failure ended the round")
+                verify(fixture.stoppedIds.isEmpty(), "Transient control failure stopped healthy video")
+                verify(fixture.allocations.get() == 1, "Heartbeat recovery issued another credential")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
+        RoundFixture("clothx", continuous = true).use { fixture ->
+            val controller = NativeXmaxController(fixture.events)
+            val running = startRound(fixture, controller)
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                withTimeout(8_000) { while (!fixture.events.contains("renewal-commit")) delay(20) }
+                ordered(fixture.events, "renewal-prepare", "disconnect", "stop", "renewal-commit")
+                verify(fixture.allocations.get() == 1, "Renewal allocated before confirmed handoff")
+                verify(fixture.errorReports.get() == 0, "Planned renewal was reported as a failure")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
+        println("Native round flow passed: 14 isolated flows, $assertions assertions; no supplier SDK or live service calls.")
     } finally { FixtureMainDispatcher.close() }
 }
 
@@ -256,10 +281,12 @@ private class RoundFixture(
     private val recoveryOtherOwner: Boolean = false,
     private val stopConfirmed: Boolean = true,
     private val ready: Boolean = false,
+    private val continuous: Boolean = false,
 ) : AutoCloseable {
     val events = CopyOnWriteArrayList<String>()
     val allocations = AtomicInteger()
     val errorReports = AtomicInteger()
+    val heartbeatFailures = AtomicInteger()
     val stoppedIds = CopyOnWriteArrayList<String>()
     val createEntered = CountDownLatch(1)
     val releaseCreate = CountDownLatch(1)
@@ -279,7 +306,7 @@ private class RoundFixture(
         .put("expiresAt", Instant.now().plusSeconds(120).toString())
         .put("exhibition", JSONObject().put("mirrorId", "default").put("deviceId", "device-fixture")
             .put("lookId", "commute").put("mode", mode).put("prompt", NativeRoundMetadata.prompt(look))
-            .put("sessionNumber", 2).put("generationNumber", 3))
+            .put("sessionNumber", 2).put("generationNumber", 3).put("continuous", continuous))
     private val failure = AtomicReference<Throwable>()
     private val lock = Any()
     private val executor = Executors.newCachedThreadPool()
@@ -340,7 +367,23 @@ private class RoundFixture(
                 check(exchange.body().getLong("referenceVersion") == 2L)
                 events.add("condition-applied"); exchange.json(snapshot())
             }
-            path == "$MIRROR/live/heartbeat" -> { events.add("heartbeat"); exchange.json(snapshot()) }
+            path == "$MIRROR/live/heartbeat" -> {
+                events.add("heartbeat")
+                if (heartbeatFailures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
+                    exchange.json(JSONObject().put("code", "TEMPORARY_ERROR").put("message", "Temporary failure"), 503)
+                } else {
+                    val reply = snapshot()
+                    if (continuous && events.contains("report-first")) reply.optJSONObject("live")?.put("renewalDue", true)
+                    exchange.json(reply)
+                }
+            }
+            path == "$MIRROR/live/session/$SESSION_ID/renewal" -> {
+                events.add("renewal-prepare"); exchange.json(JSONObject().put("renewalId", "fixture-renewal"))
+            }
+            path == "$MIRROR/live/session/$SESSION_ID/renewal/commit" -> {
+                check(events.contains("disconnect") && stoppedIds.contains(SESSION_ID))
+                events.add("renewal-commit"); exchange.json(snapshot())
+            }
             path == "$MIRROR/live/session/$SESSION_ID/reference" -> {
                 val body = exchange.body()
                 check(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute")

@@ -20,6 +20,29 @@
 - 状态写入建议携带最新 `expectedRevision`。409 `EXHIBITION_STALE_REVISION` 时重新读取状态、核对操作后再提交。密钥有独立的 `revision`，不能使用镜状态版本代替。
 - `updatedAt`、`boundAt`、`expiresAt`（配对码）等数字时间为 Unix 毫秒；会话中的 `createdAt`、`updatedAt`、`expiresAt` 为 ISO 时间字符串。
 
+## 体验协议 2 与恢复
+
+API、Web 与 Android 0.3.0（versionCode 5）须配套升级。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
+
+`POST M/command` 支持 `commandId`（8–100 位字母、数字、下划线或连字符）。客户端同一次操作重试须沿用编号；同编号同内容返回当前权威快照，同编号不同内容返回 409 `EXHIBITION_COMMAND_CONFLICT`。服务端持久化去重；`expectedRevision` 不参与内容指纹。`end/idle/pause` 优先执行，不因旧 revision 阻止停止。`keepalive` 仅用于正在生成/展示的体验，取消空闲提醒并重新开始空闲计时。
+
+状态的 `lifecycle` 区分业务体验与连接：`experienceId` 跨凭证续接保持不变，`controllerEpoch` 随新连接增加，`terminalRevision` 随结束/工作人员暂停增加。业务 `state` 为 idle/active/paused/ended；连接为 idle/connecting/running/recovering/needs_assistance/cleaning。为兼容既有页面，`phase=paused` 也可能表达需要人工处理；判断工作人员暂停应查看 `lifecycle.reason=staff_pause`。
+
+- 心跳每 3 秒，单请求 4 秒超时。服务端占用 20 秒到期；终端以请求发出的单调时钟计时并留 2 秒余量。短暂控制请求失败不直接拆 RTC；明确撤销或租约截止立即清理。
+- `POST M/live/error` 可携带 `reason`，区分 rtc_failed、lease_expired、credential_expired、segment_exhausted、command_unknown、camera_lost、provider_rejected、mox_completed。到期/耗尽须经服务端现有记录核对。
+- 技术恢复保持同一体验和最新选择，先确认旧凭证停止，再签发下一段。异常恢复连续最多 2 次、5 分钟最多 3 次；健康 60 秒可重置连续失败计数。正常续接不计为异常重试。工作人员暂停不自动继续，MoX 不自动重播。
+- 未确认签发/停止的记录阻止同镜新签发。端侧关闭 SDK 不等于云端停止；停止确认仍由现有会话服务核对。
+- 手动选择将轮播切回手动。手动体验空闲提醒宽限 15 秒，轮询和后台素材上传不推迟截止时间；自动轮播、显式连续模式保留各自策略。
+- `GET M/diagnostics` 导出当前生命周期、生效会话策略和最近最多 2,000 条脱敏转换事件，不含密钥或画面。常规 GET/长轮询返回快照，后台 watchdog 推进状态。
+
+## 数据升级与运行
+
+连接服务挂接后，SQLite `mirror_states` 中 schemaVersion 4 为镜状态权威，`mirror_commands` 保存命令去重，`mirror_events` 保存有界事件。首次启动从已有 `exhibition.json` 校验并迁移，后续不双写活动状态；JSON 只作为迁移输入保留。会话凭证继续由原加密会话存储管理。无连接服务的独立演示仍使用原 JSON 路径。
+
+升级须在维护窗口停止接待，确认所有旧段已停止，停止旧进程，完整备份数据目录（SQLite 及其 WAL/SHM、素材、设备注册、密钥加密配置），再配套升级 API、Web 和 APK。首次恢复会结束遗留顾客体验并隔离旧授权，禁止自动重播。无效或未来协议的持久化状态启动拒绝载入，不能用空状态覆盖。
+
+回退前先清理新版本连接，再恢复兼容的完整备份；不能仅把旧程序指向新数据库或把残留 JSON 当作当前状态。仍有未确认凭证时保持生成禁用并核对，不清空会话表绕过门禁。
+
 ## 设备与绑定
 
 | 方法 | 路径 | 请求体 | 成功响应 |

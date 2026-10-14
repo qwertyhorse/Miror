@@ -156,7 +156,7 @@ describe('automatic live lifecycle', () => {
 
   it('does not rotate an owner whose heartbeat expired at the deadline', async () => {
     const { service, advance, createSession, create, stop } = liveFixture(); service.command({ action: 'configure', autoSwitchSeconds: 15 }); service.command({ action: 'begin' });
-    const session = await createSession(); service.liveFirstFrame(session.id, 100); advance(15_000); await service.sweepLive();
+    const session = await createSession(); service.liveFirstFrame(session.id, 100); advance(20_000); await service.sweepLive();
     expect(service.get()).toMatchObject({ phase: 'paused', selectedLookId: 'commute', generationNumber: 1, live: null, autoSwitchAt: null });
     expect(stop).toHaveBeenCalledWith(session.id); expect(create).toHaveBeenCalledTimes(1);
   });

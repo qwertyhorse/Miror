@@ -1,3 +1,4 @@
+import { STOP_REASONS } from '../../shared/exhibitionLifecycle';
 export const DIAGNOSTIC_EVENT_TYPES = [
   'experience_started', 'credential_started', 'credential_ready', 'rtc_started', 'rtc_ready', 'reference_cache_hit',
   'gesture_threshold', 'gesture_confirmed', 'gesture_ignored', 'command_sent', 'command_accepted', 'command_rejected', 'command_cancelled',
@@ -6,6 +7,7 @@ export const DIAGNOSTIC_EVENT_TYPES = [
 ] as const;
 export type DiagnosticEventType = typeof DIAGNOSTIC_EVENT_TYPES[number];
 export const DIAGNOSTIC_REASONS = [
+  ...STOP_REASONS,
   'blocked', 'unavailable', 'insufficient_materials', 'rejected', 'provider_error', 'update_error', 'stopped',
   'inactive', 'stale_context', 'busy', 'not_ready', 'invalid_input', 'command_error', 'tracking_lost',
   'multiple_people', 'expired', 'cancelled',

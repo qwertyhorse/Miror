@@ -39,7 +39,7 @@ async function fixture() {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); resources.push({ server, store, directory });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const request = (path: string, input: unknown, method = 'POST') => fetch(base + path, { method,
-    headers: { Origin: 'http://xuminghong.local:10200', 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+    headers: { Origin: 'http://xuminghong.local:10200', 'Content-Type': 'application/json', 'x-miror-protocol': '2' }, body: JSON.stringify(input) });
   const start = () => request('/live/session', { terminalId: device.terminalId, terminalToken: device.token, deviceId: 'active-unbind-browser',
     lookId: mirror.get().selectedLookId, generationNumber: mirror.get().generationNumber });
   const unbind = (id = device.terminalId) => request('/binding', { terminalId: id }, 'DELETE');
@@ -54,7 +54,7 @@ describe('staff unbinding ends the local experience independently of cloud revoc
     f.mirror.command({ action: 'pause' }); f.advance(31_000); f.rotate();
     expect(f.mirrors.devices.binding('default')?.online).toBe(false);
     const response = await f.unbind(); expect(response.status).toBe(200); expect(await response.json()).toEqual({ binding: null });
-    expect(f.mirror.get()).toMatchObject({ phase: 'idle', live: { sessionId: session.id, status: 'stopping' } });
+    expect(f.mirror.get()).toMatchObject({ phase: 'idle', live: { sessionId: session.id, status: 'stopping' }, lifecycle: { state: 'ended', reason: 'user_end', connection: 'cleaning' } });
     expect(f.mirrors.devices.binding('default')).toBeNull();
     await vi.waitFor(() => expect(f.deactivate).toHaveBeenCalledWith(f.key, session.token));
     const reconnect = f.mirrors.connectDevice(f.device); expect(reconnect).toMatchObject({ mirrorId: null, code: expect.stringMatching(/^\d{4}$/) });
@@ -90,7 +90,7 @@ describe('staff unbinding ends the local experience independently of cloud revoc
     expect(f.mirror.get().phase).toBe('paused'); f.advance(31_000);
     expect((await f.unbind()).status).toBe(200); await f.mirror.reconcileLive();
     const ended = f.mirror.get();
-    expect(ended).toMatchObject({ phase: 'idle', live: { sessionId: record.id, status: 'error', localEnded: true } });
+    expect(ended).toMatchObject({ phase: 'idle', live: { sessionId: record.id, status: 'error', localEnded: true }, lifecycle: { state: 'ended', reason: 'user_end', connection: 'cleaning' } });
     expect(f.mirrors.devices.binding('default')).toBeNull(); expect(f.store.get(record.id)).toEqual(beforeRecord);
     expect(f.deactivate).not.toHaveBeenCalled(); expect(f.issue).toHaveBeenCalledOnce();
     const restarted = new ExhibitionMirrors(f.directory, { now: f.now }); restarted.attachLiveService(f.service); await restarted.sweepLive();

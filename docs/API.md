@@ -20,6 +20,29 @@
 - 状态写入建议携带最新 `expectedRevision`。409 `EXHIBITION_STALE_REVISION` 时重新读取状态、核对操作后再提交。密钥有独立的 `revision`，不能使用镜状态版本代替。
 - `updatedAt`、`boundAt`、`expiresAt`（配对码）等数字时间为 Unix 毫秒；会话中的 `createdAt`、`updatedAt`、`expiresAt` 为 ISO 时间字符串。
 
+## 体验协议 2 与恢复
+
+API、Web 与 Android 0.3.1（versionCode 9）须配套升级。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
+
+`POST M/command` 支持 `commandId`（8–100 位字母、数字、下划线或连字符）。客户端同一次操作重试须沿用编号；同编号同内容返回当前权威快照，同编号不同内容返回 409 `EXHIBITION_COMMAND_CONFLICT`。服务端持久化去重；`expectedRevision` 不参与内容指纹。`end/idle/pause` 优先执行，不因旧 revision 阻止停止。`keepalive` 仅用于正在生成/展示的体验，取消空闲提醒并重新开始空闲计时。
+
+状态的 `lifecycle` 区分业务体验与连接：`experienceId` 跨凭证续接保持不变，`controllerEpoch` 随新连接增加，`terminalRevision` 随结束/工作人员暂停增加。业务 `state` 为 idle/active/paused/ended；连接为 idle/connecting/running/recovering/needs_assistance/cleaning。为兼容既有页面，`phase=paused` 也可能表达需要人工处理；判断工作人员暂停应查看 `lifecycle.reason=staff_pause`。
+
+- 心跳每 3 秒，单请求 4 秒超时。服务端占用 20 秒到期；终端以请求发出的单调时钟计时并留 2 秒余量。短暂控制请求失败不直接拆 RTC；明确撤销或租约截止立即清理。
+- `POST M/live/error` 可携带 `reason`，区分 rtc_failed、lease_expired、credential_expired、segment_exhausted、command_unknown、camera_lost、provider_rejected、mox_completed。到期/耗尽须经服务端现有记录核对。
+- 技术恢复保持同一体验和最新选择，先确认旧凭证停止，再签发下一段。异常恢复连续最多 2 次、5 分钟最多 3 次；健康 60 秒可重置连续失败计数。正常续接不计为异常重试。工作人员暂停不自动继续，MoX 不自动重播。
+- 未确认签发/停止的记录阻止同镜新签发。端侧关闭 SDK 不等于云端停止；停止确认仍由现有会话服务核对。
+- 手动选择将轮播切回手动。手动体验空闲提醒宽限 15 秒，轮询和后台素材上传不推迟截止时间；自动轮播、显式连续模式保留各自策略。
+- `GET M/diagnostics` 导出当前生命周期、生效会话策略和最近最多 2,000 条脱敏转换事件，不含密钥或画面。常规 GET/长轮询返回快照，后台 watchdog 推进状态。
+
+## 数据升级与运行
+
+连接服务挂接后，SQLite `mirror_states` 中 schemaVersion 4 为镜状态权威，`mirror_commands` 保存命令去重，`mirror_events` 保存有界事件。首次启动从已有 `exhibition.json` 校验并迁移，后续不双写活动状态；JSON 只作为迁移输入保留。会话凭证继续由原加密会话存储管理。无连接服务的独立演示仍使用原 JSON 路径。
+
+升级须在维护窗口停止接待，确认所有旧段已停止，停止旧进程，完整备份数据目录（SQLite 及其 WAL/SHM、素材、设备注册、密钥加密配置），再配套升级 API、Web 和 APK。首次恢复会结束遗留顾客体验并隔离旧授权，禁止自动重播。无效或未来协议的持久化状态启动拒绝载入，不能用空状态覆盖。
+
+回退前先清理新版本连接，再恢复兼容的完整备份；不能仅把旧程序指向新数据库或把残留 JSON 当作当前状态。仍有未确认凭证时保持生成禁用并核对，不清空会话表绕过门禁。
+
 ## 设备与绑定
 
 | 方法 | 路径 | 请求体 | 成功响应 |
@@ -32,7 +55,7 @@
 | POST | `M/copy` | `{ "sourceMirrorId": "default", "copyLooks": true, "copySettings": true, "expectedRevision": 12 }` | 200 目标镜状态 |
 | GET | `/v1.1/api/exhibition/native-identity` | — | 200 `{ "native": false }` |
 | POST | `/v1.1/api/exhibition/terminals/connect` | 见下例 | 200 `ExhibitionDeviceConnection` |
-| POST | `M/binding` | `{ "code": "123456" }` | 200 `ExhibitionDeviceBinding` |
+| POST | `M/binding` | `{ "code": "1234" }` | 200 `ExhibitionDeviceBinding` |
 | DELETE | `M/binding` | `{ "terminalId": "terminal-…" }` | 200 `{ "binding": null }` |
 
 名称为 1–40 字且不能重名。复制至少选择一种内容，目标镜应结束体验；复制素材会替换目标素材，并先保存备份，密钥、绑定、会话和日志不从来源镜复制。
@@ -73,12 +96,12 @@
 {
   "terminalId": "terminal-11111111-1111-4111-8111-111111111111",
   "mirrorId": null,
-  "code": "123456",
+  "code": "1234",
   "expiresAt": 1791771000000
 }
 ```
 
-绑定后同一请求返回 `mirrorId` 和 `mirrorName`，不再返回配对码。配对码有效期 10 分钟、使用一次后失效；镜端每 10 秒连接刷新在线状态，30 秒未连接视为离线。API 接受 32–512 位可见 ASCII 的设备 `token`；本包浏览器生成并保存 64 位随机十六进制值，服务端仅保存其哈希。已登记设备使用错误 token 返回 403。修改绑定要求镜处于 `idle` 或 `select`，且无实时会话。
+绑定后同一请求返回 `mirrorId` 和 `mirrorName`，不再返回配对码。配对码为 4 位数字，有效期 10 分钟、使用一次后失效；镜端每 10 秒连接刷新在线状态，30 秒未连接视为离线。API 接受 32–512 位可见 ASCII 的设备 `token`；本包浏览器生成并保存 64 位随机十六进制值，服务端仅保存其哈希。已登记设备使用错误 token 返回 403。建立绑定要求镜处于 `idle` 或 `select`，且无实时会话或未确认停止的连接。后台可在体验中主动解绑：先校验当前终端身份，再结束体验、解除绑定并清理连接；云端停止未确认时保留记录，阻止新的绑定和会话签发。
 
 ## 镜状态与操作
 
@@ -134,9 +157,10 @@ if (!response.ok) throw new Error(next.message);
 | --- | --- | --- |
 | `select` | `lookId` | `idle` / `select`，选择当前模式已启用素材 |
 | `begin` | — | `idle` / `select`，开始一轮；实时模式等待镜端连接 |
+| `keepalive` | — | `generating` / `showcase`，取消空闲提醒并重新计时 |
 | `confirm` | — | 仅旧客户端 `positioning` 阶段兼容 |
-| `switch` | `lookId` | `showcase`，换到指定已启用素材 |
-| `next` / `previous` | — | `showcase`，按素材顺序循环 |
+| `switch` | `lookId` | `generating` / `showcase`，换到指定已启用素材并切回手动轮播模式 |
+| `next` / `previous` | — | `generating` / `showcase`，按素材顺序切换并切回手动轮播模式 |
 | `pause` | — | `generating` / `showcase`，暂停并释放实时会话 |
 | `resume` | — | `paused`，上次会话停止确认后继续 |
 | `end` | — | 结束体验并返回 `select`；没有可用素材时为 `idle` |
@@ -163,7 +187,7 @@ if (!response.ok) throw new Error(next.message);
 
 单轮限制按镜保存，默认 30 credits / 120 秒。旧配置没有此字段时沿用服务端默认值；状态中的 `settings.sessionLimits` 返回当前镜的设置。复制设备设置包含这项限制。保存只影响随后签发的临时凭证，不修改已签发凭证；`live/session` 只读取服务器保存的限制，客户端请求里的积分或有效期不能覆盖。
 
-`credits: null` 表示体验不限积分、自动分段续接，默认仍使用有限模式。每段签发 3000 credits 的可撤销临时凭证，有效期使用本镜 `expireSeconds`；不向 XMAX 发送 `null` 或伪造“无限”值。`live/status.perSessionLimit` 与 `credentials.perSessionLimit` 在不限模式返回每段实际的 3000。签发结果 `exhibition.continuous=true` 冻结该段的续接模式。不限体验运行期间不因 `autoReturnSeconds` 无操作返回待机；手动结束、真实错误、心跳失联等仍会停止。
+`credits: null` 表示体验不限积分、自动分段续接，默认仍使用有限模式。每段签发 3000 credits 的可撤销临时凭证，有效期使用本镜 `expireSeconds`；不向 XMAX 发送 `null` 或伪造“无限”值。`live/status.perSessionLimit` 与 `credentials.perSessionLimit` 在不限模式返回每段实际的 3000。签发结果 `exhibition.continuous=true` 冻结该段的续接模式。不限体验运行期间不因 `autoReturnSeconds` 无操作返回待机；手动结束仍会结束体验。连接错误或心跳失联先停止当前段，再按协议 2 的恢复规则处理。
 
 手势识别默认值（`configure` 更新此项时必须提交完整对象）：
 
@@ -195,29 +219,30 @@ if (!response.ok) throw new Error(next.message);
 ```json
 {
   "maxFileSizeMB": 10,
-  "minWidth": 512,
-  "maxWidth": 4096,
-  "minHeight": 512,
-  "maxHeight": 4096
+  "minWidth": 256,
+  "maxWidth": 8192,
+  "minHeight": 256,
+  "maxHeight": 8192
 }
 ```
 
-可配置文件上限 1–20 MiB；各宽高范围 64–8192 px，最小值不能超过最大值，总像素不超过 3200 万。
+可配置文件上限 1–20 MiB；各宽高范围 64–8192 px，最小值不能超过最大值，总像素不超过 3200 万。两张素材图分别校验，POST 与 PATCH 的请求容量按两张图的 base64 大小计算。升级仅迁移旧默认尺寸限制，保留已自定义的限制。
 
 ## 素材、分类与皮肤
 
 | 方法 | 路径 | 请求体 | 成功响应 |
 | --- | --- | --- | --- |
-| POST | `M/looks` | 素材元信息 + `imageBase64` | 201 完整镜状态 |
-| PATCH | `M/looks/{lookId}` | 要修改的元信息 + `expectedRevision` | 200 完整镜状态 |
+| POST | `M/looks` | 素材元信息 + `imageBase64` + `referenceImageBase64` | 201 完整镜状态 |
+| PATCH | `M/looks/{lookId}` | 要修改的元信息、可选 `imageBase64` / `referenceImageBase64` + `expectedRevision` | 200 完整镜状态 |
 | DELETE | `M/looks/{lookId}` | `{ "expectedRevision": 12 }` | 200 完整镜状态 |
 | GET / HEAD | `M/assets/{uploadId}` | — | 200 `image/webp` |
+| GET / HEAD | `M/assets/{lookId}/{role}/{uuid}` | — | 200 `image/webp`；`role` 为 `display` 或 `reference` |
 | POST | `M/taxonomy` | `{ "categories": ["通勤", "休闲", "礼服"], "tags": ["简约", "日常", "优雅"], "expectedRevision": 12 }` | 200 完整镜状态 |
 | POST | `M/skin` | `{ "imageBase64": "…", "expectedRevision": 12 }` | 200 完整镜状态 |
 | DELETE | `M/skin` | `{ "expectedRevision": 12 }` | 200 完整镜状态，恢复默认皮肤 |
 | GET / HEAD | `M/skin/{skinId}` | — | 200 `image/webp` |
 
-素材上传 JSON 示例，`imageBase64` 应换成完整图片的 base64 或 data URL：
+素材上传 JSON 示例，两种图片字段均应换成完整图片的 base64 或 data URL：
 
 ```json
 {
@@ -226,13 +251,18 @@ if (!response.ok) throw new Error(next.message);
   "mode": "clothx",
   "category": "通勤",
   "tags": ["简约"],
-  "imageBase64": "data:image/png;base64,<完整图片编码>"
+  "imageBase64": "data:image/png;base64,<完整展示图编码>",
+  "referenceImageBase64": "data:image/png;base64,<完整参考图编码>"
 }
 ```
 
-名称 1–40 字，描述最多 120 字，每份素材最多 8 个标签；分类和标签必须已登记。只接受可完整解码的静态 PNG/JPEG/WebP，统一转为 WebP。每镜最多 100 份素材，全服务同时处理最多 2 份上传。新增素材默认禁用，需通过 `configure.enabledLookIds` 启用。上传可在体验中追加，不使用全局版本锁；编辑、删除、分类调整和皮肤更换需先结束体验。
+API 名称 1–40 字；后台不要求填写名称，上传时从展示图文件名生成，编辑时保留。描述最多 120 字，每份素材最多 8 个标签；分类和标签必须已登记。两张图只接受可完整解码的静态 PNG/JPEG/WebP，分别转为 WebP。每镜最多 100 份素材，全服务同时处理最多 2 份上传。新增素材默认禁用，需通过 `configure.enabledLookIds` 启用。上传可在体验中追加，不使用全局版本锁；编辑、删除、分类调整和皮肤更换需先结束体验。
 
-Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示仅使用提示词，上传图只作为封面。其他模式仅支持图片参考。返回的素材 `image`、皮肤 `image` 为版本相对路径，如 `/api/exhibition/mirrors/default/assets/upload-…`；前端应加 `/v1.1`，可直接使用 `appUrl(image)`。
+`image` 为展示图，用于素材列表、选衣和待机；`referenceImage` 为 XMAX 输入，附有独立的 `referenceImageInfo`（宽高、字节数、MIME）。服务端准备、Web/Android 上传、连续切换与 MoX 操作均使用参考图。新素材两张图必填；PATCH 未提交的图片保持原样，换图生成新资源 URL 并刷新参考图准备缓存。所有图片校验通过后才保存；处理或保存失败清理本次文件，保留原素材。
+
+旧单图素材没有 `referenceImage` 时继续以 `image` 作为生成输入；首次仅更换展示图会把原图固定为参考图。Free 模式必须提交 1–1000 字 `prompt`；旧素材的 `referenceKind: "none"` 继续仅使用提示词，编辑时补充参考图才转为图文生成，转到其他模式须补参考图。新建 Free 素材也必须提交双图。
+
+返回的图片 URL 为版本相对路径，如 `/api/exhibition/mirrors/default/assets/upload-…/reference/…`；前端应加 `/v1.1`，可直接使用 `appUrl(image)`。旧资源路径继续兼容，资源校验限定当前镜和素材。设备间复制、复制前备份、删除与重启载入同时覆盖双图；SQLite 为权威时，恢复须恢复完整数据库与资源备份，不能仅覆盖遗留 `exhibition.json`。
 
 分类最多 40 项且不能为空，标签最多 80 项且可为空；每项最多 20 字，不区分大小写去重。删除分类或标签前，须先从仍使用它们的素材中移除。
 
@@ -271,7 +301,7 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 | POST | `M/live/session/{sessionId}/condition` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、可选 `refImageUrl` | 200 更新后的会话，包含 `referenceVersion` |
 | POST | `M/live/session/{sessionId}/condition/applied` | 同上，加 `referenceVersion` | 200 镜状态，确认当前素材已应用 |
 | POST | `M/live/heartbeat` | `{ "deviceId": "screen_device_001", "sessionId": "会话 UUID" }` | 200 镜状态 |
-| POST | `M/live/error` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、`message`；已有会话时加 `sessionId` | 200 暂停后的镜状态 |
+| POST | `M/live/error` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、`message`、可选 `reason`；已有会话时加 `sessionId` | 200 镜状态；按 `lifecycle` 区分恢复中或需要人工处理 |
 | GET | `S` | — | 200 会话对象，更新供应商凭证状态 |
 | POST | `S/link` | `{ "providerSessionId": "ums-供应商会话编号" }` | 200 会话对象 |
 | POST | `S/first-frame` | `{ "firstFrameMs": 1234 }` | 200 会话对象 |
@@ -312,20 +342,20 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 正确调用顺序：
 
 1. 进入镜端仅准备本地取景，用户点击开始后提交 `command.begin`；确认镜状态为 `generating`。
-2. 下载当前素材，再调用 `live/session` 申请临时凭证；同一生成代数仅创建一次。
+2. 下载当前素材的 `referenceImage`（旧单图素材回退 `image`，纯提示词素材跳过），再调用 `live/session` 申请临时凭证；同一生成代数仅创建一次。
 3. 通过对应区域官方 SDK 上传参考图，将云端 HTTPS 链接提交给 `live/session/{id}/reference`。Free 的 `referenceKind=none` 跳过参考图上传和绑定；MoX 使用图片输入。
 4. SDK 建立 RTC 后，调用 `S/link` 关联真实供应商会话；收到真实远端首帧后调用 `S/first-frame`。仅上报首帧才进入 `showcase`，`firstFrameMs` 范围 0–120000，从客户端开始准备本次体验计时，包含素材、凭证和 RTC 建连；不等于某次换装可见延迟。
-5. 每 5 秒提交本地 `live/heartbeat`。超过 15 秒未收到心跳、有效期结束或达到单次上限时，服务端尝试停止并释放占用。
+5. 每 3 秒提交本地 `live/heartbeat`，单请求 4 秒超时。服务端占用在最后一次有效心跳后 20 秒到期；终端按请求发出时的单调时钟计算截止并预留 2 秒。租约到期、凭证到期或达到单段上限时先停止当前段；后续恢复须由服务端核对旧凭证停止与恢复条件。
 6. 正在运行的兼容摄像头会话切换素材时，先提交 `command.switch`，在原会话调用 `condition`，用返回的参考图和提示词更新 SDK 条件；SDK 确认成功后提交 `condition/applied`。两次请求均带当前 `deviceId`、`lookId`、`sessionNumber`、`generationNumber`，确认请求再带 `referenceVersion`。旧素材的迟到请求返回 409，不替换最新选择；保持原 RTC、摄像头和临时凭证。MoX、模式改变或未连接会话继续走停止与重建流程。
-7. 停止或离开时释放 SDK 和摄像头，提交 `command.end` 或 `command.idle`，并对已创建会话调用 `S/stop`；以服务端停止确认完成为准。
+7. 停止或离开时立即提交 `command.end` 或 `command.idle`，同时释放 SDK 和摄像头、对已创建会话调用 `S/stop`，不等待 SDK 清理才通知后台；本地结束与云端停止确认分别处理。
 
 会话状态为 `reserved` / `active` / `stopping` / `stopped` / `issuance_unknown` / `error`。签发或停止状态未知时保留异常记录，不自动重复申请。`recover` 仅释放已结束的本地占用，不宣称未知云端凭证已撤销。
 
-不限模式由大屏主动计划续接，不把 SDK 错误或供应商异常停止作为重试信号：
+不限模式的健康会话由大屏主动计划续接，与前述 `live/error` 技术恢复分开处理；不能仅凭 SDK 错误或异常停止启动 `renewal` 计划：
 
 1. 已收到真实首帧、当前素材已确认且会话仍为 active 时，凭证距到期 20 秒以内，或已核对消耗达到每段上限减 30 credits，允许 `POST M/live/session/{id}/renewal`，提交 `{ "deviceId": "…", "sessionNumber": 1, "generationNumber": 1 }`。成功返回 `{ "renewalId": "…" }`；`live.renewal` 显示这次计划，心跳返回的 `live.renewalDue` 可提示达到续接阈值。未确认使用量或客户端自报额度不构成续接依据。
 2. 大屏停止旧 SDK 并调用 `S/stop`，服务端确认旧临时凭证 stopped 后，再 `POST M/live/session/{id}/renewal/commit`，提交 `{ "deviceId": "…", "renewalId": "…" }`。成功返回完整镜状态：原 `sessionNumber` 保留，`generationNumber` 加一，`phase=generating`、`live=null`，只允许原大屏申请下一段。重复成功提交不重复增加代数或签发凭证。
-3. 计划最多保留 15 秒，且大屏心跳始终有效。续接中轮播与换装暂缓，手动结束/待机/暂停即时生效。旧凭证停止未确认、计划失效、心跳失联或新段签发失败均要求手动继续；后台轮询不会释放有效计划的旧占用，也不会自行续接。服务重启不恢复自动续接计划。
+3. 计划有效期为 20 秒，且大屏心跳必须有效。续接中轮播与换装暂缓，手动结束/待机/暂停即时生效。计划失效或旧凭证停止未确认时，不提交下一段；新段签发失败不自动重复申请。返回 `paused` 或 `needs_assistance` 时，处理停止状态后手动继续；符合协议 2 的连接故障、已核对的到期或耗尽，通过 `live/error` 申请恢复。后台轮询不会释放有效计划的旧占用，也不会自行续接；服务重启不恢复计划。
 
 智能镜不设置本地累计预算；`consumedCredits` 为单次临时凭证已核对消耗，不代表 SK 余额，余额不足以 XMAX 实际返回为准。单轮积分与凭证有效期默认 30 credits / 120 秒，可在后台按镜设置，或通过服务端环境配置缺省值；XMAX 仍可根据实际账号和服务限制拒绝签发。会话的 `pointsLimit` 保留签发时的积分上限，耗尽判断使用该快照。
 
@@ -352,6 +382,7 @@ Free 模式必须提交 1–1000 字 `prompt`；`referenceKind: "none"` 表示�
 | 409 | 状态版本变化、阶段不允许、会话归属不符、设备占用、停止待确认 | 刷新状态并核对；停止不确定时先处理旧会话 |
 | 410 | 配对码过期 | 使用镜端最新配对码 |
 | 413 | 请求体或图片过大 | 按当前限制重新选择图片 |
+| 426 | 镜端未携带协议 2 标识 | 配套更新镜端后再开始体验 |
 | 429 | 上传并发已满、配对尝试过多 | 等待后重试 |
 | 500 / 502 / 503 | 存储、供应商、服务或凭证不可用 | 保留当前输入，显示简短反馈；不要自动重复签发 |
 
@@ -362,7 +393,7 @@ HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应
 - `GET M/references` 批量返回 `{ references: { [lookId]: { state, message?, retryAt?, updatedAt?, freshUntil?, stage? } } }`，供工作人员后台显示状态。`state` 为 `queued`、`preparing`、`ready`、`failed`、`unconfigured` 或 `not_required`；时间字段为 Unix 毫秒。此接口不返回云端 URL、账号摘要或凭据，也不会触发上传。
 - `POST M/references/{lookId}/retry`，JSON 请求体 `{}`，返回 HTTP 202 和 `{ status }`，异步准备该素材；已有任务复用，有效缓存不重传。失败后冷却期间仅返回当前状态，达到 `retryAt` 后可重试。原有同步准备接口保持兼容。
 - `GET M/references/{lookId}` 只读查询，返回 `{ reference: null }` 或 `{ reference: { url, sha256, scope, freshUntil } }`。`scope` 为账号与区域的不可逆摘要；`freshUntil` 为 Unix 毫秒。查询不会签发临时 key 或发起云端上传。
-- `POST M/references/{lookId}`，JSON 请求体 `{}`，准备指定素材并返回同一结构。仅使用该镜当前永久凭据向对应区域上传原始图片并执行 SDK 同等的安全检查，不创建 RTC 或生成任务。原图仍保存在原素材目录。
+- `POST M/references/{lookId}`，JSON 请求体 `{}`，准备指定素材并返回同一结构。仅使用该镜当前永久凭据向对应区域上传规范化后的参考图（旧单图素材回退展示图）并执行 SDK 同等的安全检查，不创建 RTC 或生成任务。图片仍保存在原素材目录。
 - 后台启动后自动串行准备空闲镜的素材，顺序为当前选中、已启用、其他素材；同优先级在镜子与素材间轮换，新上传或选择变化在下一轮调度生效。失败任务冷却后排在尚待准备的任务之后重试，避免连续超时阻塞正常素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。有效记录保留 1 小时，临近到期以 HEAD 检查续期，明确不存在才重新上传；网络不确定时冷却 60 秒。
 - 创建体验会话新增可选字段 `referenceScope`。客户端仅在它与准备结果 `scope` 相同且仍新鲜时复用 URL；缺字段、区域/账号变化、查找超时或未准备均回退普通 SDK 上传。现有 reference 绑定、session 关联和条件版本校验继续执行。
 - 同时最多 2 个准备任务（自动任务最多 1 个）；变更等待最多 128 个连接，超额返回 429。断开请求自动清理订阅。

@@ -72,7 +72,7 @@ export class ExhibitionMirrorClient {
     intent.cancelled = true; this.observe(intent, 'cancelled');
   }
   private intent(command: ExhibitionCommand, state: ExhibitionState, observer?: ExhibitionCommandObserver): CommandIntent {
-    return { command, state, observer, attempt: 0, settled: false, cancelled: false };
+    return { command: { ...command, commandId: command.commandId ?? globalThis.crypto?.randomUUID?.() ?? `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}` }, state, observer, attempt: 0, settled: false, cancelled: false };
   }
   private url(path = '') { return appUrl(`/api${exhibitionApiPath(path, this.mirrorId)}`); }
   private adopt(next: ExhibitionState, scope: RequestScope) {
@@ -200,7 +200,8 @@ export class ExhibitionMirrorClient {
       if (observer && state) this.cancel(this.intent(input as ExhibitionCommand, state, observer));
       return false;
     }
-    const intent = observer ? this.intent(input as ExhibitionCommand, state, observer) : undefined;
+    const intent = path === 'command' ? this.intent(input as ExhibitionCommand, state, observer) : undefined;
+    const payload = intent?.command ?? input;
     if (intent) this.activeMutation = intent;
     let rejectionObserved = false;
     scope.busy = true;
@@ -213,7 +214,7 @@ export class ExhibitionMirrorClient {
       }
       const { ok, result } = await timedJson(this.url(path), scope, {
         method, headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(withRevision ? { ...input, expectedRevision: input.expectedRevision ?? state.revision } : input),
+        body: JSON.stringify(withRevision ? { ...payload, expectedRevision: input.expectedRevision ?? state.revision } : payload),
       }, timeout);
       if (!this.current(scope)) return false;
       if (!ok) {
@@ -246,7 +247,7 @@ export class ExhibitionMirrorClient {
       if (observer) this.cancel(this.intent({ action }, this.snapshot.state, observer));
       return this.stopping.promise;
     }
-    const intent = observer ? this.intent({ action }, this.snapshot.state, observer) : undefined;
+    const intent = this.intent({ action }, this.snapshot.state, observer);
     // Stop takes priority over an in-flight start, upload or selection. Their
     // late responses cannot revive this request epoch or overwrite its result.
     this.stop(); this.start();
@@ -255,9 +256,9 @@ export class ExhibitionMirrorClient {
     let rejectionObserved = false;
     const promise = (async () => {
       try {
-        if (intent) { intent.attempt = 1; intent.sentCommand = { action }; this.observe(intent, 'sent'); }
+        if (intent) { intent.attempt = 1; intent.sentCommand = intent.command; this.observe(intent, 'sent'); }
         const { ok, result } = await timedJson(this.url('command'), scope, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(intent.command),
         }, 15000);
         if (!this.current(scope)) return false;
         if (!ok) { if (intent) this.observe(intent, 'rejected'); rejectionObserved = true; await this.refreshScope(scope); throw new Error(STOP_UNCONFIRMED); }

@@ -141,6 +141,7 @@ describe('command diagnostics report actual sends and returned state', () => {
       expect(client.getSnapshot().state?.looks).toHaveLength(4); client.stop();
     }
     const ordinary = create(); await flush(); expect(await ordinary.send({ action: 'switch', lookId: 'b' })).toBe(true);
-    expect(requests).toEqual(Array.from({ length: 3 }, () => ({ action: 'switch', lookId: 'b', expectedRevision: 1 })));
+    expect(new Set(requests.map(command => command.commandId)).size).toBe(3);
+    expect(requests.map(({ commandId: _id, ...command }) => command)).toEqual(Array.from({ length: 3 }, () => ({ action: 'switch', lookId: 'b', expectedRevision: 1 })));
   });
 });

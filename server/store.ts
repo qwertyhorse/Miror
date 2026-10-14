@@ -40,6 +40,13 @@ export class SessionStore {
       this.db.exec("ALTER TABLE sessions ADD COLUMN budget_scope TEXT NOT NULL DEFAULT 'legacy'");
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS sessions_budget_scope ON sessions(budget_scope)');
+    this.db.exec("CREATE INDEX IF NOT EXISTS sessions_live_mirror ON sessions(coalesce(json_extract(record,'$.exhibition.mirrorId'),'default')) WHERE json_extract(record,'$.status') != 'stopped'");
+    this.db.exec("CREATE INDEX IF NOT EXISTS sessions_unclosed ON sessions(json_extract(record,'$.status')) WHERE json_extract(record,'$.status') != 'stopped'");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS mirror_states (mirror_id TEXT PRIMARY KEY, record TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS mirror_commands (mirror_id TEXT NOT NULL, command_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        PRIMARY KEY(mirror_id, command_id));
+      CREATE TABLE IF NOT EXISTS mirror_events (id INTEGER PRIMARY KEY, mirror_id TEXT NOT NULL, record TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS mirror_events_owner ON mirror_events(mirror_id,id);`);
   }
   /** Persist credential identity for safe recovery; the scope imposes no spending limit. */
   activateApiKeyBudget(apiKey: string): void {
@@ -69,8 +76,36 @@ export class SessionStore {
     this.db.prepare('UPDATE sessions SET record=? WHERE id=?').run(JSON.stringify(value), id); return value;
   }
   list(): SessionRecord[] { return (this.db.prepare('SELECT record FROM sessions ORDER BY rowid').all() as { record: string }[]).map(row => JSON.parse(row.record)); }
+  unclosed(): SessionRecord[] {
+    return (this.db.prepare("SELECT record FROM sessions WHERE json_extract(record,'$.status') != 'stopped'").all() as { record: string }[]).map(row => JSON.parse(row.record));
+  }
+  unreleasedMirror(mirrorId: string): SessionRecord[] {
+    return (this.db.prepare("SELECT record FROM sessions WHERE json_extract(record,'$.status') != 'stopped' AND json_extract(record,'$.exhibition') IS NOT NULL AND coalesce(json_extract(record,'$.exhibition.mirrorId'),'default')=?").all(mirrorId) as { record: string }[]).map(row => JSON.parse(row.record));
+  }
   error(id: string | undefined, code: string): void {
     this.db.prepare('INSERT INTO errors(session_id,code,created_at) VALUES(?,?,?)').run(id ?? null, code, new Date().toISOString());
   }
   close(): void { this.db.close(); }
+
+  mirrorState(mirrorId: string): unknown {
+    const row = this.db.prepare('SELECT record FROM mirror_states WHERE mirror_id=?').get(mirrorId) as { record: string } | undefined;
+    return row ? JSON.parse(row.record) : undefined;
+  }
+  commandFingerprint(mirrorId: string, commandId: string): string | undefined {
+    return (this.db.prepare('SELECT fingerprint FROM mirror_commands WHERE mirror_id=? AND command_id=?').get(mirrorId, commandId) as { fingerprint: string } | undefined)?.fingerprint;
+  }
+  /** State, command deduplication and diagnostics commit together, before external work. */
+  saveMirrorState(mirrorId: string, value: unknown, event: unknown, command?: { id: string; fingerprint: string }): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('INSERT INTO mirror_states VALUES(?,?) ON CONFLICT(mirror_id) DO UPDATE SET record=excluded.record').run(mirrorId, JSON.stringify(value));
+      if (command) this.db.prepare('INSERT OR IGNORE INTO mirror_commands VALUES(?,?,?)').run(mirrorId, command.id, command.fingerprint);
+      this.db.prepare('INSERT INTO mirror_events(mirror_id,record) VALUES(?,?)').run(mirrorId, JSON.stringify(event));
+      this.db.prepare('DELETE FROM mirror_events WHERE mirror_id=? AND id NOT IN (SELECT id FROM mirror_events WHERE mirror_id=? ORDER BY id DESC LIMIT 2000)').run(mirrorId, mirrorId);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  mirrorEvents(mirrorId: string): unknown[] {
+    return (this.db.prepare('SELECT record FROM mirror_events WHERE mirror_id=? ORDER BY id DESC LIMIT 2000').all(mirrorId) as { record: string }[]).map(row => JSON.parse(row.record));
+  }
 }

@@ -70,17 +70,18 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'GET' && path === '/changes') {
           const after = Number(url.searchParams.get('after'));
           if (!url.searchParams.has('after') || !Number.isSafeInteger(after) || after < 0) throw new ApiError('INVALID_REVISION', '状态版本无效。');
-          const state = current.get();
+          const state = current.read();
           if (state.revision !== after) return json(response, 200, state);
           if (waitingForChanges >= 128) throw new ApiError('TOO_MANY_REQUESTS', '连接繁忙，请稍后重试。', 429);
           waitingForChanges++;
           let done = false;
-          const finish = () => { if (!done) { done = true; json(response, 200, current.get()); } };
+          const finish = () => { if (!done) { done = true; json(response, 200, current.read()); } };
           const unsubscribe = current.subscribe(finish);
           const timer = setTimeout(finish, 8_000);
           response.once('close', () => { done = true; clearTimeout(timer); unsubscribe(); waitingForChanges--; });
           return;
         }
+        if (request.method === 'GET' && path === '/diagnostics') return json(response, 200, { mirrorId, state: current.read().lifecycle, policy: { sessionLimits: current.sessionLimits(), autoReturnSeconds: current.read().settings.autoReturnSeconds, leaseTtlMs: 20000 }, events: current.diagnosticTimeline() });
         if (request.method === 'GET' && path === '/references') return json(response, 200, { references: current.referencePreparationStatuses() });
         const retryReference = /^\/references\/([^/]+)\/retry$/.exec(path);
         if (request.method === 'POST' && retryReference) {
@@ -93,7 +94,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           await body(request);
           return json(response, 200, { reference: await current.prepareReference(preparedReference[1]) });
         }
-        if (request.method === 'GET' && !path) { void current.sweepLive().catch(() => undefined); return json(response, 200, current.get()); }
+        if (request.method === 'GET' && !path) { return json(response, 200, current.read()); }
         if (request.method === 'POST' && path === '/skin') return json(response, 200, await current.uploadUiSkin(await body(request, Infinity)));
         if (request.method === 'DELETE' && path === '/skin') return json(response, 200, current.removeUiSkin(await body(request)));
         const skin = /^\/skin\/([a-f0-9-]{36})$/.exec(path);
@@ -102,10 +103,11 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           response.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.data.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
           return response.end(request.method === 'HEAD' ? undefined : image.data);
         }
-        if (request.method === 'GET' && path === '/live/status') { void current.sweepLive().catch(() => undefined); return json(response, 200, current.liveStatus()); }
+        if (request.method === 'GET' && path === '/live/status') { return json(response, 200, current.liveStatus()); }
         if (request.method === 'POST' && path === '/live/error') return json(response, 200, await current.reportLiveError(await body(request)));
         if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await body(request)));
         if (request.method === 'POST' && path === '/live/session') {
+          if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           const input = await body(request); let localId: string | undefined;
           mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
           response.once('close', () => { if (!response.writableEnded && localId) void service.stop(localId).then(() => current.reconcileLive()).catch(() => undefined); });
@@ -151,7 +153,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           const reconciling = current.reconcileLive();
           if (['switch', 'next', 'previous'].includes(String(input.action))) void reconciling.catch(() => undefined);
           else await reconciling;
-          return json(response, 200, current.get());
+          return json(response, 200, current.read());
         }
         if (request.method === 'POST' && path === '/looks') return json(response, 201, await current.upload(await body(request, current.uploadRequestLimit())));
         if (request.method === 'POST' && path === '/taxonomy') return json(response, 200, current.taxonomy(await body(request)));

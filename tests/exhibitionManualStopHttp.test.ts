@@ -41,7 +41,7 @@ async function fixture() {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   resources.push({ server, store, directory });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
-  const post = (path: string, input: unknown) => fetch(base + path, { method: 'POST', headers: { origin, 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  const post = (path: string, input: unknown) => fetch(base + path, { method: 'POST', headers: { origin, 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
   const begin = async () => { const response = await post('/command', { action: 'begin' }); expect(response.status).toBe(200); return response.json(); };
   const start = () => post('/live/session', { deviceId: 'manual-http-screen', lookId: mirror.get().selectedLookId, generationNumber: mirror.get().generationNumber });
   return { directory, store, service, mirror, mirrors, issue, deactivate, base, post, begin, start, advance: (milliseconds: number) => { now += milliseconds; } };

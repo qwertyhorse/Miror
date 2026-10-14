@@ -60,7 +60,7 @@ const interval = setInterval(async () => {
   if (sweeping) return;
   sweeping = true;
   try {
-    for (const row of store.list()) {
+    for (const row of store.unclosed()) {
       if (!row.tokenCipher || !['active', 'stopping'].includes(row.status)) continue;
       try {
         const updated = await service.get(row.id);
@@ -78,7 +78,7 @@ async function shutdown() {
   clearInterval(interval);
   clearInterval(preparationInterval);
   server.close();
-  await Promise.allSettled(store.list().filter(row => row.tokenCipher && row.status !== 'stopped').map(row => service.stop(row.id)));
+  await Promise.allSettled(store.unclosed().filter(row => row.tokenCipher).map(row => service.stop(row.id)));
   store.close();
   process.exit(0);
 }

@@ -151,15 +151,15 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     expect(f.deps.upload).toHaveBeenCalledTimes(2);
   });
 
-  it('records sanitized failure reasons and permits a new retry operation', async () => {
+  it('records sanitized failure reasons and forbids repeating an uncertain operation', async () => {
     const trace: DiagnosticEventInput[] = []; const f = fixture(event => trace.push(event)); await f.ready();
     f.sdk.set.mockRejectedValueOnce(new Error('https://private.fixture?token=secret-error'));
     expect(await f.controller.update(f.next('second'))).toBe(false);
     const failed = trace.find(event => event.type === 'failed')!;
-    expect(failed).toMatchObject({ reason: 'update_error', context: { lookId: 'second', generationNumber: 2, referenceVersion: 2 } });
+    expect(failed).toMatchObject({ reason: 'command_unknown', context: { lookId: 'second', generationNumber: 2, referenceVersion: 2 } });
     expect(JSON.stringify(trace)).not.toContain('secret-error');
-    expect(await f.controller.retryUpdate()).toBe(true);
-    expect(trace.find(event => event.type === 'condition_committed')?.operationId).not.toBe(failed.operationId);
+    expect(await f.controller.retryUpdate()).toBe(false);
+    expect(trace.find(event => event.type === 'condition_committed')).toBeUndefined();
   });
 
   it('does not change session, upload or condition calls when diagnostics are absent or throw', async () => {

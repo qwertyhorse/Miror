@@ -177,7 +177,7 @@ export class ExhibitionMirrors {
   }
 
   private summary(entry: MirrorEntry): ExhibitionMirrorSummary {
-    const { phase, revision, providerMode, updatedAt } = this.getMirror(entry.id).get();
+    const { phase, revision, providerMode, updatedAt } = this.getMirror(entry.id).read();
     return { ...entry, phase, revision, providerMode, updatedAt, binding: this.devices.binding(entry.id) };
   }
 

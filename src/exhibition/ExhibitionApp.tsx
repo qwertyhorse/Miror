@@ -403,6 +403,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
           return Promise.resolve(false);
         }} />
       {feedback && <div className="ex-mirror-feedback" role="alert"><span>{feedback}</span>{live?.updateError && !live.error && <button type="button" className="ex-kiosk-retry" disabled={disabled || stopPending || localStopPending} onClick={() => void live.retryUpdate()}><RotateCcw aria-hidden="true" />重试换装</button>}{welcome && realtime && !mox && live?.secure && live.error && !state.live && <><button type="button" className="ex-kiosk-retry" disabled={disabled || live.opening} onClick={() => { setBeginError(''); void live.startCamera(); }}><RotateCcw aria-hidden="true" />重试摄像头</button><a className="ex-kiosk-retry" href={appUrl(`/camera-check.html?mirror=${encodeURIComponent(state.mirrorId ?? 'default')}`)}>选择摄像头</a></>}</div>}
+      {state.lifecycle?.idleEndsAt && !welcome && !passive && <div className="ex-mirror-feedback" role="status"><span>即将返回待机</span><button className="ex-kiosk-retry" disabled={disabled} onClick={() => void command({ action: 'keepalive' })}>继续体验</button></div>}
+      {state.lifecycle?.connection === 'recovering' && !welcome && <div className="ex-mirror-feedback" role="status"><span>正在恢复连接</span></div>}
       {locallyEnded && !passive && <div className="ex-mirror-feedback" role="status"><span>本地体验已结束，云端凭证状态待确认。</span></div>}
       <div className="ex-mirror-stage-actions">
         {recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled={disabled || passive || carouselBusy || beginPending || live?.opening || !!state.live} onClick={() => void command({ action: 'begin' })}><Play fill="currentColor" />{beginPending || live?.opening ? '等待摄像头…' : '开始体验'}</button>}

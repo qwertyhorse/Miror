@@ -53,7 +53,7 @@ describe('explicit exhibition XMAX path', () => {
     try {
       for (const sourceKind of ['photo', 'camera']) {
         const response = await fetch(base + '/api/sessions', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+          method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
           body: JSON.stringify({ targetItemId: 'real-inner', sourceId: 'test', sourceKind, sourceName: 'test' }),
         });
         expect(response.status).toBe(404);
@@ -111,7 +111,7 @@ describe('explicit exhibition XMAX path', () => {
     expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled(); expect(store.allocated()).toBe(30);
     advance(14000); const another = await exhibition.upload({ ...input, name: '继续上传' });
     expect(another.live).toEqual(latest.live); expect(store.get(session.id).expiresAt).toBe(session.expiresAt);
-    advance(1000); await exhibition.sweepLive();
+    advance(6000); await exhibition.sweepLive();
     expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
     expect(deactivate).toHaveBeenCalledTimes(1); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(30);
   });
@@ -129,7 +129,7 @@ describe('explicit exhibition XMAX path', () => {
   it('stops a disconnected camera after heartbeat expiry and requires manual resume before another allocation', async () => {
     const { exhibition, deactivate, advance, store } = fixture(); start(exhibition); const session = await create(exhibition);
     advance(14000); exhibition.heartbeat({ deviceId, sessionId: session.id }); await exhibition.sweepLive(); expect(deactivate).not.toHaveBeenCalled();
-    advance(15000); await exhibition.sweepLive();
+    advance(20000); await exhibition.sweepLive();
     expect(deactivate).toHaveBeenCalledWith(session.token); expect(store.get(session.id).status).toBe('stopped');
     expect(exhibition.get()).toMatchObject({ phase: 'paused', live: null });
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' });
@@ -248,13 +248,13 @@ describe('explicit exhibition XMAX path', () => {
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
     const id = store.list()[0].id; const failed = exhibition.get();
     expect(failed).toMatchObject({ phase: 'paused', live: { sessionId: id, status: 'error', error: 'XMAX 凭证签发状态未确认，请联系工作人员。' } });
-    for (let index = 0; index < 5; index++) { advance(15_000); await exhibition.sweepLive(); }
+    for (let index = 0; index < 5; index++) { advance(20_000); await exhibition.sweepLive(); }
     expect(exhibition.get()).toEqual(failed);
     expect(() => exhibition.command({ action: 'resume' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
     exhibition.command({ action: 'end' });
     expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
     await exhibition.reconcileLive(); const stoppedAttempt = exhibition.get();
-    for (let index = 0; index < 5; index++) { advance(15_000); await exhibition.sweepLive(); }
+    for (let index = 0; index < 5; index++) { advance(20_000); await exhibition.sweepLive(); }
     expect(exhibition.get()).toEqual(stoppedAttempt);
     expect(store.get(id)).toMatchObject({ status: 'issuance_unknown', errorCode: 'PROVIDER_NETWORK_ERROR' });
     expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
@@ -264,7 +264,7 @@ describe('explicit exhibition XMAX path', () => {
     const { exhibition, issue, deactivate, store, advance } = fixture(); start(exhibition); const session = await create(exhibition);
     deactivate.mockRejectedValue(new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502));
     exhibition.command({ action: 'end' }); await exhibition.reconcileLive(); const failed = exhibition.get();
-    for (let index = 0; index < 5; index++) { advance(15_000); await exhibition.sweepLive(); }
+    for (let index = 0; index < 5; index++) { advance(20_000); await exhibition.sweepLive(); }
     expect(exhibition.get()).toEqual(failed); expect(deactivate).toHaveBeenCalledTimes(6);
     expect(store.get(session.id).status).toBe('stopping'); expect(store.allocated()).toBe(30); expect(issue).toHaveBeenCalledOnce();
     deactivate.mockResolvedValueOnce({ status: 'inactive', consumedCredit: 1, expireTimestamp: session.expiresAt! });
@@ -290,15 +290,15 @@ describe('explicit exhibition XMAX path', () => {
   });
 
   it.each(['true', 1, null, {}])('rejects an invalid stored local-ended marker %j without changing the cloud guard', async localEnded => {
-    const { exhibition, issue, deactivate, store, directory, now } = fixture(); start(exhibition);
+    const { exhibition, issue, deactivate, store, directory, now, service } = fixture(); start(exhibition);
     issue.mockRejectedValue(new ApiError('PROVIDER_NETWORK_ERROR', 'timeout', 502));
     await expect(create(exhibition)).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
     exhibition.command({ action: 'end' }); await exhibition.reconcileLive();
-    const record = store.list()[0]; const filename = join(directory, 'exhibition.json');
-    const invalid = JSON.parse(readFileSync(filename, 'utf8')); invalid.state.live.localEnded = localEnded;
-    writeFileSync(filename, JSON.stringify(invalid));
-    expect(() => new ExhibitionService(directory, { now, strictStorage: true })).toThrow('Invalid exhibition mirror data: default');
-    expect(JSON.parse(readFileSync(filename, 'utf8'))).toEqual(invalid);
+    const record = store.list()[0];
+    const invalid = JSON.parse(JSON.stringify(store.mirrorState('default'))); invalid.state.live.localEnded = localEnded;
+    store.saveMirrorState('default', invalid, { type: 'fixture-corruption' });
+    expect(() => new ExhibitionService(directory, { now, strictStorage: true }).attachLiveService(service)).toThrow('Invalid durable mirror state');
+    expect(store.mirrorState('default')).toEqual(invalid);
     expect(store.get(record.id)).toEqual(record); expect(store.allocated()).toBe(30);
     expect(issue).toHaveBeenCalledOnce(); expect(deactivate).not.toHaveBeenCalled();
   });
@@ -333,7 +333,7 @@ describe('explicit exhibition XMAX path', () => {
     const { exhibition, provider, advance, keys } = fixture(); start(exhibition); const session = await create(exhibition);
     let finishStop!: () => void;
     provider.deactivate = token => new Promise(resolve => { finishStop = () => resolve({ ...keys.get(token)!, status: 'inactive' }); });
-    advance(15000); const stopping = exhibition.sweepLive(); await vi.waitFor(() => expect(finishStop).toBeTypeOf('function'));
+    advance(20000); const stopping = exhibition.sweepLive(); await vi.waitFor(() => expect(finishStop).toBeTypeOf('function'));
     exhibition.command({ action: 'end' });
     expect(() => exhibition.command({ action: 'begin' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
     expect(exhibition.get().sessionNumber).toBe(1);
@@ -387,7 +387,7 @@ describe('live HTTP integration uses mock provider only', () => {
     const exhibition = mirrors.getMirror('default');
     const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-    const headers = { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
+    const headers = { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
     const mirrorPath = '/api/exhibition/mirrors/default';
     const post = async (path: string, input: unknown) => {
       const response = await fetch(base + path, { method: 'POST', headers, body: JSON.stringify(input) });

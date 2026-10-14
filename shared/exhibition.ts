@@ -26,7 +26,7 @@ export function exhibitionPromptForLook(look: { mode: ExhibitionExperienceMode; 
 /** Uploaded garments receive an opaque server-generated ID. */
 export type ExhibitionLookId = string;
 export type ExhibitionPhase = 'select' | 'positioning' | 'generating' | 'showcase' | 'paused' | 'idle';
-export type ExhibitionCommandAction = 'select' | 'begin' | 'confirm' | 'switch' | 'next' | 'previous' | 'pause' | 'resume' | 'end' | 'idle' | 'recover' | 'configure' | 'reorder';
+export type ExhibitionCommandAction = 'keepalive' | 'select' | 'begin' | 'confirm' | 'switch' | 'next' | 'previous' | 'pause' | 'resume' | 'end' | 'idle' | 'recover' | 'configure' | 'reorder';
 
 export interface ExhibitionUploadLimits {
   /** 1–20 MiB, applied to the original image bytes. */
@@ -98,6 +98,7 @@ export interface ExhibitionTaxonomyInput {
   expectedRevision?: number;
 }
 export interface ExhibitionCommand {
+  commandId?: string;
   action: ExhibitionCommandAction;
   lookId?: ExhibitionLookId;
   enabledLookIds?: ExhibitionLookId[];
@@ -122,6 +123,7 @@ export interface ExhibitionCommand {
 }
 
 export interface ExhibitionState {
+  lifecycle?: import('./exhibitionLifecycle.js').ExperienceLifecycle;
   /** Stable registered mirror; deviceId in live state is a separate browser lease. */
   mirrorId?: string;
   revision: number;
@@ -191,6 +193,8 @@ export interface ExhibitionMirrorCopyInput {
 }
 
 export interface ExhibitionLiveState {
+  controllerEpoch?: number;
+  stopReason?: import('./exhibitionLifecycle.js').StopReason;
   generationNumber: number;
   deviceId: string;
   sessionId: string | null;

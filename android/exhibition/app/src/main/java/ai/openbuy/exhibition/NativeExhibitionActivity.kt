@@ -234,16 +234,18 @@ class NativeExhibitionActivity : Activity() {
         var currentDeviceId = cameraDeviceId
         try {
             while (isActive) {
+                if (attempted.size > 128) attempted.remove(attempted.first())
                 val latest = state
                 val id = mirrorId
                 val activeKey = if (id != null && latest != null) generationKey(id, latest) else null
                 val currentSelection = selectedLook(latest)
                 val reusable = latest != null && currentSelection != null && round?.canReuse(latest, currentSelection) == true
-                val valid = healthy && latest?.string("providerMode") == "xmax" &&
+                val valid = latest?.string("providerMode") == "xmax" &&
                     latest.string("phase") in listOf("generating", "showcase") &&
                     runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position && currentDeviceId == cameraDeviceId
                 if (roundJob != null && (!valid || roundJob?.isCompleted == true)) {
                     roundJob?.cancelAndJoin()
+                    if (round?.cleanupConfirmed == false) { previewFailed = true; error = "停止状态未确认，请重试停止。" }
                     roundJob = null
                     round = null
                     cameraReady = false
@@ -263,8 +265,9 @@ class NativeExhibitionActivity : Activity() {
                     cameraReady = false
                     render()
                 }
-                val canConnect = healthy && id != null && latest != null && look != null &&
+                val canConnect = healthy && !previewFailed && id != null && latest != null && look != null &&
                     latest.string("phase") == "generating" && latest.string("providerMode") == "xmax" &&
+                    (latest.optJSONObject("lifecycle")?.optLong("retryAt", 0) ?: 0) <= System.currentTimeMillis() &&
                     activeKey !in attempted && latest.optLong("generationNumber") > (stoppedGeneration[id] ?: -1) &&
                     !stopBusy && !cameraSettingsOpen && !controller.hasReleaseFailure && live == null && (!needsCamera || cameraReady)
                 if (roundJob == null && canConnect) {
@@ -281,7 +284,8 @@ class NativeExhibitionActivity : Activity() {
                     val current = state ?: continue
                     val currentKey = generationKey(id!!, current)
                     val currentLook = selectedLook(current) ?: continue
-                    if (stopBusy || !healthy || current.string("phase") != "generating" || current.string("providerMode") != "xmax" ||
+                    if (stopBusy || !healthy || previewFailed || current.string("phase") != "generating" || current.string("providerMode") != "xmax" ||
+                        (current.optJSONObject("lifecycle")?.optLong("retryAt", 0) ?: 0) > System.currentTimeMillis() ||
                         currentKey != activeKey || currentKey in attempted || current.optJSONObject("live") != null ||
                         current.optLong("generationNumber") <= (stoppedGeneration[id] ?: -1)) continue
                     error = ""
@@ -459,6 +463,7 @@ class NativeExhibitionActivity : Activity() {
             }
         }
         status.setOnClickListener {
+            if ((state?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0) { command("keepalive"); return@setOnClickListener }
             if (round != null) { if (round?.retryUpdate() == true) { error = ""; render() }; return@setOnClickListener }
             previewFailed = false; cameraReady = false; error = ""
             if (!hasCameraPermission()) requestPermissions(arrayOf(Manifest.permission.CAMERA), 41)
@@ -477,6 +482,7 @@ class NativeExhibitionActivity : Activity() {
         val live = snapshot?.optJSONObject("live")
         val selected = selectedLook(snapshot)
         status.text = when {
+            (snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 -> "即将返回待机，点此继续体验"
             error.isNotBlank() -> error
             !healthy -> "连接后台…"
             !bound -> "待绑定"
@@ -508,7 +514,8 @@ class NativeExhibitionActivity : Activity() {
         val realtime = snapshot?.string("providerMode") == "xmax"
         val missingCameraPermission = realtime && mode != "mox" && !hasCameraPermission()
         val missingCredential = realtime && provider?.optBoolean("configured") == false
-        kiosk.status.visibility = if (error.isNotBlank() || !healthy || live != null || generationStatus.isNotBlank() || missingCameraPermission || missingCredential) View.VISIBLE else View.GONE
+        kiosk.status.visibility = if ((snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 ||
+            error.isNotBlank() || !healthy || live != null || generationStatus.isNotBlank() || missingCameraPermission || missingCredential) View.VISIBLE else View.GONE
         val busy = phase in listOf("generating", "showcase", "positioning") || round != null
         val blocked = live != null
         primary.text = when {

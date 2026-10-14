@@ -37,8 +37,8 @@ async function fixture(totalLimit = 360) {
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST') => fetch(base + path, {
-    method, headers: { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+  const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', protocol = '2') => fetch(base + path, {
+    method, headers: { 'X-Miror-Protocol': protocol, 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
     ...(value === undefined ? {} : { body: JSON.stringify(value) }),
   });
   const root = (id: string) => `/api/exhibition/mirrors/${id}`;
@@ -53,6 +53,14 @@ async function fixture(totalLimit = 360) {
 }
 
 describe('mirror-scoped exhibition HTTP APIs', () => {
+  it('requires the current terminal protocol before issuing a credential', async () => {
+    const { request, root, start, issue } = await fixture(); const input = start('default');
+    const response = await request(root('default') + '/live/session', input, 'POST', '1');
+    expect(response.status).toBe(426);
+    expect(await response.json()).toMatchObject({ code: 'EXHIBITION_CLIENT_UPGRADE_REQUIRED' });
+    expect(issue).not.toHaveBeenCalled();
+  });
+
   it('returns a reference DNS failure without binding, linking, or allocating another credential', async () => {
     const { request, root, start, resolveHost, store, issue, sessionStatus } = await fixture();
     const input = start('default');

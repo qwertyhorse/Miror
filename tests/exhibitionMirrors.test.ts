@@ -112,16 +112,18 @@ describe('independent configuration snapshots', () => {
     advance(2200); await manager.sweepLive();
     expect([a, b, c].map(mirror => mirror.get().phase)).toEqual(['showcase', 'showcase', 'showcase']);
     const bBefore = b.get(); const cBefore = c.get();
-    advance(27800); await manager.sweepLive();
+    advance(42800); await manager.sweepLive();
     expect(a.get()).toMatchObject({ phase: 'idle', sessionNumber: 1, generationNumber: 1 });
     expect(a.get().logs[0].message).toContain('自动返回待机');
     expect(b.get()).toEqual(bBefore); expect(c.get()).toEqual(cBefore);
     // Activity on A must not postpone B's deadline or add log rows to another mirror.
     a.command({ action: 'select', lookId: 'city' });
-    advance(29999); await manager.sweepLive(); expect(b.get()).toEqual(bBefore);
+    advance(14999); await manager.sweepLive(); expect(b.get()).toEqual(bBefore);
     advance(1); await manager.sweepLive();
-    expect(b.get()).toMatchObject({ phase: 'idle', sessionNumber: 1, generationNumber: 1, revision: bBefore.revision + 1 });
-    expect(b.get().logs.slice(1)).toEqual(bBefore.logs);
+    expect(b.get().lifecycle?.idleEndsAt).toBeDefined();
+    advance(15000); await manager.sweepLive();
+    expect(b.get()).toMatchObject({ phase: 'idle', sessionNumber: 1, generationNumber: 1, revision: bBefore.revision + 2 });
+    expect(b.get().logs.slice(2)).toEqual(bBefore.logs);
     expect(c.get()).toEqual(cBefore);
   });
 

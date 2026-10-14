@@ -99,7 +99,7 @@ class ExhibitionApi(
         revision: Long? = null,
         lookId: String? = null,
     ): JSONObject {
-        val body = JSONObject().put("action", action)
+        val body = JSONObject().put("action", action).put("commandId", java.util.UUID.randomUUID().toString())
         // Stop always has priority over a stale selection/start revision.
         if (revision != null && action != "end" && action != "idle") body.put("expectedRevision", revision)
         if (lookId != null) body.put("lookId", lookId)
@@ -149,8 +149,16 @@ class ExhibitionApi(
 
     suspend fun heartbeat(mirrorId: String, sessionId: String, deviceId: String): JSONObject = json(
         "${mirrorPath(mirrorId)}/live/heartbeat", "POST",
-        JSONObject().put("sessionId", sessionId).put("deviceId", deviceId), 6_000,
+        JSONObject().put("sessionId", sessionId).put("deviceId", deviceId), 4_000,
     )
+
+    suspend fun prepareRenewal(mirrorId: String, sessionId: String, deviceId: String, sessionNumber: Long, generationNumber: Long): JSONObject = json(
+        "${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/renewal", "POST", JSONObject()
+            .put("deviceId", deviceId).put("sessionNumber", sessionNumber).put("generationNumber", generationNumber), 8_000)
+
+    suspend fun commitRenewal(mirrorId: String, sessionId: String, deviceId: String, renewalId: String): JSONObject = json(
+        "${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/renewal/commit", "POST", JSONObject()
+            .put("deviceId", deviceId).put("renewalId", renewalId), 8_000)
 
     suspend fun stopSession(mirrorId: String, sessionId: String): JSONObject {
         val stopped = json("${sessionPath(mirrorId, sessionId)}/stop", "POST", JSONObject(), 15_000)
@@ -168,10 +176,12 @@ class ExhibitionApi(
         sessionNumber: Long,
         generationNumber: Long,
         message: String,
+        reason: String? = null,
     ): JSONObject {
         val body = JSONObject().put("deviceId", deviceId).put("lookId", lookId)
             .put("sessionNumber", sessionNumber).put("generationNumber", generationNumber)
             .put("message", safeMessage(message).take(300))
+        if (reason != null) body.put("reason", reason)
         if (sessionId != null) body.put("sessionId", sessionId)
         return json("${mirrorPath(mirrorId)}/live/error", "POST", body, 15_000)
     }
@@ -229,7 +239,7 @@ class ExhibitionApi(
             val request = Request.Builder().url(url).method(method, requestBody)
                 .header("Accept", "application/json, image/png, image/jpeg, image/webp")
                 .header("Cache-Control", "no-store").header("Pragma", "no-cache")
-                .header("Origin", origin).build()
+                .header("Origin", origin).header("X-Miror-Protocol", "2").build()
             val call = client.newBuilder()
                 .connectTimeout(minOf(timeoutMs, 8_000).toLong(), TimeUnit.MILLISECONDS)
                 .readTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)

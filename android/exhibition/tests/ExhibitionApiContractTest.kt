@@ -51,6 +51,7 @@ fun main() = runBlocking {
             verify(exchange.requestURI.path == "/v1.1/api/exhibition/terminals/connect", "Terminal endpoint")
             verify(exchange.requestMethod == "POST", "Terminal method")
             verify(exchange.requestHeaders.getFirst("Origin") == origin, "Same-origin header")
+            verify(exchange.requestHeaders.getFirst("X-Miror-Protocol") == "2", "Native lifecycle protocol")
             verify(exchange.requestHeaders.getFirst("Cache-Control") == "no-store", "No cache")
             verify(exchange.requestHeaders.getFirst("Content-Type").startsWith("application/json"), "JSON body")
             val body = exchange.jsonBody()
@@ -69,9 +70,13 @@ fun main() = runBlocking {
             exchange.reply(JSONObject().put("configured", true))
         }
         verify(api.liveStatus("default").getBoolean("configured"), "Live status response")
+        val commandIds = mutableSetOf<String>()
         handler.set { exchange ->
             verify(exchange.requestURI.path == "$mirrorPath/command", "Command endpoint")
             val body = exchange.jsonBody()
+            verify(commandIds.add(body.getString("commandId")) &&
+                java.util.UUID.fromString(body.getString("commandId")).toString() == body.getString("commandId"),
+                "Each command has a distinct UUID")
             if (body.getString("action") == "end") verify(!body.has("expectedRevision"), "Stop bypasses stale revision")
             else verify(body.getLong("expectedRevision") == 7L && body.getString("lookId") == "commute", "Select revision and look")
             exchange.reply(JSONObject())
@@ -109,6 +114,27 @@ fun main() = runBlocking {
         api.firstFrame("default", session, 123)
         api.heartbeat("default", session, "device-fixture")
         handler.set { exchange ->
+            verify(exchange.requestMethod == "POST", "Renewal uses POST")
+            verify(exchange.requestHeaders.getFirst("X-Miror-Protocol") == "2", "Renewal lifecycle protocol")
+            val body = exchange.jsonBody()
+            verify(body.getString("deviceId") == "device-fixture", "Renewal owner")
+            when (exchange.requestURI.path) {
+                "$mirrorPath/live/session/$session/renewal" -> {
+                    verify(body.getLong("sessionNumber") == 2L && body.getLong("generationNumber") == 9L, "Renewal generation")
+                    exchange.reply(JSONObject().put("renewalId", "renewal-fixture"))
+                }
+                "$mirrorPath/live/session/$session/renewal/commit" -> {
+                    verify(body.getString("renewalId") == "renewal-fixture", "Renewal confirmation identity")
+                    exchange.reply(JSONObject().put("generationNumber", 10))
+                }
+                else -> error("Unexpected renewal endpoint")
+            }
+        }
+        verify(api.prepareRenewal("default", session, "device-fixture", 2, 9).getString("renewalId") == "renewal-fixture",
+            "Renewal plan response")
+        verify(api.commitRenewal("default", session, "device-fixture", "renewal-fixture").getLong("generationNumber") == 10L,
+            "Renewal confirmation response")
+        handler.set { exchange ->
             verify(exchange.requestURI.path == "$mirrorPath/sessions/$session/stop", "Stop endpoint")
             exchange.reply(JSONObject().put("status", "stopping"))
         }
@@ -119,11 +145,13 @@ fun main() = runBlocking {
             verify(exchange.requestURI.path == "$mirrorPath/live/error", "Error endpoint")
             val body = exchange.jsonBody()
             verify(body.getLong("sessionNumber") == 2L && body.getLong("generationNumber") == 9L, "Error generation")
+            verify(body.getString("reason") == "lease_expired", "Recovery reason reaches backend")
             verify(!body.getString("message").contains(token) && !body.getString("message").contains("tk-fixture")
                 && !body.getString("message").contains("https://"), "Error report redacts credentials and URLs")
             exchange.reply(JSONObject())
         }
-        api.reportError("default", "device-fixture", session, "commute", 2, 9, "Error $token tk-fixture https://fixture.invalid/?key=secret")
+        api.reportError("default", "device-fixture", session, "commute", 2, 9,
+            "Error $token tk-fixture https://fixture.invalid/?key=secret", "lease_expired")
         handler.set { exchange ->
             exchange.reply(JSONObject().put("error", JSONObject().put("code", "EXHIBITION_STALE_REVISION")
                 .put("message", "状态已更新 tk-fixture $token")), 409)

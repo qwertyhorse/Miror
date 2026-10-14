@@ -4,6 +4,7 @@ import type { ExhibitionDeviceBinding, ExhibitionMirrorSummary } from '../../sha
 import { appUrl } from '../versionScope';
 import type { ExhibitionController } from './useExhibition';
 import type { MirrorRegistry } from './useMirrors';
+import { MirrorCameraSettings } from './MirrorCameraSettings';
 import './device-binding.css';
 
 function lastSeen(time: number) {
@@ -99,6 +100,7 @@ function MirrorDeviceBindingContent({ mirror, controller, registry }: MirrorDevi
     {binding ? <>
       <div className="ex-binding-summary"><div><strong>{binding.label}</strong><p>{binding.platform === 'android' ? '安卓客户端' : '浏览器镜端'} · <span title={binding.terminalId}>设备 {binding.terminalId.slice(-4)}</span></p></div><button type="button" className="ex-button ex-binding-unbind" disabled={!available || !!modal} onClick={() => { if (!available || modal) return; setNotice(''); setModal({ binding: { ...binding } }); }}><Unlink size={14} />解绑</button></div>
       <p className="ex-binding-last-seen">{binding.lastSeenAt > 0 ? `最近连接：${lastSeen(binding.lastSeenAt)}` : '等待镜端重新连接。'}</p>
+      <MirrorCameraSettings mirrorId={mirror.id} binding={binding} connected={controller.connected} editable={canBind} disabled={!!modal || controller.stopPending} refresh={registry.refresh} />
     </> : <div className="ex-binding-empty"><p>绑定一台镜端，自动连接当前智能镜的大屏。</p><button type="button" className="ex-button ex-primary" disabled={!available || !!modal} onClick={() => { if (!available || modal) return; setNotice(''); setModal({ binding: null }); }}><Link2 size={15} />绑定镜端设备</button><p className="ex-binding-instructions">镜端点击「绑定设备」获取绑定码，安卓客户端未绑定时自动显示。</p></div>}
     {!available && <p className="ex-binding-last-seen">{unavailableMessage}</p>}
     {notice && <p className="ex-binding-notice" role="status"><Check size={14} />{notice}</p>}

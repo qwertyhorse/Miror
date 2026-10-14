@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 *.tsbuildinfo
 .env
@@ -35,3 +35,4 @@ tools/npm/
 
 # Local browser diagnostics and test evidence
 artifacts/
+output/

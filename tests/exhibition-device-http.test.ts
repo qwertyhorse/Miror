@@ -18,6 +18,19 @@ function terminal(): ExhibitionDeviceConnectInput {
   return { terminalId: `terminal-${randomUUID()}`, token: randomBytes(32).toString('hex'), label: '测试安卓镜端', platform: 'android' };
 }
 
+function assertRegistryHasNoPairingSecrets(value: unknown, secrets: readonly string[]): void {
+  if (Array.isArray(value)) { for (const entry of value) assertRegistryHasNoPairingSecrets(entry, secrets); return; }
+  if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      expect(['code', 'pairing', 'pairingCode', 'token', 'tokenHash', 'terminalToken']).not.toContain(key);
+      assertRegistryHasNoPairingSecrets(entry, secrets);
+    }
+  } else if (typeof value === 'string') {
+    // A four-digit code can coincidentally occur inside an unrelated UUID or timestamp.
+    expect(secrets).not.toContain(value);
+  }
+}
+
 async function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'openbuy-device-http-'));
   let time = Date.now();
@@ -72,7 +85,8 @@ describe('mirror terminal binding HTTP boundary', () => {
     expect(following.code).toBeUndefined(); expect(following.expiresAt).toBeUndefined();
     const registry = await request('/api/exhibition/mirrors'); const summary = await registry.json();
     expect(summary.mirrors[0].binding).toMatchObject({ terminalId: device.terminalId, online: true });
-    expect(JSON.stringify(summary)).not.toContain(device.token); expect(JSON.stringify(summary)).not.toContain(connection.code!);
+    expect(JSON.stringify(summary)).not.toContain(device.token);
+    assertRegistryHasNoPairingSecrets(summary, [device.token, connection.code!]);
   });
 
   it('rejects foreign-origin registration and pairing without changing the binding', async () => {

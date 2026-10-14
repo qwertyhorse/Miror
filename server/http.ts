@@ -39,7 +39,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (!exhibition) throw new ApiError('EXHIBITION_UNAVAILABLE', '展会演示服务尚未启动。', 503);
         if (request.method === 'POST' && url.pathname === '/api/exhibition/terminals/connect') {
           if (!mirrors) throw new ApiError('EXHIBITION_UNAVAILABLE', '镜端设备服务尚未启动。', 503);
-          return json(response, 200, await mirrors.connectDevice(await body(request)));
+          // Bounded UTF-8 metadata for up to 24 cameras; no frame payload is retained.
+          return json(response, 200, await mirrors.connectDevice(await body(request, 65_536)));
         }
         if (url.pathname === '/api/exhibition/mirrors') {
           if (!mirrors) throw new ApiError('EXHIBITION_UNAVAILABLE', '多试衣镜服务尚未启动。', 503);
@@ -67,6 +68,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           await mirrors!.unbindDevice(mirrorId, await body(request));
           return json(response, 200, { binding: null });
         }
+        if (mirrorRoute && path === '/camera' && request.method === 'GET') return json(response, 200, mirrors!.cameraStatus(mirrorId));
+        if (mirrorRoute && path === '/camera' && request.method === 'POST') return json(response, 200, mirrors!.openCamera(mirrorId, await body(request, 2_048)));
         if (request.method === 'GET' && path === '/changes') {
           const after = Number(url.searchParams.get('after'));
           if (!url.searchParams.has('after') || !Number.isSafeInteger(after) || after < 0) throw new ApiError('INVALID_REVISION', '状态版本无效。');
@@ -110,6 +113,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           const input = await body(request); let localId: string | undefined;
           mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
+          mirrors?.devices.assertCameraClosed(mirrorId);
           response.once('close', () => { if (!response.writableEnded && localId) void service.stop(localId).then(() => current.reconcileLive()).catch(() => undefined); });
           const created = await current.createLiveSession(input, { cancelled: () => response.destroyed }); localId = created.id;
           if (response.destroyed) { await service.stop(created.id); await current.reconcileLive(); return; }
@@ -147,6 +151,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         }
         if (request.method === 'POST' && path === '/command') {
           const input = await body(request);
+          if (['begin', 'confirm', 'resume', 'recover'].includes(String(input.action))) mirrors?.devices.assertCameraClosed(mirrorId);
           current.command(input);
           // Selection is immediate. Running camera sessions apply conditions in place;
           // incompatible or unfinished connections stop in the background.

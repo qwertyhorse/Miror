@@ -46,7 +46,8 @@ describe('staff terminal binding presentation', () => {
   it.each(['idle', 'select', 'positioning', 'generating', 'showcase', 'paused'] as const)('allows active unbinding while %s, even when the terminal is offline', phase => {
     for (const online of [true, false]) {
       const html = render({ ...binding, online }, { phase, live: { status: 'error', sessionId: 'live-session' } as ExhibitionState['live'] });
-      expect(html).not.toContain('disabled=""'); expect(html).not.toContain('结束体验并停止实时会话后');
+      expect(html.match(/<button[^>]*class="ex-button ex-binding-unbind"[^>]*>/)?.[0]).not.toContain('disabled');
+      expect(html).not.toContain('结束体验并停止实时会话后');
     }
   });
 

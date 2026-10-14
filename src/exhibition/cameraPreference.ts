@@ -6,6 +6,10 @@ export interface ExhibitionCameraPreference {
   profile: 'default' | 'screen';
 }
 
+export function saveCameraPreference(preference: ExhibitionCameraPreference): void {
+  scopedLocalStorage.setItem('exhibition-camera-preference', JSON.stringify(preference));
+}
+
 /** The physical camera belongs to this browser and release, independently of mirror bindings. */
 export function readCameraPreference(): ExhibitionCameraPreference | null {
   try {

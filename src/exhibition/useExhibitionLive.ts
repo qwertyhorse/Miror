@@ -652,7 +652,7 @@ export class ExhibitionLiveConnection {
   }
 }
 
-function cameraError(cause: unknown) {
+function cameraFailureMessage(cause: unknown) {
   if (cause instanceof DOMException) {
     if (cause.name === 'NotAllowedError' || cause.name === 'SecurityError') return '摄像头权限未开启。请在浏览器或安卓应用设置中允许摄像头，再重试。';
     if (cause.name === 'NotFoundError' || cause.name === 'OverconstrainedError') return '未找到可用摄像头，请检查设备连接或选择其他摄像头。';
@@ -660,7 +660,7 @@ function cameraError(cause: unknown) {
   }
   return cause instanceof Error ? cause.message : '摄像头开启失败，请检查设备后重试。';
 }
-export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false, onDiagnostic }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean; onDiagnostic?: (event: DiagnosticEventInput) => void }) {
+export function useExhibitionLive({ state, active, refresh, mirrorId = 'default', terminal, selectionPending = false, cameraSettingsOpen = false, onDiagnostic }: { state: ExhibitionState | null; active: boolean; refresh: () => Promise<unknown> | void; mirrorId?: string; terminal?: { terminalId: string; token: string }; selectionPending?: boolean; cameraSettingsOpen?: boolean; onDiagnostic?: (event: DiagnosticEventInput) => void }) {
   const diagnosticCallback = useRef(onDiagnostic);
   diagnosticCallback.current = onDiagnostic;
   // Per mounted page instance: duplicate tabs must not inherit another screen's lease.
@@ -672,6 +672,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   const [retryEpoch, setRetryEpoch] = useState(0);
   const [status, setStatus] = useState<ExhibitionCameraStatus>('off');
   const [error, setError] = useState('');
+  const [cameraError, setCameraError] = useState('');
   const [updateError, setUpdateError] = useState('');
   const [opening, setOpening] = useState(false);
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
@@ -680,8 +681,8 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   const [liveStatus, setLiveStatus] = useState<ExhibitionLiveStatus | null>(null);
   // Identity, rather than a revision or mirror string alone, also distinguishes A → B → A.
   const identity = useMemo(() => ({ mirrorId }), [mirrorId]);
-  const current = useRef({ state, active, refresh, identity });
-  current.current = { state, active, refresh, identity };
+  const current = useRef({ state, active, refresh, identity, cameraSettingsOpen });
+  current.current = { state, active, refresh, identity, cameraSettingsOpen };
   const camera = useRef<MediaStream | null>(null);
   const connection = useRef<ExhibitionLiveConnection | null>(null);
   const retiring = useRef<ExhibitionLiveConnection | null>(null);
@@ -695,6 +696,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
   const previousExperience = useRef(state?.experienceMode);
   const cameraEntryAttempt = useRef('');
   const cameraCaptureRequest = useRef<AbortController | null>(null);
+  const cameraCaptureFlight = useRef<Promise<MediaStream | null> | null>(null);
   const secure = typeof window !== 'undefined' && window.isSecureContext;
   const refreshStatus = useCallback(async () => {
     const requestId = ++latestStatusRequest.current;
@@ -725,23 +727,36 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     }
     camera.current?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     camera.current = null;
-    if (mounted.current) { setCameraStream(null); setOutputStream(null); setInteraction(null); setPresentation(null); setUpdateError(''); setOpening(false); setStatus('off'); }
+    if (mounted.current) { setCameraStream(null); setOutputStream(null); setInteraction(null); setPresentation(null); setUpdateError(''); setCameraError(''); setOpening(false); setStatus('off'); }
   }, []);
-  const startCamera = useCallback(async (cameraId?: string) => {
-    if (!current.current.active || current.current.state?.experienceMode === 'mox') return false;
+  const startCamera = useCallback(async (cameraId?: string, diagnostic = false) => {
+    if (!current.current.active || (current.current.state?.experienceMode === 'mox' && !diagnostic)) return false;
+    if (current.current.cameraSettingsOpen && !diagnostic) return false;
+    if (diagnostic && (!current.current.cameraSettingsOpen || connection.current || retiring.current
+      || !['idle', 'select'].includes(current.current.state?.phase ?? '') || current.current.state?.live
+      || (current.current.state?.lifecycle && (!['idle', 'ended'].includes(current.current.state.lifecycle.state) || current.current.state.lifecycle.connection !== 'idle')))) return false;
     if (current.current.state?.live && current.current.state.live.deviceId !== deviceId) return false;
     const owner = current.current.identity;
     if (!secure || !navigator.mediaDevices?.getUserMedia) {
-      setError('摄像头连接不可用，请重新打开镜端。'); setStatus('error'); return false;
+      const message = '摄像头连接不可用，请重新打开镜端。';
+      setError(message); setCameraError(message); setStatus('error'); return false;
     }
     stopCamera();
     const request = ++cameraRequest.current;
     const controller = new AbortController();
     cameraCaptureRequest.current = controller;
-    setOpening(true); setError(''); setStatus('opening');
+    setOpening(true); setError(''); setCameraError(''); setStatus('opening');
     try {
+      // getUserMedia cannot be cancelled in flight. Let the old grant settle
+      // and release before a replacement can touch the physical camera.
+      if (cameraCaptureFlight.current) await cameraCaptureFlight.current.catch(() => null);
+      if (controller.signal.aborted || request !== cameraRequest.current) return false;
       const preference = readCameraPreference();
-      const stream = await acquireExhibitionCamera(cameraCaptureConstraints(cameraId, preference), controller.signal);
+      const capture = acquireExhibitionCamera(cameraCaptureConstraints(cameraId, preference), controller.signal);
+      cameraCaptureFlight.current = capture;
+      let stream: MediaStream | null;
+      try { stream = await capture; }
+      finally { if (cameraCaptureFlight.current === capture) cameraCaptureFlight.current = null; }
       if (!stream) return false;
       if (!mounted.current || current.current.identity !== owner || !current.current.active || request !== cameraRequest.current
         || (current.current.state?.live && current.current.state.live.deviceId !== deviceId)) { stream.getTracks().forEach(track => track.stop()); return false; }
@@ -750,12 +765,15 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       setSelectedCameraId(cameraTrackDeviceId(stream.getVideoTracks()[0]) || cameraId || preference?.deviceId || '');
       stream.getVideoTracks().forEach(track => { track.onended = () => {
         if (camera.current !== stream) return;
-        stopCamera(); setStatus('error'); setError('摄像头已断开，请检查设备后重新开启。');
+        const message = '摄像头已断开，请检查设备后重新开启。';
+        stopCamera(); setStatus('error'); setError(message); setCameraError(message);
       }; });
       const devices = await (navigator.mediaDevices.enumerateDevices?.() ?? Promise.resolve([])).catch(() => []);
       if (mounted.current && current.current.identity === owner && request === cameraRequest.current) setCameras(devices.filter(device => device.kind === 'videoinput'));
       return mounted.current && current.current.identity === owner && request === cameraRequest.current && camera.current === stream;
-    } catch (cause) { if (mounted.current && current.current.identity === owner && request === cameraRequest.current) { setError(cameraError(cause)); setStatus('error'); } return false; }
+    } catch (cause) { if (mounted.current && current.current.identity === owner && request === cameraRequest.current) {
+      const message = cameraFailureMessage(cause); setError(message); setCameraError(message); setStatus('error');
+    } return false; }
     finally {
       if (cameraCaptureRequest.current === controller) cameraCaptureRequest.current = null;
       if (mounted.current && current.current.identity === owner && request === cameraRequest.current) setOpening(false);
@@ -765,7 +783,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     mounted.current = true;
     failedKey.current = '';
     cameraEntryAttempt.current = '';
-    setLiveStatus(null); setError(''); setUpdateError(''); setStatus('off'); setOpening(false);
+    setLiveStatus(null); setError(''); setCameraError(''); setUpdateError(''); setStatus('off'); setOpening(false);
     setCameraStream(null); setOutputStream(null); setCameras([]); setSelectedCameraId('');
     const leave = () => stopCamera();
     window.addEventListener('pagehide', leave);
@@ -790,7 +808,8 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     previousMode.current = state?.providerMode; previousExperience.current = state?.experienceMode;
   }, [active, state?.providerMode, state?.experienceMode, stopCamera]);
   useEffect(() => {
-    if (!active || state?.providerMode !== 'xmax' || state.experienceMode === 'mox') {
+    if (!active || cameraSettingsOpen || state?.providerMode !== 'xmax' || state.experienceMode === 'mox') {
+      if (cameraSettingsOpen) return;
       cameraEntryAttempt.current = '';
       return;
     }
@@ -807,13 +826,13 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       if (!camera.current) void startCamera();
     });
     return () => { cancelled = true; };
-  }, [identity, active, secure, state?.providerMode, state?.experienceMode, state?.live?.deviceId, deviceId, startCamera]);
+  }, [identity, active, cameraSettingsOpen, secure, state?.providerMode, state?.experienceMode, state?.live?.deviceId, deviceId, startCamera]);
   useEffect(() => {
     const currentState = current.current.state;
     if (!currentState) return;
     const desiredKey = `${identity.mirrorId}:${currentState.sessionNumber}:${currentState.generationNumber}:${currentState.selectedLookId}`;
     const mox = currentState.experienceMode === 'mox';
-    const wantsLive = active && !!currentState.selectedLookId && currentState.providerMode === 'xmax' && (currentState.phase === 'generating' || currentState.phase === 'showcase');
+    const wantsLive = active && !cameraSettingsOpen && !!currentState.selectedLookId && currentState.providerMode === 'xmax' && (currentState.phase === 'generating' || currentState.phase === 'showcase');
     const occupied = !!currentState.live && currentState.live.deviceId !== deviceId;
     const existing = connection.current;
     const look = currentState.looks.find(item => item.id === currentState.selectedLookId);
@@ -877,7 +896,7 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     });
     if (state?.lifecycle?.retryAt && state.lifecycle.retryAt > Date.now()) return;
     connection.current = next; void next.start();
-  }, [identity, active, selectionPending, state?.phase, state?.providerMode, state?.experienceMode, state?.selectedLookId, state?.sessionNumber, state?.generationNumber, state?.live?.deviceId, state?.live?.sessionId, cameraStream, deviceId, refreshStatus, retryEpoch, terminal?.terminalId, terminal?.token]);
+  }, [identity, active, cameraSettingsOpen, selectionPending, state?.phase, state?.providerMode, state?.experienceMode, state?.selectedLookId, state?.sessionNumber, state?.generationNumber, state?.live?.deviceId, state?.live?.sessionId, cameraStream, deviceId, refreshStatus, retryEpoch, terminal?.terminalId, terminal?.token]);
   useEffect(() => {
     if (!state?.lifecycle?.retryAt || state.lifecycle.connection !== 'recovering') return;
     const timer = setTimeout(() => setRetryEpoch(value => value + 1), Math.max(0, state.lifecycle.retryAt - Date.now()));
@@ -950,6 +969,6 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
     return confirmed;
   }, []);
   const reportFirstFrame = useCallback((stream: MediaStream) => connection.current?.reportRenderedFrame(stream), []);
-  return { cameraStream, outputStream, interaction, presentation, status, error, updateError, opening, deviceId, cameras, selectedCameraId, mirrored, setMirrored, startCamera, stopCamera, stopGeneration, retry, retryUpdate, reportFirstFrame, secure, liveStatus, refreshStatus };
+  return { cameraStream, outputStream, interaction, presentation, status, error, cameraError, updateError, opening, deviceId, cameras, selectedCameraId, mirrored, setMirrored, startCamera, stopCamera, stopGeneration, retry, retryUpdate, reportFirstFrame, secure, liveStatus, refreshStatus };
 }
 export type ExhibitionLiveController = ReturnType<typeof useExhibitionLive>;

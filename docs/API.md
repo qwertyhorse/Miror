@@ -16,13 +16,13 @@
 - 浏览器使用当前页面同源的相对地址；写请求使用 `Content-Type: application/json`，并保留浏览器的 `Origin`。HTTP 网关拒绝永久密钥写入。
 - Node API 仅监听回环地址；网关将 `/v1.1/api/...` 转发为内部 `/api/...`。不要把内部 API 端口直接作为局域网入口。
 - 成功直接返回 JSON 对象，不包 `data`；图片返回二进制。响应禁止缓存。
-- 常规 JSON 请求上限 16 KiB，密钥写入上限 2 KiB；素材上传按当前设置单独计算限制。
+- 常规 JSON 请求上限 16 KiB；终端连接 `/terminals/connect` 为 64 KiB，摄像头操作与密钥写入为 2 KiB；素材上传按当前设置单独计算限制。
 - 状态写入建议携带最新 `expectedRevision`。409 `EXHIBITION_STALE_REVISION` 时重新读取状态、核对操作后再提交。密钥有独立的 `revision`，不能使用镜状态版本代替。
 - `updatedAt`、`boundAt`、`expiresAt`（配对码）等数字时间为 Unix 毫秒；会话中的 `createdAt`、`updatedAt`、`expiresAt` 为 ISO 时间字符串。
 
 ## 体验协议 2 与恢复
 
-API、Web 与 Android 0.3.1（versionCode 9）须配套升级。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
+API、Web 与 Android 须配套升级；当前 Android 版本为 0.3.3（versionCode 11），后台摄像头控制要求 0.3.2 或更新版本。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
 
 `POST M/command` 支持 `commandId`（8–100 位字母、数字、下划线或连字符）。客户端同一次操作重试须沿用编号；同编号同内容返回当前权威快照，同编号不同内容返回 409 `EXHIBITION_COMMAND_CONFLICT`。服务端持久化去重；`expectedRevision` 不参与内容指纹。`end/idle/pause` 优先执行，不因旧 revision 阻止停止。`keepalive` 仅用于正在生成/展示的体验，取消空闲提醒并重新开始空闲计时。
 
@@ -57,6 +57,8 @@ API、Web 与 Android 0.3.1（versionCode 9）须配套升级。创建实时会�
 | POST | `/v1.1/api/exhibition/terminals/connect` | 见下例 | 200 `ExhibitionDeviceConnection` |
 | POST | `M/binding` | `{ "code": "1234" }` | 200 `ExhibitionDeviceBinding` |
 | DELETE | `M/binding` | `{ "terminalId": "terminal-…" }` | 200 `{ "binding": null }` |
+| GET | `M/camera` | — | 200 `ExhibitionCameraStatus` |
+| POST | `M/camera` | `{ "terminalId": "terminal-…", "action": "open" }` | 200 `ExhibitionCameraStatus` |
 
 名称为 1–40 字且不能重名。复制至少选择一种内容，目标镜应结束体验；复制素材会替换目标素材，并先保存备份，密钥、绑定、会话和日志不从来源镜复制。
 
@@ -102,6 +104,32 @@ API、Web 与 Android 0.3.1（versionCode 9）须配套升级。创建实时会�
 ```
 
 绑定后同一请求返回 `mirrorId` 和 `mirrorName`，不再返回配对码。配对码为 4 位数字，有效期 10 分钟、使用一次后失效；镜端每 10 秒连接刷新在线状态，30 秒未连接视为离线。API 接受 32–512 位可见 ASCII 的设备 `token`；本包浏览器生成并保存 64 位随机十六进制值，服务端仅保存其哈希。已登记设备使用错误 token 返回 403。建立绑定要求镜处于 `idle` 或 `select`，且无实时会话或未确认停止的连接。后台可在体验中主动解绑：先校验当前终端身份，再结束体验、解除绑定并清理连接；云端停止未确认时保留记录，阻止新的绑定和会话签发。
+
+## 每镜摄像头检测
+
+后台「镜端设备」中的「切换摄像头」只向当前绑定镜端发起请求，不枚举后台电脑的摄像头。镜端收到请求后在本机打开设备列表、重新检测和预览面板；保存或取消在镜端完成，选择留在该镜端。后台只显示设备元数据与检测状态，不接收画面，也不会为检测启动 XMAX。
+
+网页镜端保留常驻「摄像头」入口，绑定后也可在正常取景时直接选择、预览和保存。已绑定的本机入口复用同一 `POST M/camera`，携带当前 `terminalId` 与 `bindingId`；服务端拒绝旧绑定版本，客户端核对返回请求后原地打开面板。未绑定的本机预览只保存浏览器的摄像头偏好，已绑定其他镜端的预览页不能操作摄像头。体验中入口保持可见，结束体验并完成清理后可切换。
+
+镜端的 `terminals/connect` 增加 `cameraCapabilities: { "version": 1 }`。服务端返回当前绑定的 `cameraBindingId`；支持该能力的已绑定镜端可在后续连接中携带 `cameraReport`：
+
+```json
+{
+  "mirrorId": "default",
+  "bindingId": "服务端返回的绑定标识",
+  "requestId": "检测请求编号，日常状态上报为 null",
+  "status": "preview",
+  "devices": [{ "id": "本机摄像头 ID", "label": "USB 摄像头", "kind": "external" }],
+  "selectedDeviceId": "本机当前选择的摄像头 ID",
+  "activeDeviceId": "实际取景的摄像头 ID"
+}
+```
+
+状态为 `ready/scanning/preview/error/permission-required/busy/closed`；设备 `kind` 为 `external/back/front/unknown`，自动选择时 `selectedDeviceId` 为 null。服务端验证终端凭据、当前绑定标识及请求编号，返回 `cameraReportAccepted`；旧绑定或过期报告不会覆盖当前镜的数据。每镜状态由 `GET M/camera` 和设备列表的 `binding.camera` 返回，额外区分未绑定、离线、旧客户端、待打开和请求过期。
+
+`POST M/camera` 只接受当前绑定终端的 `open` 操作，可选 `bindingId` 必须匹配当前绑定版本。返回的请求也会经该终端下次连接传递，包含编号、镜/终端/绑定标识及 120 秒有效期。重复点击复用未完成请求；离线、旧客户端、体验中或云端清理未完成时拒绝。有效检测请求阻止开始/恢复体验与签发实时会话，关闭、失败、忙碌或到期后解除；客户端也在面板打开期间阻止生成。请求与检测快照不写入永久设备配置，重启或重新绑定后不重放，须重新检测。旧版 Android 需升级到 0.3.2 才支持此入口。
+
+独立 `camera-check.html` 仍用于打开该页面的本机检测，不作为后台远程检测的替代入口。
 
 ## 镜状态与操作
 

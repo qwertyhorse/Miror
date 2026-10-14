@@ -1,6 +1,7 @@
 import type { XmaxRegion } from './xmax.ts';
 import type { ExhibitionGestureSettings } from './exhibitionGestures.ts';
 import type { ExhibitionSessionLimits } from './sessionLimits.ts';
+import type { ExhibitionCameraReport, ExhibitionCameraRequest, ExhibitionCameraStatus } from './exhibitionCamera.ts';
 
 export const EXHIBITION_LOOK_IDS = ['commute', 'city', 'evening'] as const;
 export const EXHIBITION_EXPERIENCE_MODES = ['free', 'charx', 'clothx', 'vibex', 'dimx', 'mox'] as const;
@@ -167,12 +168,15 @@ export interface ExhibitionDeviceBinding {
   boundAt: number;
   lastSeenAt: number;
   online: boolean;
+  camera?: ExhibitionCameraStatus;
 }
 export interface ExhibitionDeviceConnectInput {
   terminalId: string;
   token: string;
   label: string;
   platform: 'android' | 'browser';
+  cameraCapabilities?: { version: 1 };
+  cameraReport?: ExhibitionCameraReport;
 }
 export interface ExhibitionDeviceConnection {
   terminalId: string;
@@ -180,6 +184,9 @@ export interface ExhibitionDeviceConnection {
   mirrorName?: string;
   code?: string;
   expiresAt?: number;
+  cameraBindingId?: string;
+  cameraRequest?: ExhibitionCameraRequest;
+  cameraReportAccepted?: boolean;
 }
 export interface ExhibitionMirrorList {
   defaultMirrorId: string;

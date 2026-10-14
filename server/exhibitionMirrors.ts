@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ExhibitionDeviceBinding, ExhibitionDeviceConnection, ExhibitionMirrorList, ExhibitionMirrorSummary, ExhibitionState } from '../shared/exhibition.ts';
+import type { ExhibitionCameraStatus } from '../shared/exhibitionCamera.ts';
 import { ExhibitionService } from './exhibition.ts';
 import { ExhibitionDevices } from './exhibitionDevices.ts';
 import type { TryOnService } from './service.ts';
@@ -99,7 +100,30 @@ export class ExhibitionMirrors {
     const connected = this.devices.connect(input);
     if (!connected.mirrorId) return connected;
     this.getMirror(connected.mirrorId);
+    if (!this.cameraEditable(connected.mirrorId)) {
+      this.devices.cancelCamera(connected.mirrorId);
+      delete connected.cameraRequest;
+    }
     return { ...connected, mirrorName: this.entries.find(entry => entry.id === connected.mirrorId)!.name };
+  }
+
+  cameraStatus(mirrorId: string): ExhibitionCameraStatus {
+    this.getMirror(mirrorId);
+    return this.devices.cameraStatus(mirrorId);
+  }
+
+  openCamera(mirrorId: string, input: unknown): ExhibitionCameraStatus {
+    this.getMirror(mirrorId);
+    this.devices.assertBindingMatches(mirrorId, input);
+    if (!this.cameraEditable(mirrorId)) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请先结束体验并等待实时会话停止，再检测摄像头。', 409);
+    return this.devices.openCamera(mirrorId, input);
+  }
+
+  private cameraEditable(mirrorId: string): boolean {
+    const state = this.getMirror(mirrorId).get();
+    return ['idle', 'select'].includes(state.phase) && !state.live
+      && !['active', 'paused'].includes(state.lifecycle?.state ?? '') && state.lifecycle?.connection !== 'cleaning'
+      && !this.liveService?.options.store.unreleasedMirror(mirrorId).length;
   }
 
   bindDevice(mirrorId: string, input: unknown): ExhibitionDeviceBinding {

@@ -164,9 +164,9 @@ export class TryOnService {
     if (mode === 'free' && (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.trim().length > EXHIBITION_FREE_PROMPT_MAX_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(input.prompt))) throw new ApiError('EXHIBITION_INVALID_PROMPT', 'Free 模式需要有效的提示词。');
     const prompt = exhibitionPromptForLook({ mode, prompt: input.prompt });
     if (typeof mirrorId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(mirrorId)) throw new ApiError('EXHIBITION_INVALID_MIRROR', '试衣镜编号无效。');
-    const sample = /^\/assets\/exhibition\/(?:commute|city|evening)-cutout\.png$/.test(input.referenceAsset);
-    const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/(upload-[a-f0-9-]{36})$/.exec(input.referenceAsset);
-    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
+    const sample = ['commute', 'city', 'evening'].includes(lookId) && input.referenceAsset === `/assets/exhibition/${lookId}-cutout.png`;
+    const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/((?:upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})|commute|city|evening)(?:\/(display|reference)\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?$/.exec(input.referenceAsset);
+    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
     if (!Number.isSafeInteger(input.sessionNumber) || input.sessionNumber < 1 || !Number.isSafeInteger(input.generationNumber) || input.generationNumber < 1) throw new ApiError('EXHIBITION_INVALID_SESSION', '请先开始一轮展会体验。');
     return this.reserveSession({ targetItemId: lookId, sourceId: `exhibition:${deviceId}`, sourceKind: mode === 'mox' ? 'photo' : 'camera', sourceName: boundedText(input.name, '展会服装名称') }, '', input.referenceAsset, hooks,
       { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber, ...(input.sessionLimits?.credits === null ? { continuous: true } : {}) } }, input.sessionLimits);
@@ -331,9 +331,9 @@ export class TryOnService {
     if ((input.referenceKind !== undefined && input.referenceKind !== 'image' && !noReference) || (noReference && (mode !== 'free' || input.referenceAsset !== '' || (input.refImageUrl !== undefined && input.refImageUrl !== '')))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '仅 Free 模式可以不使用参考图，封面图不能作为参考图发送。');
     if (mode === 'free' && (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.trim().length > EXHIBITION_FREE_PROMPT_MAX_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(input.prompt))) throw new ApiError('EXHIBITION_INVALID_PROMPT', 'Free 模式需要有效的提示词。');
     const prompt = exhibitionPromptForLook({ mode, prompt: input.prompt });
-    const sample = /^\/assets\/exhibition\/(?:commute|city|evening)-cutout\.png$/.test(input.referenceAsset);
-    const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/(upload-[a-f0-9-]{36})$/.exec(input.referenceAsset);
-    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
+    const sample = ['commute', 'city', 'evening'].includes(lookId) && input.referenceAsset === `/assets/exhibition/${lookId}-cutout.png`;
+    const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/((?:upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})|commute|city|evening)(?:\/(display|reference)\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?$/.exec(input.referenceAsset);
+    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
     const refImageUrl = noReference ? '' : boundedText(input.refImageUrl, '参考图链接', 4096);
     const sameCondition = (current: SessionRecord) => current.sourceKind === 'camera' && current.providerSessionId === record.providerSessionId && current.exhibition?.deviceId === deviceId && current.exhibition.sessionNumber === input.sessionNumber && (current.exhibition.mirrorId ?? 'default') === mirrorId && (current.exhibition.mode ?? 'clothx') === mode && current.exhibition.lookId === lookId && current.exhibition.generationNumber === input.generationNumber && current.exhibition.prompt === prompt && current.referenceAsset === input.referenceAsset && current.refImageUrl === refImageUrl;
     const stale = () => new ApiError('EXHIBITION_STALE_GENERATION', '素材选择已更新，请使用当前素材。', 409);

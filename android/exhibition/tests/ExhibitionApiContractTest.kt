@@ -137,6 +137,13 @@ fun main() = runBlocking {
             exchange.sendResponseHeaders(302, -1)
         }
         failure("BACKEND_REDIRECT") { api.connectTerminal() }
+        val requestsBeforeDisconnect = received.get()
+        handler.set { exchange ->
+            // A lost reply must not cause OkHttp to repeat a paid allocation POST.
+            exchange.requestBody.use { it.readBytes() }
+        }
+        failure("NETWORK_ERROR") { api.createSession("default", "device-fixture", "commute", 9, 7) }
+        verify(received.get() == requestsBeforeDisconnect + 1, "Lost allocation reply must not be retried")
         handler.set { exchange -> exchange.bytes(byteArrayOf(1, 2, 3), "image/webp") }
         verify(api.image("/assets/fixture.webp").contentEquals(byteArrayOf(1, 2, 3)), "Image bytes")
         handler.set { exchange -> exchange.bytes(byteArrayOf(1), "text/html") }

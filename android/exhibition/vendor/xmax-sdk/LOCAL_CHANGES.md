@@ -8,11 +8,18 @@ The upstream MIT license and third-party notices are retained. `UPSTREAM.json`
 records upstream source hashes, the official Maven AAR hash, and each extracted
 JNI library hash. No XLive application code is included.
 
-The only SDK source change is `XmaxEnvironment.kt`: China and global Open API
+`XmaxEnvironment.kt`: China and global Open API
 roots use `https://api.xmaxai.com/open/api/v1` and
 `https://api.xmax.ai/open/api/v1`, matching the existing exhibition backend's
 temporary-key, session verification, and teardown services. The application
 accepts only the `x2.0` model.
+
+The local camera API adds `enumerateCameraDevices()` and an optional final
+`cameraDeviceId` argument to `createLocalCameraStream`. Enumeration and exact
+device selection use the pinned RTC SDK's `IVideoDeviceManager`; an unavailable
+ID fails without falling back to another camera. Existing calls without an ID
+retain their front/back selection. Enumeration creates no capture or network
+session, and `close()` also releases an engine used only for enumeration.
 
 The local Gradle file removes publication/native compilation tasks and consumes
 the official 1.0.8 AAR's precompiled `libxmax_yuv.so` and `libc++_shared.so` for

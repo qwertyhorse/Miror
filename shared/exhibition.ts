@@ -37,12 +37,18 @@ export interface ExhibitionUploadLimits {
   minHeight: number;
   maxHeight: number;
 }
+export const EXHIBITION_DEFAULT_UPLOAD_LIMITS: Readonly<ExhibitionUploadLimits> = {
+  maxFileSizeMB: 10, minWidth: 256, maxWidth: 8192, minHeight: 256, maxHeight: 8192,
+};
 export interface ExhibitionLook {
   id: ExhibitionLookId;
   name: string;
   description: string;
   /** Version-relative URL: clients should resolve through their version-aware app URL helper. */
   image: string;
+  /** Independent XMAX input; omitted on legacy materials that reuse the display image. */
+  referenceImage?: string;
+  referenceImageInfo?: ExhibitionImageInfo;
   palette: string;
   mode: ExhibitionExperienceMode;
   /** Defaults to image. Free prompt-only presets use none; image remains a display cover. */
@@ -57,6 +63,15 @@ export interface ExhibitionLook {
   bytes?: number;
   mime?: 'image/png' | 'image/jpeg' | 'image/webp';
 }
+export interface ExhibitionImageInfo {
+  width: number;
+  height: number;
+  bytes: number;
+  mime: 'image/png' | 'image/jpeg' | 'image/webp';
+}
+export function exhibitionReferenceImage(look: Pick<ExhibitionLook, 'image' | 'referenceImage' | 'referenceKind'>): string | null {
+  return look.referenceKind === 'none' ? null : look.referenceImage ?? look.image;
+}
 export interface ExhibitionLookInput {
   name: string;
   description?: string;
@@ -66,12 +81,16 @@ export interface ExhibitionLookInput {
   category?: string;
   tags?: string[];
   expectedRevision?: number;
+  /** Optional replacements when editing an existing material. */
+  imageBase64?: string;
+  referenceImageBase64?: string;
 }
 export interface ExhibitionUploadInput extends ExhibitionLookInput {
   /** Uploads append a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock append operations. */
   expectedRevision?: number;
   /** Raw base64 or a data URL. Only fully decoded, static PNG/JPEG/WebP images are accepted. */
   imageBase64: string;
+  referenceImageBase64: string;
 }
 export interface ExhibitionTaxonomyInput {
   categories: string[];

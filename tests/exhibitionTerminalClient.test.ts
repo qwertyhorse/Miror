@@ -6,7 +6,7 @@ import { TerminalPairingScreen } from '../src/exhibition/TerminalPairingScreen';
 
 const identity: TerminalIdentity = { terminalId: 'terminal-12345678-1234-4234-8234-123456789abc', token: 'private-device-token-that-must-not-be-rendered', label: '展台镜端', platform: 'android' };
 const paired = { terminalId: identity.terminalId, mirrorId: 'mirror-one', mirrorName: '智能镜 1' };
-const waiting = { terminalId: identity.terminalId, mirrorId: null, code: '456789', expiresAt: Date.now() + 600000 };
+const waiting = { terminalId: identity.terminalId, mirrorId: null, code: '4567', expiresAt: Date.now() + 600000 };
 const clients: TerminalBindingClient[] = [];
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
@@ -55,7 +55,7 @@ describe('physical terminal binding client', () => {
     const connect = vi.fn().mockResolvedValueOnce(paired).mockResolvedValueOnce(waiting);
     const { client } = setup({ connect }); client.start(); await flush();
     await vi.advanceTimersByTimeAsync(10000);
-    expect(client.getSnapshot()).toMatchObject({ connected: true, connection: { mirrorId: null, code: '456789' } });
+    expect(client.getSnapshot()).toMatchObject({ connected: true, connection: { mirrorId: null, code: '4567' } });
   });
   it('rejects a mismatched terminal response and recovers through explicit retry', async () => {
     const connect = vi.fn().mockResolvedValueOnce({ ...paired, terminalId: 'other-terminal' }).mockResolvedValueOnce(paired);
@@ -72,7 +72,7 @@ describe('physical terminal binding client', () => {
   });
   it('never displays terminal credentials on the pairing screen', () => {
     const html = renderToStaticMarkup(createElement(TerminalPairingScreen, { terminal: { ready: true, identity, connection: waiting, connected: true, error: '', retry: async () => {}, beginPairing: () => {} } }));
-    expect(html).toContain('456 789');
+    expect(html).toContain('4567');
     expect(html).not.toContain(identity.token);
     expect(html).not.toContain(identity.terminalId);
   });

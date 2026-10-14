@@ -30,7 +30,7 @@ describe('mirror-scoped exhibition client', () => {
     vi.stubGlobal('fetch', fetcher);
     const east = client('east'); east.start(); await flush();
     await east.send({ action: 'begin' });
-    const uploaded = await east.upload({ name: '服装', category: '通勤', tags: [], imageBase64: 'fixture' });
+    const uploaded = await east.upload({ name: '服装', category: '通勤', tags: [], imageBase64: 'fixture', referenceImageBase64: 'reference-fixture' });
     expect(uploaded).toEqual({ lookId: 'commute', index: 0 });
     await east.updateLook('uploaded/id', { name: '新名称', category: '通勤', tags: [] });
     await east.deleteLook('uploaded/id', { expectedRevision: 6 });
@@ -80,7 +80,7 @@ describe('mirror-scoped exhibition client', () => {
       : Promise.resolve(response(state(url.endsWith('/east') ? 'east' : 'west', 5))));
     vi.stubGlobal('fetch', fetcher);
     const east = client('east'); east.start(); await flush();
-    const saving = east.upload({ name: '旧素材', category: '通勤', tags: [], imageBase64: 'fixture' });
+    const saving = east.upload({ name: '旧素材', category: '通勤', tags: [], imageBase64: 'fixture', referenceImageBase64: 'reference-fixture' });
     const uploadSignal = (fetcher.mock.calls.at(-1) as unknown as [string, RequestInit])[1].signal!;
     east.stop();
     const west = client('west'); west.start(); await flush();
@@ -167,6 +167,20 @@ describe('mirror-scoped exhibition client', () => {
     expect(signal.aborted).toBe(false);
     east.stop(); expect(signal.aborted).toBe(true);
     uploading.resolve(response(state('east', 3))); expect(await saving).toBe(false);
+  });
+
+  it.each(['imageBase64', 'referenceImageBase64'] as const)('keeps %s replacements alive beyond the normal timeout and binds them to the opened revision', async key => {
+    const updating = deferred<Response>();
+    const fetcher = vi.fn((url: string, init?: RequestInit) => init?.method === 'PATCH' ? updating.promise : Promise.resolve(response(state('east', 2))));
+    vi.stubGlobal('fetch', fetcher);
+    const east = client('east'); east.start(); await flush();
+    const saving = east.updateLook('outfit', { name: '套装', [key]: 'fixture', expectedRevision: 2 });
+    const [url, request] = fetcher.mock.calls.at(-1) as [string, RequestInit];
+    expect(url).toBe(appUrl(`/api${exhibitionApiPath('looks/outfit', 'east')}`));
+    expect(JSON.parse(request.body as string)).toEqual({ name: '套装', [key]: 'fixture', expectedRevision: 2 });
+    await vi.advanceTimersByTimeAsync(6000); expect(request.signal!.aborted).toBe(false);
+    east.stop(); expect(request.signal!.aborted).toBe(true);
+    updating.resolve(response(state('east', 3))); expect(await saving).toBe(false);
   });
 
   it('refreshes a stale skin upload and explains how to retry without replacing the latest skin', async () => {

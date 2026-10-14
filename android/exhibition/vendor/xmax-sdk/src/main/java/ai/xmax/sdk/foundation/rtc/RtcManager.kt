@@ -2,6 +2,7 @@ package ai.xmax.sdk.foundation.rtc
 
 import ai.xmax.sdk.AudioFrame
 import ai.xmax.sdk.CameraPosition
+import ai.xmax.sdk.RealtimeCameraDevice
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.VideoContentMode
 import ai.xmax.sdk.VideoFrame
@@ -235,6 +236,23 @@ internal class RtcManager(
     override fun switchCamera(position: CameraPosition) {
         performEngineOperation("switchCamera") {
             it.switchCamera(position)
+        }
+    }
+
+    override fun enumerateCameraDevices(): List<RealtimeCameraDevice> = nativeGate.read {
+        val engine = synchronized(stateLock) { engineLease?.engine }
+            ?: throw rtcError("RTC Engine is not initialized")
+        try {
+            engine.enumerateCameraDevices()
+        } catch (error: Throwable) {
+            throw rtcOperationError("enumerateVideoCaptureDevices", error)
+        }
+    }
+
+    override fun selectCameraDevice(deviceId: String, position: CameraPosition?) {
+        withEngine("setVideoCaptureDevice") { engine ->
+            val result = engine.selectCameraDevice(deviceId, position)
+            if (result != 0) throw rtcResultError("setVideoCaptureDevice", result)
         }
     }
 

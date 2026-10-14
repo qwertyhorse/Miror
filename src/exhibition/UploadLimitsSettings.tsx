@@ -1,9 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Check, ImageUp } from 'lucide-react';
-import type { ExhibitionUploadLimits } from '../../shared/exhibition';
+import { EXHIBITION_DEFAULT_UPLOAD_LIMITS, type ExhibitionUploadLimits } from '../../shared/exhibition';
 import type { ExhibitionController } from './useExhibition';
 
-const defaultLimits: ExhibitionUploadLimits = { maxFileSizeMB: 10, minWidth: 512, maxWidth: 4096, minHeight: 512, maxHeight: 4096 };
 const fields: { key: keyof ExhibitionUploadLimits; label: string; min: number; max: number }[] = [
   { key: 'maxFileSizeMB', label: '文件上限（MB）', min: 1, max: 20 },
   { key: 'minWidth', label: '最小宽度（px）', min: 64, max: 8192 },
@@ -14,7 +13,7 @@ const fields: { key: keyof ExhibitionUploadLimits; label: string; min: number; m
 
 export function UploadLimitsSettings({ controller }: { controller: ExhibitionController }) {
   const { state, send, connected, pending } = controller;
-  const limits = state?.settings.uploadLimits ?? defaultLimits;
+  const limits = state?.settings.uploadLimits ?? EXHIBITION_DEFAULT_UPLOAD_LIMITS;
   const limitsKey = JSON.stringify(limits);
   const [values, setValues] = useState(limits);
   const [saved, setSaved] = useState(false);

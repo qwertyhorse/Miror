@@ -10,13 +10,17 @@ android {
         applicationId 'ai.openbuy.exhibition'
         minSdk 28
         targetSdk 35
-        versionCode 4
-        versionName '0.2.1'
+        versionCode 8
+        versionName '0.2.5'
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
@@ -30,4 +34,6 @@ dependencies {
     implementation project(':xmax-sdk')
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
+    // Already supplied by the XMAX COS dependency; expose DNS customization to the LAN client.
+    implementation 'com.squareup.okhttp3:okhttp:3.12.6'
 }

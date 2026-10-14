@@ -3,12 +3,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import sharp, { type OutputInfo } from 'sharp';
-import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECONDS, EXHIBITION_AUTO_SWITCH_MIN_SECONDS, EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, EXHIBITION_LOOK_IDS, EXHIBITION_UI_SKIN_PRESETS, exhibitionPromptForLook, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionPhase, type ExhibitionState, type ExhibitionUploadLimits, type ExhibitionLiveStatus, type ExhibitionUiSkin, type ExhibitionUiSkinPreset } from '../shared/exhibition.ts';
+import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECONDS, EXHIBITION_AUTO_SWITCH_MIN_SECONDS, EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, EXHIBITION_LOOK_IDS, EXHIBITION_UI_SKIN_PRESETS, exhibitionPromptForLook, exhibitionReferenceImage, type ExhibitionImageInfo, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionPhase, type ExhibitionState, type ExhibitionUploadLimits, type ExhibitionLiveStatus, type ExhibitionUiSkin, type ExhibitionUiSkinPreset } from '../shared/exhibition.ts';
 import { ApiError, type SessionRecord } from './types.ts';
 import type { TryOnService } from './service.ts';
 import { ExhibitionSkinStore } from './exhibitionSkin.ts';
 import { isExhibitionGestureSettings, resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
 import type { ReferencePreparationStatus } from '../shared/referencePreparation.ts';
+import { EXHIBITION_DEFAULT_UPLOAD_LIMITS } from '../shared/exhibition.ts';
 import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_SESSION_LIMITS, isSessionLimits, resolveSessionLimits, SESSION_CREDIT_MAX, SESSION_EXPIRY_MAX, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
 const GENERATION_DELAY_MS = 2_200;
@@ -20,15 +21,85 @@ const MAX_INPUT_PIXELS = 32_000_000;
 const MIB = 1_048_576;
 const UPLOAD_ID = /^upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PHASES: ExhibitionPhase[] = ['select', 'positioning', 'generating', 'showcase', 'paused', 'idle'];
-const DEFAULT_LIMITS: ExhibitionUploadLimits = { maxFileSizeMB: 10, minWidth: 512, maxWidth: 4096, minHeight: 512, maxHeight: 4096 };
+const LEGACY_UPLOAD_LIMITS: ExhibitionUploadLimits = { maxFileSizeMB: 10, minWidth: 512, maxWidth: 4096, minHeight: 512, maxHeight: 4096 };
 const SAMPLE_LOOKS: ExhibitionLook[] = [
   { id: 'commute', name: '轻盈通勤', description: '自然有型，从容出发', image: '/assets/exhibition/commute-cutout.png', palette: '奶油白 · 燕麦色', mode: 'clothx', category: '通勤', tags: ['简约'], source: 'sample' },
   { id: 'city', name: '都市休闲', description: '日常灵感，时髦百搭', image: '/assets/exhibition/city-cutout.png', palette: '可可棕 · 牛仔蓝', mode: 'clothx', category: '休闲', tags: ['日常'], source: 'sample' },
   { id: 'evening', name: '优雅礼服', description: '气场加持，重要时刻', image: '/assets/exhibition/evening-cutout.png', palette: '经典黑 · 象牙白', mode: 'clothx', category: '礼服', tags: ['优雅'], source: 'sample' },
 ];
 
+const ASSET_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+type ImageRole = 'display' | 'reference';
+interface PreparedImage { data: Buffer; info: ExhibitionImageInfo; originalBytes: number; }
+function assetFilename(image: unknown, id: string, base: string): string | null {
+  if (typeof image !== 'string') return null;
+  if (UPLOAD_ID.test(id) && image === `${base}/${id}`) return `${id}.webp`;
+  const prefix = `${base}/${id}/`;
+  if (!image.startsWith(prefix)) return null;
+  const [role, token, ...rest] = image.slice(prefix.length).split('/');
+  return !rest.length && (role === 'display' || role === 'reference') && ASSET_UUID.test(token ?? '') ? `${id}.${role}.${token}.webp` : null;
+}
+function sampleImage(image: unknown, id: string): boolean { return SAMPLE_LOOKS.some(look => look.id === id && look.image === image); }
+function imageInfo(value: unknown): value is ExhibitionImageInfo {
+  return isRecord(value) && ['width', 'height', 'bytes'].every(key => isNonnegativeInteger(value[key]) && (value[key] as number) > 0)
+    && ['image/png', 'image/jpeg', 'image/webp'].includes(value.mime as string);
+}
+function checkPreparedImage(image: PreparedImage, limits: ExhibitionUploadLimits): void {
+  if (image.originalBytes > limits.maxFileSizeMB * MIB) throw new ApiError('EXHIBITION_UPLOAD_RULES_CHANGED', `上传限制已更新，图片不能超过 ${limits.maxFileSizeMB} MB。请重新选择图片。`, 409);
+  const { width, height } = image.info;
+  if (width < limits.minWidth || width > limits.maxWidth || height < limits.minHeight || height > limits.maxHeight || width * height > MAX_INPUT_PIXELS) {
+    throw new ApiError('EXHIBITION_UPLOAD_RULES_CHANGED', `上传限制已更新：宽 ${limits.minWidth}–${limits.maxWidth} px，高 ${limits.minHeight}–${limits.maxHeight} px。请重新选择图片。`, 409);
+  }
+}
+async function prepareImage(value: unknown, limits: ExhibitionUploadLimits, label: string): Promise<PreparedImage> {
+  try {
+    if (typeof value !== 'string') throw new ApiError('EXHIBITION_INVALID_IMAGE', '请选择 PNG、JPEG 或 WebP 图片。');
+    let encoded = value;
+    if (encoded.startsWith('data:')) {
+      const prefix = /^data:image\/(png|jpeg|webp);base64,/.exec(encoded);
+      if (!prefix) throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持 PNG、JPEG 或 WebP 图片。');
+      encoded = encoded.slice(prefix[0].length);
+    }
+    if (encoded.length > Math.ceil(limits.maxFileSizeMB * MIB / 3) * 4) throw new ApiError('EXHIBITION_IMAGE_TOO_LARGE', `图片不能超过 ${limits.maxFileSizeMB} MB。`, 413);
+    if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片编码无效。');
+    const bytes = Buffer.from(encoded, 'base64');
+    if (bytes.toString('base64') !== encoded) throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片编码无效。');
+    if (!bytes.length || bytes.length > limits.maxFileSizeMB * MIB) throw new ApiError('EXHIBITION_IMAGE_TOO_LARGE', `图片不能超过 ${limits.maxFileSizeMB} MB。`, 413);
+    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const supported = bytes.subarray(0, 8).equals(pngSignature) || (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+      || (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP');
+    if (!supported) throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持 PNG、JPEG 或 WebP 图片。');
+    if (bytes.subarray(0, 8).equals(pngSignature)) for (let offset = 8; offset + 12 <= bytes.length;) {
+      const length = bytes.readUInt32BE(offset);
+      if (bytes.subarray(offset + 4, offset + 8).toString('ascii') === 'acTL') throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持静态图片，请先导出单张图片。');
+      offset += length + 12;
+    }
+    let normalized: { data: Buffer; info: OutputInfo };
+    try {
+      const decoder = sharp(bytes, { failOn: 'warning', limitInputPixels: MAX_INPUT_PIXELS });
+      const metadata = await decoder.metadata();
+      if (!metadata.format || !['png', 'jpeg', 'webp'].includes(metadata.format) || (metadata.pages ?? 1) !== 1) throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持静态 PNG、JPEG 或 WebP 图片。');
+      const rotated = [5, 6, 7, 8].includes(metadata.orientation ?? 1);
+      const width = (rotated ? metadata.height : metadata.width) ?? 0;
+      const height = (rotated ? metadata.width : metadata.height) ?? 0;
+      if (width < limits.minWidth || width > limits.maxWidth || height < limits.minHeight || height > limits.maxHeight || width * height > MAX_INPUT_PIXELS) {
+        throw new ApiError('EXHIBITION_INVALID_DIMENSIONS', `图片宽度需为 ${limits.minWidth}–${limits.maxWidth} px，高度需为 ${limits.minHeight}–${limits.maxHeight} px，且总像素不超过 3200 万。`);
+      }
+      normalized = await decoder.rotate().webp({ quality: 95, effort: 3 }).toBuffer({ resolveWithObject: true });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片无法完整解码，可能已损坏、格式不支持或总像素过大。');
+    }
+    return { data: normalized.data, originalBytes: bytes.length, info: { width: normalized.info.width, height: normalized.info.height, bytes: normalized.data.length, mime: 'image/webp' } };
+  } catch (error) {
+    if (error instanceof ApiError) throw new ApiError(error.code, `${label}：${error.message}`, error.statusCode);
+    throw error;
+  }
+}
+
 interface StoredExhibition {
   schemaVersion: 3;
+  uploadLimitsVersion: 2;
   state: ExhibitionState;
   lastCommandAt: number;
   pausedPhase: 'showcase' | 'generating' | null;
@@ -84,7 +155,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     const state = migrated.state as Record<string, unknown>;
     state.looks = structuredClone(SAMPLE_LOOKS);
     state.categories = ['通勤', '休闲', '礼服']; state.tags = ['简约', '日常', '优雅'];
-    state.settings = { ...(isRecord(state.settings) ? state.settings : {}), uploadLimits: { ...DEFAULT_LIMITS } };
+    state.settings = { ...(isRecord(state.settings) ? state.settings : {}), uploadLimits: { ...EXHIBITION_DEFAULT_UPLOAD_LIMITS } };
     migrated.schemaVersion = 2;
   }
   const state = migrated.state as Record<string, unknown>;
@@ -95,13 +166,24 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
   }
   if (Array.isArray(state.looks)) {
     for (const look of state.looks) {
-      if (isRecord(look) && look.source === 'upload' && look.image === `/api/exhibition/assets/${look.id}`) look.image = `${assetBasePath}/${look.id}`;
+      if (isRecord(look)) for (const key of ['image', 'referenceImage']) {
+        if (typeof look[key] === 'string' && (look[key] as string).startsWith(`/api/exhibition/assets/${look.id}`)) {
+          look[key] = (look[key] as string).replace('/api/exhibition/assets', assetBasePath);
+        }
+      }
     }
   }
   if (state.generationNumber === undefined) state.generationNumber = 0;
   if (state.live === undefined) state.live = null;
   if (state.autoSwitchAt === undefined) state.autoSwitchAt = null;
   if (isRecord(state.settings)) {
+    if (migrated.uploadLimitsVersion !== 2) {
+      const limits = state.settings.uploadLimits;
+      // Upgrade the old defaults once; later explicit settings survive restarts.
+      if (isRecord(limits) && Object.entries(LEGACY_UPLOAD_LIMITS).every(([key, value]) => limits[key] === value)) {
+        state.settings.uploadLimits = { ...EXHIBITION_DEFAULT_UPLOAD_LIMITS };
+      }
+    }
     if (state.settings.switchMode === undefined) state.settings.switchMode = 'manual';
     if (state.settings.autoSwitchSeconds === undefined) state.settings.autoSwitchSeconds = EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS;
     if (state.settings.uiSkinPreset === undefined) state.settings.uiSkinPreset = 'crystal';
@@ -110,6 +192,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     // Repair only this optional field, preserving an older mirror's catalog and settings.
     state.settings.gestureRecognition = resolveExhibitionGestureSettings(state.settings.gestureRecognition);
   }
+  migrated.uploadLimitsVersion = 2;
   if (isRecord(state.live) && state.live.generationNumber === undefined) state.live.generationNumber = state.generationNumber;
   try {
     const categories = nameList(state.categories, '分类', 40, false);
@@ -119,11 +202,16 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     for (const look of state.looks) {
       if (!isRecord(look) || typeof look.id !== 'string' || ids.has(look.id)) return null;
       if (look.source === 'sample') {
-        if (!SAMPLE_LOOKS.some(sample => sample.id === look.id && sample.image === look.image)) return null;
+        if (!SAMPLE_LOOKS.some(sample => sample.id === look.id)) return null;
       } else if (look.source === 'upload') {
-        if (!UPLOAD_ID.test(look.id) || look.image !== `${assetBasePath}/${look.id}` || look.mime !== 'image/webp'
-          || !isNonnegativeInteger(look.width) || !isNonnegativeInteger(look.height) || !isNonnegativeInteger(look.bytes)) return null;
+        if (!UPLOAD_ID.test(look.id)) return null;
       } else return null;
+      if (assetFilename(look.image, look.id, assetBasePath)) {
+        if (look.mime !== 'image/webp' || !imageInfo(look)) return null;
+      } else if (!sampleImage(look.image, look.id)) return null;
+      if (look.referenceImage !== undefined && !assetFilename(look.referenceImage, look.id, assetBasePath) && !sampleImage(look.referenceImage, look.id)) return null;
+      if (look.referenceImageInfo !== undefined && !imageInfo(look.referenceImageInfo)) return null;
+      if (look.referenceImageInfo !== undefined && look.referenceImage === undefined) return null;
       shortText(look.name, '服装名称', 40); shortText(look.description, '描述', 120, true);
       if (!isMode(look.mode)) return null;
       if (look.referenceKind !== undefined && look.referenceKind !== 'image' && look.referenceKind !== 'none') return null;
@@ -187,12 +275,13 @@ export class ExhibitionService {
     const time = this.now();
     this.stored = {
       schemaVersion: 3,
+      uploadLimitsVersion: 2,
       state: {
         mirrorId: this.mirrorId,
         revision: 0, phase: 'select', experienceMode: 'clothx', selectedLookId: 'commute', displayedLookId: null,
         enabledLookIds: [...EXHIBITION_LOOK_IDS], looks: structuredClone(SAMPLE_LOOKS), categories: ['通勤', '休闲', '礼服'], tags: ['简约', '日常', '优雅'],
         sessionNumber: 0, generationNumber: 0, updatedAt: time, generationReadyAt: null, autoSwitchAt: null,
-        settings: { autoReturnSeconds: 90, uploadLimits: { ...DEFAULT_LIMITS }, switchMode: 'manual', autoSwitchSeconds: EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, uiSkinPreset: 'crystal', uiSkin: null, materialDrawerColumns: 2, gestureRecognition: resolveExhibitionGestureSettings() }, providerMode: 'demo', live: null, logs: [],
+        settings: { autoReturnSeconds: 90, uploadLimits: { ...EXHIBITION_DEFAULT_UPLOAD_LIMITS }, switchMode: 'manual', autoSwitchSeconds: EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, uiSkinPreset: 'crystal', uiSkin: null, materialDrawerColumns: 2, gestureRecognition: resolveExhibitionGestureSettings() }, providerMode: 'demo', live: null, logs: [],
       }, lastCommandAt: time, pausedPhase: null, pausedRemainingMs: 0,
     };
     let loaded: unknown;
@@ -243,10 +332,8 @@ export class ExhibitionService {
   private referenceSource(lookId: string) {
     const look = this.stored.state.looks.find(item => item.id === lookId);
     if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
-    if (look.referenceKind === 'none') return null;
-    if (look.source === 'upload') return this.asset(look.id);
-    if (!/^\/assets\/exhibition\/(commute|city|evening)-cutout\.png$/.test(look.image)) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '参考素材无效。');
-    return { data: readFileSync(fileURLToPath(new URL('../public' + look.image, import.meta.url))), mime: 'image/png' };
+    const image = exhibitionReferenceImage(look);
+    return image === null ? null : this.readImage(look.id, image);
   }
   readyReference(lookId: string) {
     const source = this.referenceSource(lookId);
@@ -325,7 +412,7 @@ export class ExhibitionService {
     const look = state.looks.find(item => item.id === input.lookId);
     if (!look || look.id !== state.selectedLookId || !activeLookIds(state).includes(look.id)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材与当前模式或体验不一致。');
     if (!this.liveService) throw new ApiError('EXHIBITION_LIVE_UNAVAILABLE', '实时换装服务尚未连接。', 503);
-    if (look.source === 'upload') this.asset(look.id);
+    this.referenceSource(look.id);
     const service = this.liveService;
     const sessionLimits = this.sessionLimits();
     const live = { deviceId, generationNumber: state.generationNumber, sessionId: null as string | null, lookId: look.id, status: 'preparing' as const, updatedAt: this.now(), heartbeatAt: this.now() };
@@ -334,7 +421,7 @@ export class ExhibitionService {
     this.renewalHandoff = undefined;
     let reservedId: string | undefined;
     try {
-      const created = await service.createExhibition({ mirrorId: this.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: look.referenceKind === 'none' ? '' : look.image, referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits }, {
+      const created = await service.createExhibition({ mirrorId: this.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: exhibitionReferenceImage(look) ?? '', referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits }, {
         onReserved: id => {
           reservedId = id;
           const reserved = structuredClone(this.stored);
@@ -464,12 +551,12 @@ export class ExhibitionService {
   async updateLiveCondition(id: string, input: unknown) {
     this.tick(); await this.reconcileLive();
     const { state, look, service } = this.currentConditionIntent(id, input);
-    if (look.source === 'upload') this.asset(look.id);
+    this.referenceSource(look.id);
     const intent = input as Record<string, unknown>;
     return service.updateExhibitionCondition(id, {
       mirrorId: this.mirrorId, deviceId: state.live!.deviceId, lookId: look.id,
       sessionNumber: state.sessionNumber, generationNumber: state.generationNumber,
-      referenceAsset: look.referenceKind === 'none' ? '' : look.image,
+      referenceAsset: exhibitionReferenceImage(look) ?? '',
       referenceKind: look.referenceKind, mode: state.experienceMode,
       prompt: exhibitionPromptForLook(look), refImageUrl: intent.refImageUrl as string | undefined,
     }, () => this.conditionIntentIsCurrent(id, intent));
@@ -607,93 +694,84 @@ export class ExhibitionService {
   }
 
   /** Limits the JSON envelope before buffering its base64 payload. */
-  uploadRequestLimit(): number { return Math.ceil(this.stored.state.settings.uploadLimits.maxFileSizeMB * MIB / 3) * 4 + 16_384; }
+  uploadRequestLimit(): number { return 2 * (Math.ceil(this.stored.state.settings.uploadLimits.maxFileSizeMB * MIB / 3) * 4 + 64) + 16_384; }
 
-  asset(id: string): { data: Buffer; mime: 'image/webp' } {
-    if (!UPLOAD_ID.test(id) || !this.stored.state.looks.some(look => look.id === id && look.source === 'upload')) throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到服装素材。', 404);
-    try { return { data: readFileSync(join(this.assetsDirectory, `${id}.webp`)), mime: 'image/webp' }; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到服装素材。', 404);
-      throw error;
+  private readImage(id: string, image: string): { data: Buffer; mime: 'image/webp' | 'image/png' } {
+    const filename = assetFilename(image, id, this.assetBasePath);
+    try {
+      if (filename) return { data: readFileSync(join(this.assetsDirectory, filename)), mime: 'image/webp' };
+      if (sampleImage(image, id)) return { data: readFileSync(fileURLToPath(new URL('../public' + image, import.meta.url))), mime: 'image/png' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到素材图片。', 404);
   }
-
+  /** Current display bytes, including legacy materials. HTTP reads use exact resource identity below. */
+  asset(id: string): { data: Buffer; mime: 'image/webp' | 'image/png' } {
+    const look = this.stored.state.looks.find(item => item.id === id);
+    if (!look || !assetFilename(look.image, id, this.assetBasePath)) throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到素材图片。', 404);
+    return this.readImage(id, look.image);
+  }
+  assetResource(id: string, role?: string, assetId?: string): { data: Buffer; mime: 'image/webp' | 'image/png' } {
+    const image = role === undefined ? `${this.assetBasePath}/${id}` : `${this.assetBasePath}/${id}/${role}/${assetId}`;
+    const look = this.stored.state.looks.find(item => item.id === id);
+    if (!look || !assetFilename(image, id, this.assetBasePath) || (look.image !== image && look.referenceImage !== image)) {
+      throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到素材图片。', 404);
+    }
+    return this.readImage(id, image);
+  }
+  private newImage(id: string, role: ImageRole, prepared: Pick<PreparedImage, 'data'>, written: string[]): string {
+    const image = `${this.assetBasePath}/${id}/${role}/${randomUUID()}`;
+    const filename = join(this.assetsDirectory, assetFilename(image, id, this.assetBasePath)!);
+    mkdirSync(this.assetsDirectory, { recursive: true, mode: 0o700 });
+    // Track before writing: a failed write can still leave a partial file.
+    written.push(filename);
+    writeFileSync(filename, prepared.data, { mode: 0o600, flag: 'wx' });
+    return image;
+  }
+  private localImages(look: ExhibitionLook): string[] {
+    return [...new Set([look.image, look.referenceImage].filter((image): image is string => !!image))]
+      .flatMap(image => { const filename = assetFilename(image, look.id, this.assetBasePath); return filename ? [filename] : []; });
+  }
+  private cleanupFiles(files: string[]): void {
+    for (const file of files) { try { rmSync(file, { force: true }); } catch { /* Catalog membership gates stale and partially written resources. */ } }
+  }
+  private cleanupUnusedImages(look: ExhibitionLook): void {
+    const retained = new Set(this.stored.state.looks.flatMap(item => this.localImages(item)));
+    this.cleanupFiles(this.localImages(look).filter(file => !retained.has(file)).map(file => join(this.assetsDirectory, file)));
+  }
+  private invalidateReference(id: string): void { this.referenceIdentities.delete(id); this.referenceSourceFailures.delete(id); }
+  private checkUploadAvailable(): void {
+    if (this.uploadConcurrency.inProgress >= this.uploadConcurrency.limit) throw new ApiError('EXHIBITION_UPLOAD_BUSY', '已有素材正在处理，请稍后再试。', 429);
+  }
   async upload(input: unknown): Promise<ExhibitionState> {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_METADATA', '请提供有效的服装信息。');
-    // Append-only uploads do not lock or reset the current visitor; playback revisions may advance while decoding.
-    const payload = input;
     if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`);
-    if (this.uploadConcurrency.inProgress >= this.uploadConcurrency.limit) throw new ApiError('EXHIBITION_UPLOAD_BUSY', '已有素材正在处理，请稍后再试。', 429);
-    const details = this.lookMetadata(payload);
+    this.checkUploadAvailable();
+    const details = this.lookMetadata(input);
+    if (details.referenceKind === 'none' || typeof input.referenceImageBase64 !== 'string') throw new ApiError('EXHIBITION_REFERENCE_REQUIRED', '请选择 XMAX 参考图。');
     const limits = this.stored.state.settings.uploadLimits;
-    if (typeof payload.imageBase64 !== 'string') throw new ApiError('EXHIBITION_INVALID_IMAGE', '请选择 PNG、JPEG 或 WebP 图片。');
-    let encoded = payload.imageBase64;
-    if (encoded.startsWith('data:')) {
-      const prefix = /^data:image\/(png|jpeg|webp);base64,/.exec(encoded);
-      if (!prefix) throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持 PNG、JPEG 或 WebP 图片。');
-      encoded = encoded.slice(prefix[0].length);
-    }
-    if (encoded.length > Math.ceil(limits.maxFileSizeMB * MIB / 3) * 4) throw new ApiError('EXHIBITION_IMAGE_TOO_LARGE', `图片不能超过 ${limits.maxFileSizeMB} MB。`, 413);
-    if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片编码无效。');
-    const bytes = Buffer.from(encoded, 'base64');
-    if (bytes.toString('base64') !== encoded) throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片编码无效。');
-    if (!bytes.length || bytes.length > limits.maxFileSizeMB * MIB) throw new ApiError('EXHIBITION_IMAGE_TOO_LARGE', `图片不能超过 ${limits.maxFileSizeMB} MB。`, 413);
-    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-    const supportedSignature = bytes.subarray(0, 8).equals(pngSignature)
-      || (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
-      || (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP');
-    if (!supportedSignature) throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持 PNG、JPEG 或 WebP 图片。');
-    // libpng can read an APNG as its first frame, so reject the animation chunk explicitly.
-    if (bytes.subarray(0, 8).equals(pngSignature)) {
-      for (let offset = 8; offset + 12 <= bytes.length;) {
-        const length = bytes.readUInt32BE(offset);
-        if (bytes.subarray(offset + 4, offset + 8).toString('ascii') === 'acTL') throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持静态图片，请先导出单张图片。');
-        offset += length + 12;
-      }
-    }
-    this.uploadConcurrency.inProgress += 1;
-    this.uploadsInProgress += 1;
+    this.uploadConcurrency.inProgress += 1; this.uploadsInProgress += 1;
+    const written: string[] = [];
     try {
-      let normalized: { data: Buffer; info: OutputInfo };
-      try {
-        const decoder = sharp(bytes, { failOn: 'warning', limitInputPixels: MAX_INPUT_PIXELS });
-        const metadata = await decoder.metadata();
-        if (!metadata.format || !['png', 'jpeg', 'webp'].includes(metadata.format) || (metadata.pages ?? 1) !== 1) throw new ApiError('EXHIBITION_INVALID_IMAGE', '仅支持静态 PNG、JPEG 或 WebP 图片。');
-        const rotated = [5, 6, 7, 8].includes(metadata.orientation ?? 1);
-        const width = (rotated ? metadata.height : metadata.width) ?? 0;
-        const height = (rotated ? metadata.width : metadata.height) ?? 0;
-        if (width < limits.minWidth || width > limits.maxWidth || height < limits.minHeight || height > limits.maxHeight || width * height > MAX_INPUT_PIXELS) {
-          throw new ApiError('EXHIBITION_INVALID_DIMENSIONS', `图片宽度需为 ${limits.minWidth}–${limits.maxWidth} px，高度需为 ${limits.minHeight}–${limits.maxHeight} px，且总像素不超过 3200 万。`);
-        }
-        // Re-encoding forces a complete decode, normalizes orientation, strips metadata and any appended payload.
-        normalized = await decoder.rotate().webp({ quality: 95, effort: 3 }).toBuffer({ resolveWithObject: true });
-      } catch (error) {
-        if (error instanceof ApiError) throw error;
-        throw new ApiError('EXHIBITION_INVALID_IMAGE', '图片无法完整解码，可能已损坏、格式不支持或总像素过大。');
-      }
-      // Merge onto the latest state after decoding. Only upload rules, taxonomy and catalog capacity
-      // constrain this append; live ownership, playback state and idle deadlines are left intact.
-      const latestLimits = this.stored.state.settings.uploadLimits;
-      if (bytes.length > latestLimits.maxFileSizeMB * MIB) throw new ApiError('EXHIBITION_UPLOAD_RULES_CHANGED', `上传限制已更新，图片不能超过 ${latestLimits.maxFileSizeMB} MB。请重新选择图片。`, 409);
-      const { width, height } = normalized.info;
-      if (width < latestLimits.minWidth || width > latestLimits.maxWidth || height < latestLimits.minHeight || height > latestLimits.maxHeight || width * height > MAX_INPUT_PIXELS) {
-        throw new ApiError('EXHIBITION_UPLOAD_RULES_CHANGED', `上传限制已更新：宽 ${latestLimits.minWidth}–${latestLimits.maxWidth} px，高 ${latestLimits.minHeight}–${latestLimits.maxHeight} px。请重新选择图片。`, 409);
-      }
+      // Decode in sequence to bound peak memory while both full-size inputs are present.
+      const display = await prepareImage(input.imageBase64, limits, '展示图');
+      const reference = await prepareImage(input.referenceImageBase64, limits, 'XMAX 参考图');
+      for (const image of [display, reference]) checkPreparedImage(image, this.stored.state.settings.uploadLimits);
       if (!this.stored.state.categories.includes(details.category) || details.tags.some(tag => !this.stored.state.tags.includes(tag))) {
         throw new ApiError('EXHIBITION_UPLOAD_TAXONOMY_CHANGED', '所选分类或标签在上传期间已被移除，请重新选择后上传。', 409);
       }
       if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`, 409);
       const id = `upload-${randomUUID()}`;
+      const image = this.newImage(id, 'display', display, written);
+      const referenceImage = this.newImage(id, 'reference', reference, written);
       const draft = structuredClone(this.stored);
-      draft.state.looks.push({ id, ...details, image: `${this.assetBasePath}/${id}`, palette: '', source: 'upload',
-        width: normalized.info.width, height: normalized.info.height, bytes: normalized.data.length, mime: 'image/webp' });
-      const filename = join(this.assetsDirectory, `${id}.webp`);
-      mkdirSync(this.assetsDirectory, { recursive: true, mode: 0o700 });
-      writeFileSync(filename, normalized.data, { mode: 0o600, flag: 'wx' });
-      try { this.commit(draft, `服装「${details.name}」已上传，启用后会出现在大屏。`, this.now()); }
-      catch (error) { rmSync(filename, { force: true }); throw error; }
+      draft.state.looks.push({ id, ...details, referenceKind: 'image', image, referenceImage, referenceImageInfo: reference.info,
+        ...display.info, palette: '', source: 'upload' });
+      this.commit(draft, `服装「${details.name}」已上传，启用后会出现在大屏。`, this.now());
       return this.snapshotState();
-    } finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
+    } catch (error) { this.cleanupFiles(written); throw error; }
+    finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
   }
 
   /** Copies a configuration snapshot; live ownership and history always belong to the target. */
@@ -706,21 +784,25 @@ export class ExhibitionService {
     // restorable snapshot before writing any replacement asset or state.
     this.backupBeforeCopy(source.mirrorId, input);
     const draft = structuredClone(this.stored);
-    const previousUploads = input.copyLooks ? draft.state.looks.filter(look => look.source === 'upload').map(look => look.id) : [];
+    const previousLooks = input.copyLooks ? [...draft.state.looks] : [];
     const copiedFiles: string[] = [];
     try {
       if (input.copyLooks) {
         const remapped = new Map<string, string>();
         draft.state.looks = sourceState.looks.map(look => {
-          if (look.source === 'sample') { remapped.set(look.id, look.id); return structuredClone(look); }
-          const asset = source.asset(look.id);
-          const id = `upload-${randomUUID()}`;
-          const filename = join(this.assetsDirectory, `${id}.webp`);
-          mkdirSync(this.assetsDirectory, { recursive: true, mode: 0o700 });
-          copiedFiles.push(filename);
-          writeFileSync(filename, asset.data, { flag: 'wx', mode: 0o600 });
+          const id = look.source === 'sample' ? look.id : `upload-${randomUUID()}`;
+          const copied = new Map<string, string>();
+          const copyImage = (image: string, role: ImageRole): string => {
+            if (sampleImage(image, look.id)) return image;
+            const previous = copied.get(image); if (previous) return previous;
+            const asset = source.readImage(look.id, image);
+            const next = this.newImage(id, role, { data: asset.data }, copiedFiles);
+            copied.set(image, next); return next;
+          };
+          const next: ExhibitionLook = { ...structuredClone(look), id, image: copyImage(look.image, 'display') };
+          if (look.referenceImage) next.referenceImage = copyImage(look.referenceImage, 'reference');
           remapped.set(look.id, id);
-          return { ...structuredClone(look), id, image: `${this.assetBasePath}/${id}` };
+          return next;
         });
         draft.state.categories = [...sourceState.categories];
         draft.state.tags = [...sourceState.tags];
@@ -742,7 +824,7 @@ export class ExhibitionService {
       for (const filename of copiedFiles) { try { rmSync(filename, { force: true }); } catch { /* Unreferenced files are never served. */ } }
       throw error;
     }
-    for (const id of previousUploads) { try { rmSync(join(this.assetsDirectory, `${id}.webp`), { force: true }); } catch { /* State was committed; stale files are not served. */ } }
+    for (const look of previousLooks) { this.invalidateReference(look.id); this.cleanupUnusedImages(look); }
     return this.snapshotState();
   }
 
@@ -753,10 +835,10 @@ export class ExhibitionService {
       mkdirSync(this.copyBackupsDirectory, { recursive: true, mode: 0o700 });
       mkdirSync(staging, { mode: 0o700 });
       writeFileSync(join(staging, 'exhibition.json'), JSON.stringify(this.stored), { flag: 'wx', mode: 0o600 });
-      const uploads = this.stored.state.looks.filter(look => look.source === 'upload');
-      if (uploads.length) {
+      const images = this.stored.state.looks.flatMap(look => this.localImages(look));
+      if (images.length) {
         const assets = join(staging, 'exhibition-assets'); mkdirSync(assets, { mode: 0o700 });
-        for (const look of uploads) writeFileSync(join(assets, `${look.id}.webp`), this.asset(look.id).data, { flag: 'wx', mode: 0o600 });
+        for (const filename of new Set(images)) writeFileSync(join(assets, filename), readFileSync(join(this.assetsDirectory, filename)), { flag: 'wx', mode: 0o600 });
       }
       const skin = this.stored.state.settings.uiSkin;
       if (skin) {
@@ -775,15 +857,50 @@ export class ExhibitionService {
     }
   }
 
-  updateLook(id: string, input: unknown): ExhibitionState {
+  updateLook(id: string, input: unknown): ExhibitionState | Promise<ExhibitionState> {
     const payload = this.editableInput(input);
     const index = this.stored.state.looks.findIndex(look => look.id === id);
     if (index < 0) throw new ApiError('EXHIBITION_INVALID_LOOK', '未找到这套服装。', 404);
     const existing = this.stored.state.looks[index];
-    const details = this.lookMetadata({ ...existing, ...payload });
+    const hasReference = payload.referenceImageBase64 !== undefined;
+    if (existing.referenceKind === 'none' && !hasReference && ((payload.mode ?? existing.mode) !== 'free' || payload.referenceKind === 'image')) {
+      throw new ApiError('EXHIBITION_REFERENCE_REQUIRED', '请选择 XMAX 参考图。');
+    }
+    const details = this.lookMetadata({ ...existing, ...payload, ...(hasReference ? { referenceKind: 'image' } : {}) });
+    if (payload.imageBase64 !== undefined || hasReference) return this.replaceLookImages(existing, payload, details);
     const draft = structuredClone(this.stored); draft.state.looks[index] = { ...existing, ...details };
     reconcileSelection(draft.state);
     this.commit(draft, `服装「${details.name}」的信息已保存。`, this.now()); return this.snapshotState();
+  }
+  private async replaceLookImages(existing: ExhibitionLook, payload: Record<string, unknown>, details: ReturnType<ExhibitionService['lookMetadata']>): Promise<ExhibitionState> {
+    this.checkUploadAvailable();
+    const baseline = this.stored.state.revision;
+    const limits = this.stored.state.settings.uploadLimits;
+    const written: string[] = [];
+    this.uploadConcurrency.inProgress += 1; this.uploadsInProgress += 1;
+    try {
+      const display = payload.imageBase64 === undefined ? undefined : await prepareImage(payload.imageBase64, limits, '展示图');
+      const reference = payload.referenceImageBase64 === undefined ? undefined : await prepareImage(payload.referenceImageBase64, limits, 'XMAX 参考图');
+      // An edit is a replacement: any concurrent state or phase change must win.
+      this.editableInput({ expectedRevision: baseline });
+      if (this.stored.state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待此设备的会话结束，再编辑素材。', 409);
+      for (const prepared of [display, reference]) if (prepared) checkPreparedImage(prepared, this.stored.state.settings.uploadLimits);
+      const next: ExhibitionLook = { ...existing, ...details };
+      // Pin a legacy shared image before replacing its display role.
+      if (display && !reference && !existing.referenceImage && existing.referenceKind !== 'none') {
+        next.referenceImage = existing.image;
+        if (imageInfo(existing)) next.referenceImageInfo = { width: existing.width!, height: existing.height!, bytes: existing.bytes!, mime: existing.mime! };
+      }
+      if (display) { next.image = this.newImage(existing.id, 'display', display, written); Object.assign(next, display.info); }
+      if (reference) { next.referenceImage = this.newImage(existing.id, 'reference', reference, written); next.referenceImageInfo = reference.info; next.referenceKind = 'image'; }
+      const draft = structuredClone(this.stored);
+      draft.state.looks = draft.state.looks.map(look => look.id === existing.id ? next : look);
+      reconcileSelection(draft.state);
+      this.commit(draft, `服装「${details.name}」的信息已保存。`, this.now());
+      this.invalidateReference(existing.id); this.cleanupUnusedImages(existing);
+      return this.snapshotState();
+    } catch (error) { this.cleanupFiles(written); throw error; }
+    finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
   }
 
   removeLook(id: string, input: unknown): ExhibitionState {
@@ -798,11 +915,8 @@ export class ExhibitionService {
     reconcileSelection(draft.state);
     if (draft.state.displayedLookId === id) draft.state.displayedLookId = null;
     this.commit(draft, `服装「${existing.name}」已删除。`, this.now());
-    if (existing.source === 'upload') {
-      // Commit first so a failed state write keeps the image intact. A cleanup failure
-      // leaves an inaccessible orphan instead of reporting a committed deletion as failed.
-      try { rmSync(join(this.assetsDirectory, `${id}.webp`), { force: true }); } catch { /* Catalog membership gates all asset reads. */ }
-    }
+    this.invalidateReference(id);
+    this.cleanupUnusedImages(existing);
     return this.snapshotState();
   }
 

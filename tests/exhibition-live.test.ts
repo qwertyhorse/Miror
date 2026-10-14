@@ -93,7 +93,7 @@ describe('explicit exhibition XMAX path', () => {
   it('appends during live first-frame and heartbeat updates without replacing or extending the active session', async () => {
     const { exhibition, service, store, issue, deactivate, advance } = fixture();
     const bytes = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#bfbcff88' } }).png().toBuffer();
-    const input = { name: '现场新增服装', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), expectedRevision: 0 };
+    const input = { name: '现场新增服装', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), referenceImageBase64: bytes.toString('base64'), expectedRevision: 0 };
     start(exhibition); const session = await create(exhibition);
     await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/garment.webp' });
     await service.link(session.id, 'ums-active-upload');

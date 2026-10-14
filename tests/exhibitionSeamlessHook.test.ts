@@ -36,11 +36,15 @@ async function fixture(initialState = snapshot(), continuous = false) {
   let live!: ExhibitionLiveController; let update!: (state: ExhibitionState, selectionPending?: boolean) => void;
   let record: any;
   let segments = 0;
+  const referenceAsset = (lookId: string) => {
+    const look = value.state.looks.find(item => item.id === lookId)!;
+    return look.referenceKind === 'none' ? '' : look.referenceImage ?? look.image;
+  };
   mocks.api.mockImplementation(async (path: string, _method?: string, input?: Record<string, any>) => {
     if (path.endsWith('/live/status')) return { configured: true, perSessionLimit: 30 };
     if (path.endsWith('/live/session')) {
       record = { id: continuous ? `segment-${++segments}` : 'same-session', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'camera', sourceKind: 'camera', sourceName: '摄像头',
-        targetItemId: 'exhibition-first', lookId: input!.lookId, referenceAsset: '/assets/first.png', refImageUrl: '', referenceVersion: 0,
+        targetItemId: 'exhibition-first', lookId: input!.lookId, referenceAsset: referenceAsset(input!.lookId), refImageUrl: '', referenceVersion: 0,
         expiresAt: new Date(Date.now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none',
         exhibition: { mirrorId: 'default', deviceId: input!.deviceId, lookId: input!.lookId, sessionNumber: 1, generationNumber: input!.generationNumber,
           mode: 'clothx', prompt: exhibitionPromptForLook({ mode: 'clothx' }), ...(continuous ? { continuous: true } : {}) } };
@@ -49,7 +53,7 @@ async function fixture(initialState = snapshot(), continuous = false) {
     if (path.endsWith('/reference')) { record = { ...record, refImageUrl: input!.refImageUrl, referenceVersion: 1 }; return { ...record }; }
     if (path.endsWith('/link')) { record = { ...record, providerSessionId: input!.providerSessionId }; return { ...record }; }
     if (path.endsWith('/condition')) {
-      if (record.exhibition.generationNumber !== input!.generationNumber) record = { ...record, lookId: input!.lookId, referenceAsset: `/assets/${input!.lookId}.png`,
+      if (record.exhibition.generationNumber !== input!.generationNumber) record = { ...record, lookId: input!.lookId, referenceAsset: referenceAsset(input!.lookId),
         refImageUrl: input!.refImageUrl, referenceVersion: record.referenceVersion + 1, exhibition: { ...record.exhibition, lookId: input!.lookId, generationNumber: input!.generationNumber } };
       return { ...record };
     }
@@ -128,6 +132,24 @@ describe('exhibition hook preserves generated output while the selected outfit c
       expect.stringMatching(/\/assets\/first\.png$/), expect.stringMatching(/\/assets\/third\.png$/),
     ]);
     expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts and prefetches generation images, then reuses the prepared image for continuous selection', async () => {
+    const state = snapshot();
+    state.looks[0].referenceImage = '/assets/first-reference.png';
+    state.looks[1].referenceImage = '/assets/second-reference.png';
+    const f = await fixture(state);
+    const fetchedImages = () => vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(fetchedImages()).toEqual([
+      expect.stringMatching(/\/assets\/first-reference\.png$/), expect.stringMatching(/\/assets\/second-reference\.png$/),
+      expect.stringMatching(/\/assets\/third\.png$/),
+    ]);
+    await act(async () => f.update({ ...state, phase: 'generating', generationNumber: 2, selectedLookId: 'second', displayedLookId: 'first', live: f.lease, revision: 3 }));
+    await flushReact();
+    expect(fetchedImages()).toHaveLength(3); expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(3);
+    expect(f.calls('/condition/applied')).toHaveLength(1); expect(f.live.updateError).toBe('');
+    expect(f.allocations()).toBe(1); expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(f.live.outputStream).toBe(f.output);
   });
 
   it('keeps the camera, remote stream, SDK and credential while the server still displays the preceding outfit', async () => {

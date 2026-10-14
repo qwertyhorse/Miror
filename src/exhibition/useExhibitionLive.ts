@@ -6,7 +6,7 @@ import { cameraCaptureConstraints, readCameraPreference } from './cameraPreferen
 import { acquireExhibitionCamera, cameraTrackDeviceId } from './cameraCapture';
 import { exhibitionLiveFailure, safeExhibitionErrorMessage } from './liveFailure';
 import type { ConnectOptions, SdkSession } from '../sdkTypes';
-import { exhibitionPromptForLook, type ExhibitionExperienceMode, type ExhibitionLiveStatus, type ExhibitionState } from '../../shared/exhibition';
+import { exhibitionPromptForLook, exhibitionReferenceImage, type ExhibitionExperienceMode, type ExhibitionLiveStatus, type ExhibitionState } from '../../shared/exhibition';
 import { isXmaxRegion, type XmaxRegion } from '../../shared/xmax';
 import type { RealtimePresentationState } from '@xmaxai/sdk-global';
 import type { MoXInteraction } from './MoXDragSurface';
@@ -762,8 +762,8 @@ export function useExhibitionLive({ state, active, refresh, mirrorId = 'default'
       .filter(item => item.referenceKind !== 'none' && item.id !== look?.id).slice(0, 2);
     const input: LiveInput | null = look ? { mirrorId: identity.mirrorId, terminalId: terminal?.terminalId, terminalToken: terminal?.token, deviceId, lookId: look.id,
       sessionNumber: currentState.sessionNumber, generationNumber: currentState.generationNumber, expectedRevision: currentState.revision,
-      image: look.image, referenceKind: look.referenceKind, mode: look.mode ?? 'clothx', prompt: look.prompt, stream: cameraStream ?? undefined,
-      prefetchImages: neighbours.map(item => item.image), prefetchLookIds: Object.fromEntries(neighbours.map(item => [item.image, item.id])),
+      image: exhibitionReferenceImage(look) ?? '', referenceKind: look.referenceKind, mode: look.mode ?? 'clothx', prompt: look.prompt, stream: cameraStream ?? undefined,
+      prefetchImages: neighbours.map(item => exhibitionReferenceImage(item)!), prefetchLookIds: Object.fromEntries(neighbours.map(item => [exhibitionReferenceImage(item)!, item.id])),
     } : null;
     const reusable = !!input && !!existing?.canReuse(input);
     if (existing && (!wantsLive || occupied || (existing.key !== desiredKey && !reusable) || (!mox && !cameraStream))) {

@@ -2,6 +2,7 @@ package ai.xmax.sdk.foundation.rtc
 
 import ai.xmax.sdk.AudioFrame
 import ai.xmax.sdk.CameraPosition
+import ai.xmax.sdk.RealtimeCameraDevice
 import ai.xmax.sdk.VideoContentMode
 import ai.xmax.sdk.VideoFrame
 import android.content.Context
@@ -171,6 +172,33 @@ internal fun createVolcRtcEngine(
             val mirrorType = RtcVideoConverter.convertMirrorType(position)
             val mirrorResult = engine.setLocalVideoMirrorType(mirrorType)
             if (mirrorResult >= 0) localMirrorType.set(mirrorType)
+            return mirrorResult
+        }
+
+        override fun enumerateCameraDevices(): List<RealtimeCameraDevice> =
+            checkNotNull(engine.videoDeviceManager) { "RTC video device manager is unavailable" }
+                .enumerateVideoCaptureDevices().orEmpty()
+                .filter { !it.deviceId.isNullOrBlank() }
+                .distinctBy { it.deviceId }
+                .map { device ->
+                    RealtimeCameraDevice(
+                        id = device.deviceId,
+                        name = device.deviceName?.takeIf(String::isNotBlank) ?: device.deviceId,
+                        position = when (device.deviceFacing) {
+                            com.ss.bytertc.engine.type.VideoDeviceFacing.FRONT -> CameraPosition.FRONT
+                            com.ss.bytertc.engine.type.VideoDeviceFacing.BACK -> CameraPosition.BACK
+                            else -> null
+                        },
+                    )
+                }
+
+        override fun selectCameraDevice(deviceId: String, position: CameraPosition?): Int {
+            val devices = checkNotNull(engine.videoDeviceManager) { "RTC video device manager is unavailable" }
+            val selectionResult = devices.setVideoCaptureDevice(deviceId)
+            if (selectionResult != 0) return selectionResult
+            val mirrorType = position?.let(RtcVideoConverter::convertMirrorType) ?: MirrorType.MIRROR_TYPE_NONE
+            val mirrorResult = engine.setLocalVideoMirrorType(mirrorType)
+            if (mirrorResult == 0) localMirrorType.set(mirrorType)
             return mirrorResult
         }
 

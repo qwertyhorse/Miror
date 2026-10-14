@@ -108,8 +108,18 @@ export class ExhibitionMirrors {
   }
 
   unbindDevice(mirrorId: string, input: unknown): null {
-    this.assertBindingEditable(mirrorId);
-    this.devices.unbind(mirrorId, input);
+    const mirror = this.getMirror(mirrorId);
+    // A stale confirmation must not interrupt a different terminal's experience.
+    this.devices.assertBindingMatches(mirrorId, input);
+    // No await between local cancellation and removing ownership: a late signing
+    // response is cancelled, while new binding stays blocked by any retained lease.
+    mirror.command({ action: 'idle' });
+    try { this.devices.unbind(mirrorId, input); }
+    finally {
+      // Revocation must outlive the request, including a failed registry write.
+      // Keep pending/error sessions for the watchdog to retry; never clear them here.
+      void mirror.reconcileLive().catch(() => undefined);
+    }
     return null;
   }
 

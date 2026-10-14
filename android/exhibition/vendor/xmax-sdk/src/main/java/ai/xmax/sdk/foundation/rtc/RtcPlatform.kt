@@ -2,6 +2,7 @@ package ai.xmax.sdk.foundation.rtc
 
 import ai.xmax.sdk.AudioFrame
 import ai.xmax.sdk.CameraPosition
+import ai.xmax.sdk.RealtimeCameraDevice
 import ai.xmax.sdk.VideoContentMode
 import ai.xmax.sdk.VideoFrame
 import android.view.View
@@ -29,6 +30,10 @@ internal interface RtcPlatformEngine {
     fun stopVideoCapture(): Int
 
     fun switchCamera(position: CameraPosition): Int
+
+    fun enumerateCameraDevices(): List<RealtimeCameraDevice>
+
+    fun selectCameraDevice(deviceId: String, position: CameraPosition?): Int
 
     fun bindLocalVideo(view: View, contentMode: VideoContentMode): Int
 

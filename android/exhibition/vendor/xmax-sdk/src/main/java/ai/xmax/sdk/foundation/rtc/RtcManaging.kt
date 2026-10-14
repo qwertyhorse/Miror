@@ -2,6 +2,7 @@ package ai.xmax.sdk.foundation.rtc
 
 import ai.xmax.sdk.AudioFrame
 import ai.xmax.sdk.CameraPosition
+import ai.xmax.sdk.RealtimeCameraDevice
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.VideoFrame
 import ai.xmax.sdk.VideoContentMode
@@ -54,6 +55,12 @@ internal interface RtcManaging {
 
     /** 切换 RTC 内部采集使用的摄像头。 */
     fun switchCamera(position: CameraPosition)
+
+    /** 读取 RTC 提供的真实设备 ID，不启动采集。 */
+    fun enumerateCameraDevices(): List<RealtimeCameraDevice>
+
+    /** 精确选择设备 ID；调用失败时不回退到前置或后置。 */
+    fun selectCameraDevice(deviceId: String, position: CameraPosition?)
 
     /** 将本地视频绑定到渲染视图。 */
     fun bindLocalVideo(

@@ -156,11 +156,11 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'POST' && path === '/looks') return json(response, 201, await current.upload(await body(request, current.uploadRequestLimit())));
         if (request.method === 'POST' && path === '/taxonomy') return json(response, 200, current.taxonomy(await body(request)));
         const look = /^\/looks\/([^/]+)$/.exec(path);
-        if (request.method === 'PATCH' && look) return json(response, 200, current.updateLook(look[1], await body(request)));
+        if (request.method === 'PATCH' && look) return json(response, 200, await current.updateLook(look[1], await body(request, current.uploadRequestLimit())));
         if (request.method === 'DELETE' && look) return json(response, 200, current.removeLook(look[1], await body(request)));
-        const asset = /^\/assets\/([^/]+)$/.exec(path);
+        const asset = /^\/assets\/([^/]+)(?:\/(display|reference)\/([^/]+))?$/.exec(path);
         if (asset && ['GET', 'HEAD'].includes(request.method ?? '')) {
-          const image = current.asset(asset[1]);
+          const image = current.assetResource(asset[1], asset[2], asset[3]);
           response.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.data.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
           return response.end(request.method === 'HEAD' ? undefined : image.data);
         }

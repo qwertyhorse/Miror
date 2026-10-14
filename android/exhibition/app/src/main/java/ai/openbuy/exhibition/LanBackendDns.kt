@@ -1,0 +1,185 @@
+package ai.openbuy.exhibition
+
+import android.content.Context
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.os.ext.SdkExtensions
+import okhttp3.Dns
+import java.net.InetAddress
+import java.net.UnknownHostException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+
+/** Resolve only the fixed LAN backend; retain the URL, HTTP Host and TLS server name. */
+internal class LanBackendDns(context: Context, fallbackIpv4: String? = null) : Dns {
+    private val application = context.applicationContext
+    private val resolver = LanBackendResolver(
+        systemLookup = { Dns.SYSTEM.lookup(it) },
+        discover = { LanNsdDiscovery(application).discover() },
+        fallbackIpv4 = fallbackIpv4,
+    )
+
+    @Throws(UnknownHostException::class)
+    override fun lookup(hostname: String): List<InetAddress> = resolver.lookup(hostname)
+}
+
+/** A legacy NSD resolve cannot be cancelled on Android 9; retain its gate until its callback. */
+private object LanNsdResolutionGate {
+    val active = AtomicReference<NsdManager.ResolveListener?>()
+}
+
+@Suppress("DEPRECATION")
+private class LanNsdDiscovery(private val application: Context) {
+    private val nsd = application.getSystemService(Context.NSD_SERVICE) as? NsdManager
+    private val monitor = Any()
+    private val completion = CountDownLatch(1)
+    private var closed = false
+    private var discoveryRegistered = false
+    private var stopRequested = false
+    private var result: InetAddress? = null
+    private var resolution: NsdManager.ResolveListener? = null
+
+    private val discovery = object : NsdManager.DiscoveryListener {
+        override fun onDiscoveryStarted(serviceType: String) {
+            if (synchronized(monitor) { closed }) stopDiscovery()
+        }
+
+        override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+            synchronized(monitor) { discoveryRegistered = false }
+            finish(null)
+        }
+
+        override fun onDiscoveryStopped(serviceType: String) {
+            synchronized(monitor) { discoveryRegistered = false }
+            finish(null)
+        }
+
+        override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+            // The legacy framework removes the listener for this callback too.
+            synchronized(monitor) { discoveryRegistered = false }
+            finish(null)
+        }
+
+        override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
+
+        override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+            if (!isBackendService(serviceInfo)) return
+            synchronized(monitor) {
+                if (closed || resolution != null) return
+                val listener = object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+                        LanNsdResolutionGate.active.compareAndSet(this, null)
+                        finish(null)
+                    }
+
+                    override fun onServiceResolved(info: NsdServiceInfo) {
+                        LanNsdResolutionGate.active.compareAndSet(this, null)
+                        val addresses = if (supportsResolutionStop()) info.hostAddresses else listOfNotNull(info.host)
+                        val address = addresses.firstOrNull(LanBackendAddress::isPrivateIpv4)
+                        finish(address?.takeIf { isBackendService(info) && info.port == BACKEND_PORT })
+                    }
+
+                    override fun onResolutionStopped(info: NsdServiceInfo) {
+                        LanNsdResolutionGate.active.compareAndSet(this, null)
+                    }
+                }
+                if (!LanNsdResolutionGate.active.compareAndSet(null, listener)) return
+                resolution = listener
+                try {
+                    nsd?.resolveService(serviceInfo, listener)
+                } catch (_: RuntimeException) {
+                    LanNsdResolutionGate.active.compareAndSet(listener, null)
+                    finish(null)
+                }
+            }
+        }
+    }
+
+    fun discover(): InetAddress? {
+        if (nsd == null) return null
+        var multicast: WifiManager.MulticastLock? = null
+        try {
+            // Before T extension 7 NSD needs multicast reception even while foregrounded.
+            if (!supportsResolutionStop()) {
+                val wifi = application.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                multicast = wifi?.createMulticastLock("openbuy-lan-discovery")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
+            synchronized(monitor) { discoveryRegistered = true }
+            try {
+                nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discovery)
+            } catch (_: RuntimeException) {
+                synchronized(monitor) { discoveryRegistered = false }
+                finish(null)
+            }
+            completion.await(DISCOVERY_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } catch (_: RuntimeException) {
+            // Missing or unavailable Wi-Fi/NSD support must remain a bounded DNS failure.
+        } finally {
+            finish(null)
+            if (multicast?.isHeld == true) multicast.release()
+        }
+        return synchronized(monitor) { result }
+    }
+
+    private fun finish(address: InetAddress?) {
+        val pending: NsdManager.ResolveListener?
+        synchronized(monitor) {
+            if (closed) return
+            closed = true
+            result = address
+            pending = resolution?.takeIf { LanNsdResolutionGate.active.get() === it }
+        }
+        stopDiscovery()
+        if (pending != null && supportsResolutionStop()) {
+            try {
+                nsd?.stopServiceResolution(pending)
+            } catch (_: IllegalArgumentException) {
+                // Listener was already removed; no legacy resolution is still outstanding.
+                LanNsdResolutionGate.active.compareAndSet(pending, null)
+            } catch (_: RuntimeException) {
+                // Keep the gate until the system's eventual callback rather than overlap resolves.
+            }
+        }
+        completion.countDown()
+    }
+
+    private fun stopDiscovery() {
+        val shouldStop = synchronized(monitor) {
+            if (!discoveryRegistered || stopRequested) false else {
+                stopRequested = true
+                true
+            }
+        }
+        if (shouldStop) {
+            try {
+                nsd?.stopServiceDiscovery(discovery)
+            } catch (_: RuntimeException) {
+                synchronized(monitor) { discoveryRegistered = false }
+            }
+        }
+    }
+
+    private fun isBackendService(info: NsdServiceInfo): Boolean {
+        val type = info.serviceType.trimEnd('.')
+        return info.serviceName == "Miror" &&
+            (type.equals(SERVICE_TYPE, ignoreCase = true) || type.equals("$SERVICE_TYPE.local", ignoreCase = true))
+    }
+
+    private fun supportsResolutionStop(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            SdkExtensions.getExtensionVersion(Build.VERSION_CODES.TIRAMISU) >= 7)
+
+    private companion object {
+        const val SERVICE_TYPE = "_http._tcp"
+        const val BACKEND_PORT = 10200
+        const val DISCOVERY_TIMEOUT_MILLIS = 3_000L
+    }
+}

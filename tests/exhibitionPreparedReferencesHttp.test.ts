@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { once } from 'node:events';
+import sharp from 'sharp';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -59,4 +60,20 @@ it('notifies a waiting screen as soon as its state changes and rejects invalid r
   expect(await (await f.get(`/changes?after=${before.revision}`)).json()).toMatchObject({ revision: changed.revision });
   expect((await f.get('/changes?after=NaN')).status).toBe(400);
   abort.abort();
+});
+
+it('prepares only the independent XMAX image and binds its immutable asset to the live session', async () => {
+  const f = await fixture();
+  const image = async (color: string, width: number, height: number) => (await sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer()).toString('base64');
+  const uploaded = await f.post('/looks', { name: '双图参考验证', imageBase64: await image('#ff0000', 512, 768), referenceImageBase64: await image('#0000ff', 768, 512) });
+  expect(uploaded.status).toBe(201);
+  const look = (await uploaded.json()).looks.at(-1);
+  const [id, role, assetId] = look.referenceImage.split('/assets/')[1].split('/');
+  const expected = f.mirror.assetResource(id, role, assetId).data;
+  expect(expected).not.toEqual(f.mirror.asset(look.id).data);
+  expect((await f.post(`/references/${look.id}`)).status).toBe(200);
+  expect(f.upload).toHaveBeenCalledOnce(); expect(f.upload.mock.calls[0][0]).toEqual(expected);
+  f.mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0, enabledLookIds: [look.id] }); f.mirror.command({ action: 'begin' });
+  const result = await f.post('/live/session', { deviceId: 'dual-image-device', lookId: look.id, generationNumber: f.mirror.get().generationNumber });
+  expect(result.status).toBe(201); expect((await result.json()).referenceAsset).toBe(look.referenceImage);
 });

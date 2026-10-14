@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, GripVertical, ImagePlus, Plus, Search, Trash2, Upload, X } from 'lucide-react';
-import { EXHIBITION_FREE_PROMPT_MAX_LENGTH, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionUploadLimits } from '../../shared/exhibition';
+import { EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibitionReferenceImage, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionUploadLimits } from '../../shared/exhibition';
 import { appUrl } from '../versionScope';
 import { looksFor } from './catalog';
 import type { ExhibitionController } from './useExhibition';
@@ -36,13 +36,74 @@ function toBase64(file: File) {
   });
 }
 
+function materialName(file: File): string {
+  return file.name.replace(/\.(jpe?g|png|webp)$/i, '').normalize('NFC').replace(/\p{Cc}/gu, '').trim()
+    .slice(0, 40).replace(/[\uD800-\uDBFF]$/u, '').trim() || '未命名素材';
+}
+
+function useMaterialImage(limits: ExhibitionUploadLimits) {
+  const [file, setFile] = useState<File | null>(null);
+  const [inspection, setInspection] = useState<{ file: File | null; preview: string; size: { width: number; height: number } | null; error: string; reading: boolean }>({ file: null, preview: '', size: null, error: '', reading: false });
+  const limitsKey = JSON.stringify(limits);
+  useEffect(() => {
+    const empty = { file, preview: '', size: null, error: '', reading: false };
+    if (!file) { setInspection(empty); return; }
+    const rule = JSON.parse(limitsKey) as ExhibitionUploadLimits;
+    const validation = validateFile(file, rule);
+    if (validation) { setInspection({ ...empty, error: validation }); return; }
+    const url = URL.createObjectURL(file); let stopped = false;
+    setInspection({ ...empty, preview: url, reading: true });
+    void imageSize(url).then(size => {
+      if (stopped) return;
+      const error = size.width < rule.minWidth || size.width > rule.maxWidth || size.height < rule.minHeight || size.height > rule.maxHeight
+        ? `当前 ${size.width} × ${size.height} px。宽度需为 ${rule.minWidth}–${rule.maxWidth} px，高度需为 ${rule.minHeight}–${rule.maxHeight} px。`
+        : size.width * size.height > 32000000 ? '图片总像素不能超过 3200 万。' : '';
+      setInspection({ file, preview: url, size: error ? null : size, error, reading: false });
+    }).catch(cause => {
+      if (!stopped) setInspection({ ...empty, preview: url, error: cause instanceof Error ? cause.message : '图片读取失败。' });
+    });
+    return () => { stopped = true; URL.revokeObjectURL(url); };
+  }, [file, limitsKey]);
+  // A newly chosen file must never inherit the preceding file's validation.
+  const current = inspection.file === file ? inspection : { preview: '', size: null, error: '', reading: !!file };
+  return { ...current, file, setFile, valid: !!file && !!current.size && !current.error && !current.reading };
+}
+
+function MaterialImageField({ label, image, existing, disabled, required, promptOnly = false, onChange }: {
+  label: string; image: ReturnType<typeof useMaterialImage>; existing?: string | null;
+  disabled: boolean; required: boolean; promptOnly?: boolean; onChange: () => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const errorId = useId();
+  const source = image.file ? image.preview : existing ? appUrl(existing) : '';
+  function choose(file: File | null) {
+    if (disabled) return;
+    image.setFile(file); onChange();
+  }
+  return <div className="ex-image-field">
+    <div className="ex-image-label"><span>{label}</span>{required && !existing ? <small>必填</small> : promptOnly ? <small>可选</small> : null}</div>
+    <div className="ex-upload-preview">{source ? <img src={source} alt={label} /> : <><ImagePlus size={32} /><span>{promptOnly ? '仅提示词' : label}</span></>}</div>
+    <label className="ex-file-picker"><Upload size={16} />{source || image.file ? '更换图片' : '选择图片'}<input ref={input} aria-label={`${label}文件`} aria-describedby={image.error ? errorId : undefined} aria-invalid={!!image.error} required={required && !existing} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" disabled={disabled} onChange={event => {
+      const selected = event.target.files?.[0];
+      if (selected) choose(selected);
+    }} /></label>
+    {image.reading && <p className="ex-form-note" role="status">正在检查图片…</p>}
+    {image.file && image.size && <p className="ex-file-accepted"><Check size={14} />{image.size.width} × {image.size.height} px · {(image.file.size / 1024 / 1024).toFixed(2)} MB</p>}
+    {image.error && <p id={errorId} className="ex-field-error" role="alert">{image.error}</p>}
+    {image.file && <button type="button" className="ex-image-reset" disabled={disabled} aria-label={`${existing ? '撤销更换' : '移除'}${label}`} onClick={() => { if (disabled) return; if (input.current) input.current.value = ''; choose(null); }}>{existing ? '撤销更换' : '移除图片'}</button>}
+  </div>;
+}
+
 function useEditorDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const element = dialog.current;
     element?.showModal();
-    element?.querySelector<HTMLInputElement>('input[type="text"]')?.focus({ preventScroll: true });
+    const firstControl = element?.querySelector<HTMLInputElement>('input[type="file"]:not(:disabled)')
+      ?? element?.querySelector<HTMLElement>('[autofocus]:not(:disabled)')
+      ?? element?.querySelector<HTMLButtonElement>('button:not(:disabled)');
+    firstControl?.focus({ preventScroll: true });
     return () => { element?.close(); if (previousFocus?.isConnected && !previousFocus.matches(':disabled')) previousFocus.focus({ preventScroll: true });
       else document.querySelector<HTMLInputElement>('.ex-library-search input')?.focus({ preventScroll: true }); };
   }, []);
@@ -55,88 +116,72 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
 }) {
   const { state, pending, connected, upload, updateLook, deleteLook } = controller;
   const [baseline] = useState(state!.revision);
-  const [name, setName] = useState(look?.name ?? '');
   const [mode, setMode] = useState(look?.mode ?? initialMode);
   const [prompt, setPrompt] = useState(look?.prompt ?? '');
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState('');
-  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
-  const [fileError, setFileError] = useState('');
   const [error, setError] = useState('');
-  const [reading, setReading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const saving = useRef(false);
   const [deleteConfirm, setDeleteConfirm] = useState(initialDelete);
   const alive = useRef(true);
   const dialog = useEditorDialog();
   const limits = state!.settings.uploadLimits;
-  const limitsKey = JSON.stringify(limits);
+  const displayImage = useMaterialImage(limits);
+  const referenceImage = useMaterialImage(limits);
+  const existingReference = look ? exhibitionReferenceImage(look) : null;
+  const promptOnly = look?.referenceKind === 'none' && mode === 'free' && !referenceImage.file;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  useEffect(() => {
-    setSize(null); setFileError('');
-    if (!file) { setPreview(''); setReading(false); return; }
-    const rule = JSON.parse(limitsKey) as ExhibitionUploadLimits;
-    const validation = validateFile(file, rule);
-    if (validation) { setFileError(validation); setPreview(''); setReading(false); return; }
-    const url = URL.createObjectURL(file); let stopped = false;
-    setPreview(url); setReading(true);
-    void imageSize(url).then(value => {
-      if (stopped) return;
-      if (value.width < rule.minWidth || value.width > rule.maxWidth || value.height < rule.minHeight || value.height > rule.maxHeight) {
-        setFileError(`当前 ${value.width} × ${value.height} px。宽度需为 ${rule.minWidth}–${rule.maxWidth} px，高度需为 ${rule.minHeight}–${rule.maxHeight} px。`);
-      } else if (value.width * value.height > 32000000) setFileError('图片总像素不能超过 3200 万。');
-      else setSize(value);
-    }).catch(cause => { if (!stopped) setFileError(cause instanceof Error ? cause.message : '图片读取失败。'); })
-      .finally(() => { if (!stopped) setReading(false); });
-    return () => { stopped = true; URL.revokeObjectURL(url); };
-  }, [file, limitsKey]);
   const configurable = ['idle', 'select'].includes(state!.phase) && !state!.live;
   const unavailable = pending || submitting || !connected || (!!look && !configurable);
-  const valid = !!name.trim() && (mode !== 'free' || !!prompt.trim());
+  const valid = mode !== 'free' || !!prompt.trim();
+  const displayValid = displayImage.file ? displayImage.valid : !!look?.image;
+  const referenceValid = referenceImage.file ? referenceImage.valid : !!existingReference || promptOnly;
   async function remove() {
-    if (!look || unavailable) return;
+    if (!look || unavailable || saving.current) return;
+    saving.current = true;
     setSubmitting(true); setError('');
     try { if (await deleteLook(look.id, { expectedRevision: baseline }) && alive.current) deleted(); }
-    finally { if (alive.current) setSubmitting(false); }
+    finally { saving.current = false; if (alive.current) setSubmitting(false); }
   }
   async function submit(event: FormEvent) {
     event.preventDefault(); setError('');
-    if (unavailable || deleteConfirm || !valid) return;
-    if (!look && (!file || !size || fileError)) { setError('请先选择符合限制的素材图片。'); return; }
+    if (unavailable || saving.current || deleteConfirm || !valid) return;
+    if (!displayValid || !referenceValid) { setError(`请选择符合限制的${!displayValid ? '展示图' : ' XMAX 参考图'}。`); return; }
+    saving.current = true;
     setSubmitting(true);
     try {
-      const input = { name: name.trim(), description: look?.description ?? '', mode, prompt: mode === 'free' ? prompt.trim() : '',
-        ...(look?.referenceKind === 'none' ? { referenceKind: mode === 'free' ? 'none' as const : 'image' as const } : {}) };
+      const [imageBase64, referenceImageBase64] = await Promise.all([
+        displayImage.file ? toBase64(displayImage.file) : undefined,
+        referenceImage.file ? toBase64(referenceImage.file) : undefined,
+      ]);
+      if (!alive.current) return;
+      const input = { name: look?.name ?? materialName(displayImage.file!), description: look?.description ?? '', mode, prompt: mode === 'free' ? prompt.trim() : '',
+        ...(look?.referenceKind === 'none' ? { referenceKind: promptOnly ? 'none' as const : 'image' as const } : {}) };
       if (look) {
-        if (await updateLook(look.id, { ...input, expectedRevision: baseline }) && alive.current) saved(mode);
+        if (await updateLook(look.id, { ...input, ...(imageBase64 ? { imageBase64 } : {}), ...(referenceImageBase64 ? { referenceImageBase64 } : {}), expectedRevision: baseline }) && alive.current) saved(mode);
       } else {
-        const imageBase64 = await toBase64(file!);
-        if (!alive.current) return;
-        if (await upload({ ...input, imageBase64 }) && alive.current) saved(mode);
+        if (await upload({ ...input, imageBase64: imageBase64!, referenceImageBase64: referenceImageBase64! }) && alive.current) saved(mode);
       }
     } catch (cause) { if (alive.current) setError(cause instanceof Error ? cause.message : '保存失败，请重试。'); }
-    finally { if (alive.current) setSubmitting(false); }
+    finally { saving.current = false; if (alive.current) setSubmitting(false); }
   }
   return <dialog ref={dialog} className={`ex-editor-dialog${deleteConfirm ? ' ex-delete-dialog' : ''}`} aria-label={deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传素材'} onCancel={event => { event.preventDefault(); if (!submitting && !pending) close(); }}><form className="ex-look-editor" onSubmit={event => void submit(event)} aria-label={deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传素材'}>
-    <div className="ex-editor-heading"><h3>{deleteConfirm ? '删除素材' : look ? '编辑素材信息' : '上传新素材'}</h3><button type="button" className="ex-icon-button" onClick={close} disabled={submitting || pending} aria-label={deleteConfirm ? '关闭删除确认' : '关闭素材编辑'}><X size={18} /></button></div>
+    <div className="ex-editor-heading"><h3>{deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传新素材'}</h3><button type="button" className="ex-icon-button" onClick={close} disabled={submitting || pending} aria-label={deleteConfirm ? '关闭删除确认' : '关闭素材编辑'}><X size={18} /></button></div>
     {deleteConfirm && look ? <div className="ex-delete-preview"><img src={appUrl(look.image)} alt={`${look.name}素材`} /><div><strong>{look.name}</strong><p>{experienceModeLabel(look.mode)} · {look.source === 'upload' ? '上传素材' : '示例素材'}</p></div></div> : <div className="ex-editor-grid">
-      <div>
-        <div className="ex-upload-preview">{look || preview ? <img src={look ? appUrl(look.image) : preview} alt="待保存的素材" /> : <><ImagePlus size={32} /><span>选择素材图片</span></>}</div>
-        {!look && <label className="ex-file-picker"><Upload size={16} />{file ? '重新选择图片' : '选择图片'}<input aria-label="素材图片文件" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" disabled={unavailable} onChange={event => { setFile(event.target.files?.[0] ?? null); setError(''); }} /></label>}
-        {!look && <p className="ex-form-note">JPG / PNG / WebP · ≤ {limits.maxFileSizeMB} MB<br />宽 {limits.minWidth}–{limits.maxWidth} px · 高 {limits.minHeight}–{limits.maxHeight} px</p>}
-        {reading && <p className="ex-form-note" role="status">正在检查图片…</p>}
-        {file && size && <p className="ex-file-accepted"><Check size={14} />{size.width} × {size.height} px · {(file.size / 1024 / 1024).toFixed(2)} MB</p>}
-        {fileError && <p className="ex-field-error" role="alert">{fileError}</p>}
+      <div className="ex-editor-images">
+        <div className="ex-image-pair">
+          <MaterialImageField label="展示图" image={displayImage} existing={look?.image} disabled={unavailable} required={!look} onChange={() => setError('')} />
+          <MaterialImageField label="XMAX 参考图" image={referenceImage} existing={existingReference} disabled={unavailable} required={!promptOnly} promptOnly={promptOnly} onChange={() => setError('')} />
+        </div>
+        <p className="ex-form-note">JPG / PNG / WebP · 每张 ≤ {limits.maxFileSizeMB} MB<br />宽 {limits.minWidth}–{limits.maxWidth} px · 高 {limits.minHeight}–{limits.maxHeight} px</p>
       </div>
       <fieldset disabled={unavailable} className="ex-editor-fields">
-        <label>素材名称<input type="text" required maxLength={40} value={name} placeholder="为素材起一个易辨认的名称" onChange={event => setName(event.target.value)} /></label>
         <ExperienceModeChips label="所属模式" value={mode} onChange={setMode} disabled={unavailable} />
-        {look?.referenceKind === 'none' && <p className="ex-form-note">{mode === 'free' ? '仅提示词素材：封面用于列表展示，生成时只使用提示词。' : '保存到此模式后，当前封面将作为生成参考图。'}</p>}
-        {mode === 'free' ? <label>Free 提示词 <small>必填</small><textarea required maxLength={EXHIBITION_FREE_PROMPT_MAX_LENGTH} rows={4} value={prompt} placeholder="描述希望生成的画面和素材使用方式" onChange={event => setPrompt(event.target.value)} /><span className="ex-form-note">此提示词只用于这份 Free 素材，最多 {EXHIBITION_FREE_PROMPT_MAX_LENGTH} 字。</span></label> : <p className="ex-mode-preset">{experienceModeLabel(mode)} 使用系统预设提示词。</p>}
+        {mode === 'free' && <label>Free 提示词 <small>必填</small><textarea required maxLength={EXHIBITION_FREE_PROMPT_MAX_LENGTH} rows={4} value={prompt} placeholder="描述希望生成的画面和素材使用方式" onChange={event => setPrompt(event.target.value)} /></label>}
       </fieldset>
     </div>}
     {(error || controller.error) && <p className="ex-field-error" role="alert">{error || controller.error}</p>}
     {deleteConfirm && look ? <div className="ex-delete-confirm" role="group" aria-label="删除素材确认"><strong>确认删除「{look.name}」？</strong><p>删除后将从本设备素材库移除，无法撤销。{state!.enabledLookIds.includes(look.id) && '大屏将同步停止提供这份素材。'}</p>{!configurable && <p role="status">体验进行中，请结束体验并等待实时会话停止后再删除。</p>}<div><button type="button" className="ex-button" autoFocus disabled={submitting || pending} onClick={() => initialDelete ? close() : setDeleteConfirm(false)}>保留素材</button><button type="button" className="ex-button ex-delete-button" disabled={unavailable} onClick={() => void remove()}>{submitting || pending ? '正在删除…' : '确认删除'}</button></div></div>
-      : <div className="ex-editor-footer"><p>{look ? '启用状态保持不变。修改模式后，素材仅在新模式中展示。' : '上传成功后默认停用；启用后会在对应模式的大屏中展示。'}</p>{look && <button type="button" className="ex-button ex-delete-button" disabled={unavailable} onClick={() => setDeleteConfirm(true)}><Trash2 size={15} />删除素材</button>}<button type="button" className="ex-button" disabled={submitting || pending} onClick={close}>取消</button><button className="ex-button ex-primary" disabled={unavailable || reading || !valid || (!look && (!size || !!fileError))}>{submitting || pending ? '正在保存…' : look ? '保存素材' : '上传并保存'}</button></div>}
+      : <div className="ex-editor-footer">{look && <button type="button" className="ex-button ex-delete-button" disabled={unavailable} onClick={() => setDeleteConfirm(true)}><Trash2 size={15} />删除素材</button>}<button type="button" className="ex-button" disabled={submitting || pending} onClick={close}>取消</button><button className="ex-button ex-primary" disabled={unavailable || !valid || !displayValid || !referenceValid}>{submitting || pending ? '正在保存…' : look ? '保存素材' : '上传并保存'}</button></div>}
   </form></dialog>;
 }
 
@@ -160,7 +205,7 @@ function WardrobeContent({ controller, onSummaryChange }: WardrobePanelProps) {
   const orderHintId = useId();
   useEffect(() => { if (results.current) results.current.scrollTop = 0; }, [mode, query]);
   const looks = state ? looksFor(state) : [];
-  const referenceCatalogKey = JSON.stringify(looks.map(look => [look.id, look.image, look.referenceKind]));
+  const referenceCatalogKey = JSON.stringify(looks.map(look => [look.id, exhibitionReferenceImage(look), look.referenceKind]));
   const preparation = useReferencePreparation(controller.mirrorId, referenceCatalogKey, !!state?.looks);
   const modeLooks = looks.filter(look => look.mode === mode);
   const configurable = !!state && ['idle', 'select'].includes(state.phase) && !state.live;

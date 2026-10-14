@@ -292,7 +292,7 @@ export class ExhibitionMirrorClient {
     });
     return created;
   };
-  updateLook = (id: string, input: ExhibitionLookInput) => this.mutate(`looks/${encodeURIComponent(id)}`, input, 'PATCH');
+  updateLook = (id: string, input: ExhibitionLookInput) => this.mutate(`looks/${encodeURIComponent(id)}`, input, 'PATCH', input.imageBase64 || input.referenceImageBase64 ? 60000 : 5000);
   deleteLook = (id: string, input: { expectedRevision?: number }) => this.mutate(`looks/${encodeURIComponent(id)}`, input, 'DELETE');
   saveTaxonomy = (input: ExhibitionTaxonomyInput) => this.mutate('taxonomy', input);
   copyData = (input: ExhibitionCopyInput) => this.mutate('copy', input, 'POST', 60000);

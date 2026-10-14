@@ -51,6 +51,12 @@ describe('mode-scoped mirror screen', () => {
     const state = fixture(); state.looks = []; state.enabledLookIds = []; state.selectedLookId = null;
     expect(renderToStaticMarkup(createElement(Kiosk, { state, passive: true }))).toContain('暂无可用素材');
   });
+  it.each(['idle', 'showcase'] as const)('keeps the display cover on the %s demo screen', phase => {
+    const state = fixture(); state.phase = phase;
+    state.looks.find(look => look.id === 'commute')!.referenceImage = '/generation-reference.png';
+    const html = renderToStaticMarkup(createElement(Kiosk, { state }));
+    expect(html).toContain('commute-cutout.png'); expect(html).not.toContain('generation-reference.png');
+  });
 });
 
 describe('mirror video state labels', () => {
@@ -146,5 +152,18 @@ describe('mirror video state labels', () => {
     expect(html).toContain('src="/input.png"');
     expect(html).not.toContain('生成结果');
     expect(badgeText(screen('showcase', { ...controller, presentation: null }, false, { experienceMode: 'mox', looks: state.looks }))).toBe('生成结果');
+  });
+  it('uses the MoX reference for its interactive fallback and the display cover before the experience', () => {
+    const state = fixture();
+    Object.assign(state.looks.find(look => look.id === 'commute')!, { mode: 'mox', referenceImage: '/generation-reference.png' });
+    const options = { experienceMode: 'mox' as const, looks: state.looks };
+    const controller = live({ cameraStream: null, status: 'connecting' });
+    const welcome = screen('idle', controller, false, options);
+    expect(welcome).toContain('commute-cutout.png'); expect(welcome).not.toContain('generation-reference.png');
+    const active = screen('generating', controller, false, options);
+    expect(active).toContain('class="mox-drag-image" src="/generation-reference.png"');
+    const presented = screen('showcase', live({ outputStream: output, presentation: { showInputImage: true, inputImageUrl: '/sdk-input.png' } as ExhibitionLiveController['presentation'] }), false, options);
+    expect(presented).toContain('class="mox-drag-image" src="/sdk-input.png"');
+    expect(presented).not.toContain('generation-reference.png');
   });
 });

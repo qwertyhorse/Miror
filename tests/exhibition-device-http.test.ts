@@ -63,7 +63,7 @@ describe('mirror terminal binding HTTP boundary', () => {
     const native = await request('/api/exhibition/native-identity');
     expect(native.status).toBe(200); expect(await native.json()).toEqual({ native: false });
     const connection = await connect(device);
-    expect(connection).toMatchObject({ terminalId: device.terminalId, mirrorId: null, code: expect.stringMatching(/^\d{6}$/), expiresAt: expect.any(Number) });
+    expect(connection).toMatchObject({ terminalId: device.terminalId, mirrorId: null, code: expect.stringMatching(/^\d{4}$/), expiresAt: expect.any(Number) });
     expect(JSON.stringify(connection)).not.toContain(device.token);
     const bound = await request(root() + '/binding', { code: connection.code });
     expect(bound.status).toBe(200); expect(await bound.json()).toMatchObject({ terminalId: device.terminalId, label: device.label, platform: 'android', online: true });
@@ -113,22 +113,24 @@ describe('mirror terminal binding HTTP boundary', () => {
     expect(issue).toHaveBeenCalledTimes(2);
   });
 
-  it('requires an idle mirror and the exact current terminal ID to unbind', async () => {
-    const { request, root, connect, mirrors, start, issue } = await fixture(); const device = terminal(); const connection = await connect(device);
+  it('allows paused offline unbinding only for the exact current terminal and rejects former credentials', async () => {
+    const { request, root, connect, mirrors, start, issue, advance } = await fixture(); const device = terminal(); const connection = await connect(device);
     mirrors.getMirror().command({ action: 'begin' });
     const busy = await request(root() + '/binding', { code: connection.code });
     expect(busy.status).toBe(409); expect(await busy.json()).toMatchObject({ code: 'EXHIBITION_MIRROR_BUSY' });
     mirrors.getMirror().command({ action: 'end' });
     expect((await request(root() + '/binding', { code: connection.code })).status).toBe(200);
     mirrors.getMirror().command({ action: 'begin' });
-    expect((await request(root() + '/binding', { terminalId: device.terminalId }, 'DELETE')).status).toBe(409);
-    mirrors.getMirror().command({ action: 'end' });
+    mirrors.getMirror().command({ action: 'pause' }); advance(31_000);
+    const before = mirrors.getMirror().get(); expect(mirrors.list().mirrors[0].binding?.online).toBe(false);
     const stale = await request(root() + '/binding', { terminalId: terminal().terminalId }, 'DELETE');
     expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ code: 'EXHIBITION_DEVICE_BINDING_CHANGED' });
     expect(mirrors.list().mirrors[0].binding?.terminalId).toBe(device.terminalId);
+    expect(mirrors.getMirror().get()).toEqual(before);
     const removed = await request(root() + '/binding', { terminalId: device.terminalId }, 'DELETE');
     expect(removed.status).toBe(200); expect(await removed.json()).toEqual({ binding: null });
     expect(mirrors.list().mirrors[0].binding).toBeNull();
+    expect(mirrors.getMirror().get()).toMatchObject({ phase: 'idle', live: null });
     const newConnection = await connect(device); expect(newConnection.mirrorId).toBeNull(); expect(newConnection.code).not.toBe(connection.code);
     const oldCode = await request(root() + '/binding', { code: connection.code });
     expect(oldCode.status).toBe(409); expect(await oldCode.json()).toMatchObject({ code: 'EXHIBITION_PAIRING_CODE_INVALID' });

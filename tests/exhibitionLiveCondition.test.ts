@@ -138,6 +138,18 @@ describe('same-session exhibition condition changes', () => {
     expect(f.sdk.set).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenLastCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.fixture/third.png' }));
   });
 
+  it('applies the latest choice without waiting for an obsolete upload', async () => {
+    const f = fixture(); await f.ready(); const obsolete = deferred<string>();
+    f.deps.upload.mockImplementationOnce(() => obsolete.promise);
+    const second = f.controller.update(f.next('second')); await flush();
+    const third = f.controller.update(f.next('third', 3)); await flush();
+    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+    expect(f.deps.conditionApplied.mock.calls[0][1].lookId).toBe('third');
+    expect(await third).toBe(true); expect(await second).toBe(false);
+    obsolete.resolve('https://reference.fixture/second.png'); await flush();
+    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+  });
+
   it('records an accepted stale bind without applying it, then validates the next reference version', async () => {
     const f = fixture(); await f.ready(); const pending = deferred<void>();
     f.deps.updateCondition.mockImplementationOnce(async (id, input) => { const result = await f.condition(id, input); await pending.promise; return result; });
@@ -165,12 +177,19 @@ describe('same-session exhibition condition changes', () => {
     expect(await f.controller.update(f.next('third', 3))).toBe(true); expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.stop).not.toHaveBeenCalled();
   });
 
-  it('retries a rejected SDK update with the idempotently bound version and cached upload', async () => {
+  it('keeps one credential and RTC for 100 consecutive accepted choices', async () => {
+    const f = fixture(); await f.ready();
+    for (let i = 0; i < 100; i++) expect(await f.controller.update(f.next(i % 2 ? 'second' : 'third', i + 2))).toBe(true);
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.sdk.set).toHaveBeenCalledTimes(101); expect(f.deps.stop).not.toHaveBeenCalled();
+  });
+  it('closes an uncertain SDK update instead of repeating a potentially accepted command', async () => {
     const f = fixture(); await f.ready(); f.sdk.set.mockRejectedValueOnce(new Error('切换请求失败。'));
     expect(await f.controller.update(f.next('second'))).toBe(false); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
-    expect(await f.controller.retryUpdate()).toBe(true);
-    expect(f.deps.upload).toHaveBeenCalledTimes(2); expect(f.deps.conditionApplied.mock.calls[0][1].referenceVersion).toBe(2);
-    expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(await f.controller.retryUpdate()).toBe(false);
+    expect(f.deps.upload).toHaveBeenCalledTimes(2); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
+    expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).toHaveBeenCalledOnce();
+    expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ reason: 'command_unknown' }));
   });
 
   it('recovers from a lost bind response without requiring a new credential or a guessed version', async () => {

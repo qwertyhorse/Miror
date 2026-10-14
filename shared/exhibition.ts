@@ -1,5 +1,7 @@
 import type { XmaxRegion } from './xmax.ts';
 import type { ExhibitionGestureSettings } from './exhibitionGestures.ts';
+import type { ExhibitionSessionLimits } from './sessionLimits.ts';
+import type { ExhibitionCameraReport, ExhibitionCameraRequest, ExhibitionCameraStatus } from './exhibitionCamera.ts';
 
 export const EXHIBITION_LOOK_IDS = ['commute', 'city', 'evening'] as const;
 export const EXHIBITION_EXPERIENCE_MODES = ['free', 'charx', 'clothx', 'vibex', 'dimx', 'mox'] as const;
@@ -25,7 +27,7 @@ export function exhibitionPromptForLook(look: { mode: ExhibitionExperienceMode; 
 /** Uploaded garments receive an opaque server-generated ID. */
 export type ExhibitionLookId = string;
 export type ExhibitionPhase = 'select' | 'positioning' | 'generating' | 'showcase' | 'paused' | 'idle';
-export type ExhibitionCommandAction = 'select' | 'begin' | 'confirm' | 'switch' | 'next' | 'previous' | 'pause' | 'resume' | 'end' | 'idle' | 'recover' | 'configure' | 'reorder';
+export type ExhibitionCommandAction = 'keepalive' | 'select' | 'begin' | 'confirm' | 'switch' | 'next' | 'previous' | 'pause' | 'resume' | 'end' | 'idle' | 'recover' | 'configure' | 'reorder';
 
 export interface ExhibitionUploadLimits {
   /** 1–20 MiB, applied to the original image bytes. */
@@ -36,12 +38,18 @@ export interface ExhibitionUploadLimits {
   minHeight: number;
   maxHeight: number;
 }
+export const EXHIBITION_DEFAULT_UPLOAD_LIMITS: Readonly<ExhibitionUploadLimits> = {
+  maxFileSizeMB: 10, minWidth: 256, maxWidth: 8192, minHeight: 256, maxHeight: 8192,
+};
 export interface ExhibitionLook {
   id: ExhibitionLookId;
   name: string;
   description: string;
   /** Version-relative URL: clients should resolve through their version-aware app URL helper. */
   image: string;
+  /** Independent XMAX input; omitted on legacy materials that reuse the display image. */
+  referenceImage?: string;
+  referenceImageInfo?: ExhibitionImageInfo;
   palette: string;
   mode: ExhibitionExperienceMode;
   /** Defaults to image. Free prompt-only presets use none; image remains a display cover. */
@@ -56,6 +64,15 @@ export interface ExhibitionLook {
   bytes?: number;
   mime?: 'image/png' | 'image/jpeg' | 'image/webp';
 }
+export interface ExhibitionImageInfo {
+  width: number;
+  height: number;
+  bytes: number;
+  mime: 'image/png' | 'image/jpeg' | 'image/webp';
+}
+export function exhibitionReferenceImage(look: Pick<ExhibitionLook, 'image' | 'referenceImage' | 'referenceKind'>): string | null {
+  return look.referenceKind === 'none' ? null : look.referenceImage ?? look.image;
+}
 export interface ExhibitionLookInput {
   name: string;
   description?: string;
@@ -65,12 +82,16 @@ export interface ExhibitionLookInput {
   category?: string;
   tags?: string[];
   expectedRevision?: number;
+  /** Optional replacements when editing an existing material. */
+  imageBase64?: string;
+  referenceImageBase64?: string;
 }
 export interface ExhibitionUploadInput extends ExhibitionLookInput {
   /** Uploads append a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock append operations. */
   expectedRevision?: number;
   /** Raw base64 or a data URL. Only fully decoded, static PNG/JPEG/WebP images are accepted. */
   imageBase64: string;
+  referenceImageBase64: string;
 }
 export interface ExhibitionTaxonomyInput {
   categories: string[];
@@ -78,6 +99,7 @@ export interface ExhibitionTaxonomyInput {
   expectedRevision?: number;
 }
 export interface ExhibitionCommand {
+  commandId?: string;
   action: ExhibitionCommandAction;
   lookId?: ExhibitionLookId;
   enabledLookIds?: ExhibitionLookId[];
@@ -93,12 +115,16 @@ export interface ExhibitionCommand {
   experienceMode?: ExhibitionExperienceMode;
   /** Selecting a built-in skin replaces any uploaded custom image. */
   uiSkinPreset?: ExhibitionUiSkinPreset;
+  /** Number of columns in the mirror's material drawer; legacy mirrors use two. */
+  materialDrawerColumns?: 1 | 2;
   /** Complete local gesture-recognition settings; an empty list disables recognition. */
   gestureRecognition?: ExhibitionGestureSettings;
+  sessionLimits?: ExhibitionSessionLimits;
   expectedRevision?: number;
 }
 
 export interface ExhibitionState {
+  lifecycle?: import('./exhibitionLifecycle.js').ExperienceLifecycle;
   /** Stable registered mirror; deviceId in live state is a separate browser lease. */
   mirrorId?: string;
   revision: number;
@@ -118,7 +144,7 @@ export interface ExhibitionState {
   generationReadyAt: number | null;
   /** Server deadline; null outside an automatic result display. */
   autoSwitchAt?: number | null;
-  settings: { autoReturnSeconds: number; uploadLimits: ExhibitionUploadLimits; switchMode?: ExhibitionSwitchMode; autoSwitchSeconds?: number; uiSkinPreset?: ExhibitionUiSkinPreset; uiSkin?: ExhibitionUiSkin | null; gestureRecognition?: ExhibitionGestureSettings };
+  settings: { autoReturnSeconds: number; uploadLimits: ExhibitionUploadLimits; switchMode?: ExhibitionSwitchMode; autoSwitchSeconds?: number; uiSkinPreset?: ExhibitionUiSkinPreset; uiSkin?: ExhibitionUiSkin | null; materialDrawerColumns?: 1 | 2; gestureRecognition?: ExhibitionGestureSettings; sessionLimits?: ExhibitionSessionLimits };
   providerMode: 'demo' | 'xmax';
   live: ExhibitionLiveState | null;
   /** Newest first. Only an explicitly enabled live mode can allocate XMAX credentials. */
@@ -142,12 +168,15 @@ export interface ExhibitionDeviceBinding {
   boundAt: number;
   lastSeenAt: number;
   online: boolean;
+  camera?: ExhibitionCameraStatus;
 }
 export interface ExhibitionDeviceConnectInput {
   terminalId: string;
   token: string;
   label: string;
   platform: 'android' | 'browser';
+  cameraCapabilities?: { version: 1 };
+  cameraReport?: ExhibitionCameraReport;
 }
 export interface ExhibitionDeviceConnection {
   terminalId: string;
@@ -155,6 +184,9 @@ export interface ExhibitionDeviceConnection {
   mirrorName?: string;
   code?: string;
   expiresAt?: number;
+  cameraBindingId?: string;
+  cameraRequest?: ExhibitionCameraRequest;
+  cameraReportAccepted?: boolean;
 }
 export interface ExhibitionMirrorList {
   defaultMirrorId: string;
@@ -166,8 +198,18 @@ export interface ExhibitionMirrorCopyInput {
   copyLooks: boolean;
   copySettings: boolean;
 }
+export interface ExhibitionLookCopyInput {
+  sourceMirrorId: string;
+  sourceLookId: ExhibitionLookId;
+  mode: ExhibitionExperienceMode;
+  expectedRevision: number;
+  /** Required when copying a non-Free material into Free. */
+  prompt?: string;
+}
 
 export interface ExhibitionLiveState {
+  controllerEpoch?: number;
+  stopReason?: import('./exhibitionLifecycle.js').StopReason;
   generationNumber: number;
   deviceId: string;
   sessionId: string | null;
@@ -179,6 +221,10 @@ export interface ExhibitionLiveState {
   error?: string;
   /** The local experience ended; the retained cloud lease is still unconfirmed. */
   localEnded?: boolean;
+  /** One planned renewal retains this device's lease until confirmed completion. */
+  renewal?: { id: string; requestedAt: number };
+  /** Derived from confirmed provider usage; never from an unexplained disconnect. */
+  renewalDue?: boolean;
 }
 export function isExhibitionLocallyEnded(state: Pick<ExhibitionState, 'phase' | 'live'>): boolean {
   return ['idle', 'select'].includes(state.phase) && state.live?.status === 'error' && state.live.localEnded === true;

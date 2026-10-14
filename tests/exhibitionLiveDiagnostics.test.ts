@@ -67,8 +67,8 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     const trace: DiagnosticEventInput[] = [];
     const f = fixture(event => trace.push(event)); await f.ready();
     const initial = trace[0].operationId;
-    expect(trace.map(event => event.type)).toEqual(['reference_started', 'reference_ready', 'upload_started', 'upload_ready',
-      'bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'session_first_frame']);
+    expect(trace.map(event => event.type)).toEqual(['experience_started', 'reference_started', 'reference_ready', 'credential_started', 'credential_ready', 'upload_started', 'upload_ready',
+      'bind_started', 'bind_ready', 'rtc_started', 'rtc_ready', 'sdk_set_started', 'sdk_set_resolved', 'session_first_frame']);
     f.advance(700); expect(await f.controller.update(f.next('second'))).toBe(true);
     f.controller.reportRenderedFrame(f.output); f.callbacks().onRemoteVideoFirstFrame(); await flush();
     expect(trace.filter(event => event.type === 'session_first_frame')).toHaveLength(1);
@@ -151,15 +151,15 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     expect(f.deps.upload).toHaveBeenCalledTimes(2);
   });
 
-  it('records sanitized failure reasons and permits a new retry operation', async () => {
+  it('records sanitized failure reasons and forbids repeating an uncertain operation', async () => {
     const trace: DiagnosticEventInput[] = []; const f = fixture(event => trace.push(event)); await f.ready();
     f.sdk.set.mockRejectedValueOnce(new Error('https://private.fixture?token=secret-error'));
     expect(await f.controller.update(f.next('second'))).toBe(false);
     const failed = trace.find(event => event.type === 'failed')!;
-    expect(failed).toMatchObject({ reason: 'update_error', context: { lookId: 'second', generationNumber: 2, referenceVersion: 2 } });
+    expect(failed).toMatchObject({ reason: 'command_unknown', context: { lookId: 'second', generationNumber: 2, referenceVersion: 2 } });
     expect(JSON.stringify(trace)).not.toContain('secret-error');
-    expect(await f.controller.retryUpdate()).toBe(true);
-    expect(trace.find(event => event.type === 'condition_committed')?.operationId).not.toBe(failed.operationId);
+    expect(await f.controller.retryUpdate()).toBe(false);
+    expect(trace.find(event => event.type === 'condition_committed')).toBeUndefined();
   });
 
   it('does not change session, upload or condition calls when diagnostics are absent or throw', async () => {

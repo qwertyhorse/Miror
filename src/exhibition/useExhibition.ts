@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { appUrl } from '../versionScope';
 import { exhibitionApiPath } from './mirrorApi';
-import { isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionLookInput, type ExhibitionUploadInput, type ExhibitionTaxonomyInput } from '../../shared/exhibition';
+import { isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionLookInput, type ExhibitionLookCopyInput, type ExhibitionUploadInput, type ExhibitionTaxonomyInput } from '../../shared/exhibition';
 
-interface RequestScope { epoch: number; controller: AbortController; busy: boolean; }
+interface RequestScope { epoch: number; controller: AbortController; busy: boolean; changes?: boolean; }
 interface ExhibitionSnapshot { state: ExhibitionState | null; pending: boolean; selectionPending: boolean; stopPending: boolean; connected: boolean; error: string; }
 export interface ExhibitionCommandObservation {
   type: 'sent' | 'accepted' | 'rejected' | 'cancelled';
@@ -72,7 +72,7 @@ export class ExhibitionMirrorClient {
     intent.cancelled = true; this.observe(intent, 'cancelled');
   }
   private intent(command: ExhibitionCommand, state: ExhibitionState, observer?: ExhibitionCommandObserver): CommandIntent {
-    return { command, state, observer, attempt: 0, settled: false, cancelled: false };
+    return { command: { ...command, commandId: command.commandId ?? globalThis.crypto?.randomUUID?.() ?? `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}` }, state, observer, attempt: 0, settled: false, cancelled: false };
   }
   private url(path = '') { return appUrl(`/api${exhibitionApiPath(path, this.mirrorId)}`); }
   private adopt(next: ExhibitionState, scope: RequestScope) {
@@ -85,10 +85,16 @@ export class ExhibitionMirrorClient {
       ...(acceptsState ? { state: next } : {}) });
     this.refreshError = '';
   }
-  private async refreshScope(scope: RequestScope) {
+  private async refreshScope(scope: RequestScope, waitForChange = false): Promise<void> {
     if (!this.current(scope)) return;
     try {
-      const { ok, result } = await timedJson(this.url(), scope, { cache: 'no-store' });
+      const revision = this.snapshot.state?.revision;
+      const waiting = waitForChange && scope.changes !== false && revision !== undefined;
+      const { ok, result } = await timedJson(waiting ? this.url(`changes?after=${revision}`) : this.url(), scope, { cache: 'no-store' }, waiting ? 10_000 : 5_000);
+      if (waiting && !ok && (result.code === 'NOT_FOUND' || result.error?.code === 'NOT_FOUND')) {
+        scope.changes = false; return this.refreshScope(scope);
+      }
+      if (waiting && ok) scope.changes = true;
       if (!ok) throw new Error(result.message ?? '后台暂时未连接');
       this.adopt(result as ExhibitionState, scope);
     } catch (cause) {
@@ -105,8 +111,8 @@ export class ExhibitionMirrorClient {
     this.scope = scope;
     this.publish({ pending: false, selectionPending: false, stopPending: false, connected: false, error: '' });
     const poll = async () => {
-      await this.refreshScope(scope);
-      if (this.current(scope)) this.timer = setTimeout(poll, 850);
+      await this.refreshScope(scope, true);
+      if (this.current(scope)) this.timer = setTimeout(poll, scope.changes && this.snapshot.connected ? 25 : 850);
     };
     void poll();
   }
@@ -194,7 +200,8 @@ export class ExhibitionMirrorClient {
       if (observer && state) this.cancel(this.intent(input as ExhibitionCommand, state, observer));
       return false;
     }
-    const intent = observer ? this.intent(input as ExhibitionCommand, state, observer) : undefined;
+    const intent = path === 'command' ? this.intent(input as ExhibitionCommand, state, observer) : undefined;
+    const payload = intent?.command ?? input;
     if (intent) this.activeMutation = intent;
     let rejectionObserved = false;
     scope.busy = true;
@@ -207,13 +214,13 @@ export class ExhibitionMirrorClient {
       }
       const { ok, result } = await timedJson(this.url(path), scope, {
         method, headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(withRevision ? { ...input, expectedRevision: input.expectedRevision ?? state.revision } : input),
+        body: JSON.stringify(withRevision ? { ...payload, expectedRevision: input.expectedRevision ?? state.revision } : payload),
       }, timeout);
       if (!this.current(scope)) return false;
       if (!ok) {
         if (intent) this.observe(intent, 'rejected'); rejectionObserved = true;
         await this.refreshScope(scope);
-        throw new Error(result.code === 'EXHIBITION_STALE_REVISION' && input.expectedRevision !== undefined ? (path === 'skin' ? method === 'DELETE' ? '后台状态已变化，请核对当前皮肤后再恢复默认。' : '后台状态已变化，请重新选择皮肤后再保存。' : method === 'DELETE' ? '后台状态已变化，请重新打开素材后再删除。' : 'action' in input && input.action === 'confirm' ? '状态已更新，请重新开始。' : '后台状态已变化。请重新打开编辑区域，核对最新内容后再保存。') : result.message ?? '操作未完成，请重试。');
+        throw new Error(result.code === 'EXHIBITION_STALE_REVISION' && input.expectedRevision !== undefined ? (path === 'copy' || path === 'looks/copy' ? '目标智能镜已更新，请刷新并核对后再复制。' : path === 'skin' ? method === 'DELETE' ? '后台状态已变化，请核对当前皮肤后再恢复默认。' : '后台状态已变化，请重新选择皮肤后再保存。' : method === 'DELETE' ? '后台状态已变化，请重新打开素材后再删除。' : 'action' in input && input.action === 'confirm' ? '状态已更新，请重新开始。' : '后台状态已变化。请重新打开编辑区域，核对最新内容后再保存。') : result.message ?? '操作未完成，请重试。');
       }
       if (((result as ExhibitionState).mirrorId ?? 'default') !== this.mirrorId) throw new Error('后台返回的试衣镜不匹配，请检查当前入口。');
       if (intent) { intent.settled = true; this.observe(intent, 'accepted', result as ExhibitionState); }
@@ -240,7 +247,7 @@ export class ExhibitionMirrorClient {
       if (observer) this.cancel(this.intent({ action }, this.snapshot.state, observer));
       return this.stopping.promise;
     }
-    const intent = observer ? this.intent({ action }, this.snapshot.state, observer) : undefined;
+    const intent = this.intent({ action }, this.snapshot.state, observer);
     // Stop takes priority over an in-flight start, upload or selection. Their
     // late responses cannot revive this request epoch or overwrite its result.
     this.stop(); this.start();
@@ -249,9 +256,9 @@ export class ExhibitionMirrorClient {
     let rejectionObserved = false;
     const promise = (async () => {
       try {
-        if (intent) { intent.attempt = 1; intent.sentCommand = { action }; this.observe(intent, 'sent'); }
+        if (intent) { intent.attempt = 1; intent.sentCommand = intent.command; this.observe(intent, 'sent'); }
         const { ok, result } = await timedJson(this.url('command'), scope, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(intent.command),
         }, 15000);
         if (!this.current(scope)) return false;
         if (!ok) { if (intent) this.observe(intent, 'rejected'); rejectionObserved = true; await this.refreshScope(scope); throw new Error(STOP_UNCONFIRMED); }
@@ -286,10 +293,18 @@ export class ExhibitionMirrorClient {
     });
     return created;
   };
-  updateLook = (id: string, input: ExhibitionLookInput) => this.mutate(`looks/${encodeURIComponent(id)}`, input, 'PATCH');
+  updateLook = (id: string, input: ExhibitionLookInput) => this.mutate(`looks/${encodeURIComponent(id)}`, input, 'PATCH', input.imageBase64 || input.referenceImageBase64 ? 60000 : 5000);
   deleteLook = (id: string, input: { expectedRevision?: number }) => this.mutate(`looks/${encodeURIComponent(id)}`, input, 'DELETE');
   saveTaxonomy = (input: ExhibitionTaxonomyInput) => this.mutate('taxonomy', input);
   copyData = (input: ExhibitionCopyInput) => this.mutate('copy', input, 'POST', 60000);
+  copyLook = async (input: ExhibitionLookCopyInput): Promise<{ lookId: string; index: number } | null> => {
+    let created: { lookId: string; index: number } | null = null;
+    await this.mutate('looks/copy', input, 'POST', 60000, true, next => {
+      const index = next.looks.length - 1;
+      if (next.looks[index]) created = { lookId: next.looks[index].id, index };
+    });
+    return created;
+  };
   uploadUiSkin = (input: ExhibitionUiSkinUploadInput) => this.mutate('skin', input, 'POST', 60000);
   removeUiSkin = (input: { expectedRevision?: number } = {}) => this.mutate('skin', input, 'DELETE');
   clearError = () => this.publish({ error: '' });
@@ -300,7 +315,7 @@ export function useExhibition(mirrorId = 'default') {
   const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   useEffect(() => { client.start(); return () => client.stop(); }, [client]);
   return { ...snapshot, pending: snapshot.pending || snapshot.stopPending, mirrorId, send: client.send, sendDiagnosed: client.sendDiagnosed, stopExperience: client.stopExperience, upload: client.upload, updateLook: client.updateLook, deleteLook: client.deleteLook,
-    saveTaxonomy: client.saveTaxonomy, copyData: client.copyData, uploadUiSkin: client.uploadUiSkin, removeUiSkin: client.removeUiSkin,
+    saveTaxonomy: client.saveTaxonomy, copyData: client.copyData, copyLook: client.copyLook, uploadUiSkin: client.uploadUiSkin, removeUiSkin: client.removeUiSkin,
     refresh: client.refresh, clearError: client.clearError };
 }
 export type ExhibitionController = ReturnType<typeof useExhibition>;

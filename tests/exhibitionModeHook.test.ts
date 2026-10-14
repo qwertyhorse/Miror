@@ -37,12 +37,12 @@ async function fixture(initial = state(), renderKiosk = false, initialSelectionP
   const sdk = { getSessionUid: () => 'provider', disconnect: vi.fn(async () => {}), set: vi.fn(async () => {}),
     media: { streamSetting: { width: 512, height: 768 } }, beginDrag: vi.fn(), endDrag: vi.fn(), sendTracks: vi.fn(async () => {}) };
   const connect = vi.fn(async (_source: unknown, options: any) => { callbacks.push(options); return sdk; });
-  const upload = vi.fn(async () => ({ url: 'https://mock.test/ref.png' }));
+  const upload = vi.fn(async (_file: File) => ({ url: 'https://mock.test/ref.png' }));
   mocks.createXmaxClient.mockReturnValue({ files: { uploadAndCheckImage: upload }, realtime: { connectMedia: connect, connect } });
   let session: any;
   let count = 0;
   const create = vi.fn((input: any) => {
-    session = { id: `session-${++count}`, token: 'test-only', model: 'x2.0', sourceKind: snapshot.experienceMode === 'mox' ? 'photo' : 'camera', referenceAsset: snapshot.looks[0].referenceKind === 'none' ? '' : '/test.png', refImageUrl: '', referenceVersion: 0, expiresAt: new Date(Date.now() + 120000).toISOString(),
+    session = { id: `session-${++count}`, token: 'test-only', model: 'x2.0', sourceKind: snapshot.experienceMode === 'mox' ? 'photo' : 'camera', referenceAsset: snapshot.looks[0].referenceKind === 'none' ? '' : snapshot.looks[0].referenceImage ?? snapshot.looks[0].image, refImageUrl: '', referenceVersion: 0, expiresAt: new Date(Date.now() + 120000).toISOString(),
       exhibition: { mirrorId: 'default', deviceId: input.deviceId, lookId: 'look', sessionNumber: snapshot.sessionNumber, generationNumber: snapshot.generationNumber, mode: snapshot.experienceMode, prompt: exhibitionPromptForLook(snapshot.looks[0]) } };
     return session;
   });
@@ -81,7 +81,7 @@ describe('live hook effects for MoX and mode changes', () => {
 
   it('passes a prompt-only Free look through camera connection without uploading its display cover', async () => {
     const initial = state('free');
-    initial.looks[0] = { ...initial.looks[0], prompt: '保持动作，背景变成童话森林', referenceKind: 'none' };
+    initial.looks[0] = { ...initial.looks[0], prompt: '保持动作，背景变成童话森林', referenceKind: 'none', referenceImage: '/unused-reference.png' };
     const f = await fixture(initial);
     const track = { readyState: 'live', stop: vi.fn(), getSettings: () => ({ deviceId: 'camera-a' }), clone: vi.fn(), onended: null };
     track.clone.mockReturnValue({ ...track, stop: vi.fn() });
@@ -110,6 +110,17 @@ describe('live hook effects for MoX and mode changes', () => {
     await act(async () => { await f.live.startCamera(); });
     expect(f.media.getUserMedia).not.toHaveBeenCalled();
     expect(f.connect.mock.calls[0][0]).toBeInstanceOf(File);
+  });
+  it('downloads and connects MoX with its generation image instead of its display cover', async () => {
+    const initial = state(); initial.looks[0].referenceImage = '/generation-reference.png';
+    const f = await fixture(initial);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\/generation-reference\.png$/), expect.any(Object));
+    expect(f.upload).toHaveBeenCalledOnce();
+    const source = f.connect.mock.calls[0][0] as File;
+    expect(source).toBeInstanceOf(File);
+    expect(source).toBe(f.upload.mock.calls[0][0]);
+    expect(await source.text()).toBe('fixture');
+    expect(f.live.error).toBe(''); expect(f.media.getUserMedia).not.toHaveBeenCalled();
   });
   it('retries a failed MoX generation without any phase or camera change', async () => {
     const f = await fixture();

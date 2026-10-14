@@ -3,6 +3,7 @@ package ai.xmax.sdk.media
 import ai.xmax.sdk.cleanupResources
 import ai.xmax.sdk.cleanupAfterFailure
 import ai.xmax.sdk.CameraPosition
+import ai.xmax.sdk.RealtimeCameraDevice
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.RealtimeMediaStream
 import ai.xmax.sdk.RealtimeReferenceVideo
@@ -101,12 +102,18 @@ internal class MediaController(
         interactionController.submitInteraction(frame)
     }
 
+    override suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice> = operationMutex.withLock {
+        rtcManager.initialize()
+        cameraController.enumerateCameraDevices()
+    }
+
     override suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean,
+        cameraDeviceId: String?,
     ): RealtimeMediaStream = createSource(LocalMediaKind.CAMERA) {
-        cameraController.createLocalCameraStream(videoFormat, position, useMicrophone)
+        cameraController.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId)
     }
 
     override fun startMicrophoneCapture() {
@@ -207,7 +214,8 @@ internal class MediaController(
     }
 
     override suspend fun stopLocalStream() = operationMutex.withLock {
-        synchronized(stateLock) { activeSource }?.let { stopSourceLocked(it) }
+        val source = synchronized(stateLock) { activeSource }
+        if (source != null) stopSourceLocked(source) else rtcManager.destroy()
         Unit
     }
 

@@ -24,13 +24,57 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { clients.splice(0).forEach(value => value.stop()); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('mirror-scoped exhibition client', () => {
+  it('copies one material to the target client without changing the source client', async () => {
+    const copied = state('west', 6);
+    copied.looks.push({ ...copied.looks[0], id: 'upload-independent', mode: 'free', prompt: '彩虹背景', source: 'upload' });
+    const fetcher = vi.fn(async (url: string) => response(url.endsWith('/looks/copy') ? copied : state(url.endsWith('/east') ? 'east' : 'west', 5)));
+    vi.stubGlobal('fetch', fetcher);
+    const east = client('east'); const west = client('west'); east.start(); west.start(); await flush();
+    const sourceBefore = east.getSnapshot().state;
+    const input = { sourceMirrorId: 'east', sourceLookId: 'commute', mode: 'free' as const, prompt: '彩虹背景', expectedRevision: 5 };
+    expect(await west.copyLook(input)).toEqual({ lookId: 'upload-independent', index: 1 });
+    const [url, init] = fetcher.mock.calls.at(-1)! as unknown as [string, RequestInit];
+    expect(url).toBe(appUrl(`/api${exhibitionApiPath('looks/copy', 'west')}`));
+    expect(init.method).toBe('POST'); expect(JSON.parse(init.body as string)).toEqual(input);
+    expect(west.getSnapshot().state).toEqual(copied);
+    expect(east.getSnapshot().state).toBe(sourceBefore);
+  });
+
+  it('does not retry a stale material copy and keeps its frozen target revision', async () => {
+    const fetcher = vi.fn(async (url: string) => url.endsWith('/looks/copy')
+      ? response({ code: 'EXHIBITION_STALE_REVISION' }, 409) : response(state('west', 8)));
+    vi.stubGlobal('fetch', fetcher);
+    const west = client('west'); west.start(); await flush();
+    expect(await west.copyLook({ sourceMirrorId: 'east', sourceLookId: 'commute', mode: 'clothx', expectedRevision: 5 })).toBeNull();
+    const mutations = fetcher.mock.calls.filter(([url]) => url.endsWith('/looks/copy')) as unknown as [string, RequestInit][];
+    expect(mutations).toHaveLength(1);
+    expect(JSON.parse(mutations[0][1].body as string).expectedRevision).toBe(5);
+    expect(west.getSnapshot()).toMatchObject({ pending: false, state: { revision: 8 }, error: '目标智能镜已更新，请刷新并核对后再复制。' });
+  });
+
+  it('allows a long material copy, rejects double submission and ignores its response after switching target', async () => {
+    const copying = deferred<Response>();
+    const fetcher = vi.fn((url: string) => url.endsWith('/looks/copy') ? copying.promise : Promise.resolve(response(state('west', 5))));
+    vi.stubGlobal('fetch', fetcher);
+    const west = client('west'); west.start(); await flush();
+    const input = { sourceMirrorId: 'east', sourceLookId: 'commute', mode: 'clothx' as const, expectedRevision: 5 };
+    const saving = west.copyLook(input);
+    const signal = (fetcher.mock.calls.at(-1)! as unknown as [string, RequestInit])[1].signal!;
+    expect(await west.copyLook(input)).toBeNull();
+    await vi.advanceTimersByTimeAsync(6000); expect(signal.aborted).toBe(false);
+    west.stop(); expect(signal.aborted).toBe(true);
+    copying.resolve(response(state('west', 6))); expect(await saving).toBeNull();
+    expect(west.getSnapshot().state?.revision).toBe(5);
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/looks/copy'))).toHaveLength(1);
+  });
+
   it('binds every mutation and copy to its initiating mirror and retains revision checks', async () => {
     let revision = 3;
     const fetcher = vi.fn(async () => response(state('east', revision++)));
     vi.stubGlobal('fetch', fetcher);
     const east = client('east'); east.start(); await flush();
     await east.send({ action: 'begin' });
-    const uploaded = await east.upload({ name: '服装', category: '通勤', tags: [], imageBase64: 'fixture' });
+    const uploaded = await east.upload({ name: '服装', category: '通勤', tags: [], imageBase64: 'fixture', referenceImageBase64: 'reference-fixture' });
     expect(uploaded).toEqual({ lookId: 'commute', index: 0 });
     await east.updateLook('uploaded/id', { name: '新名称', category: '通勤', tags: [] });
     await east.deleteLook('uploaded/id', { expectedRevision: 6 });
@@ -80,7 +124,7 @@ describe('mirror-scoped exhibition client', () => {
       : Promise.resolve(response(state(url.endsWith('/east') ? 'east' : 'west', 5))));
     vi.stubGlobal('fetch', fetcher);
     const east = client('east'); east.start(); await flush();
-    const saving = east.upload({ name: '旧素材', category: '通勤', tags: [], imageBase64: 'fixture' });
+    const saving = east.upload({ name: '旧素材', category: '通勤', tags: [], imageBase64: 'fixture', referenceImageBase64: 'reference-fixture' });
     const uploadSignal = (fetcher.mock.calls.at(-1) as unknown as [string, RequestInit])[1].signal!;
     east.stop();
     const west = client('west'); west.start(); await flush();
@@ -167,6 +211,20 @@ describe('mirror-scoped exhibition client', () => {
     expect(signal.aborted).toBe(false);
     east.stop(); expect(signal.aborted).toBe(true);
     uploading.resolve(response(state('east', 3))); expect(await saving).toBe(false);
+  });
+
+  it.each(['imageBase64', 'referenceImageBase64'] as const)('keeps %s replacements alive beyond the normal timeout and binds them to the opened revision', async key => {
+    const updating = deferred<Response>();
+    const fetcher = vi.fn((url: string, init?: RequestInit) => init?.method === 'PATCH' ? updating.promise : Promise.resolve(response(state('east', 2))));
+    vi.stubGlobal('fetch', fetcher);
+    const east = client('east'); east.start(); await flush();
+    const saving = east.updateLook('outfit', { name: '套装', [key]: 'fixture', expectedRevision: 2 });
+    const [url, request] = fetcher.mock.calls.at(-1) as [string, RequestInit];
+    expect(url).toBe(appUrl(`/api${exhibitionApiPath('looks/outfit', 'east')}`));
+    expect(JSON.parse(request.body as string)).toEqual({ name: '套装', [key]: 'fixture', expectedRevision: 2 });
+    await vi.advanceTimersByTimeAsync(6000); expect(request.signal!.aborted).toBe(false);
+    east.stop(); expect(request.signal!.aborted).toBe(true);
+    updating.resolve(response(state('east', 3))); expect(await saving).toBe(false);
   });
 
   it('refreshes a stale skin upload and explains how to retry without replacing the latest skin', async () => {

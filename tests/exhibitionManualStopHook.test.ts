@@ -76,15 +76,24 @@ describe('manual stop preserves preview and freezes the stopped generation', () 
     expect(f.create).toHaveBeenCalledTimes(2); expect(f.getUserMedia).toHaveBeenCalledOnce();
   });
 
-  it('does not let a slow previous-generation stop overwrite the new generation status', async () => {
+  it('waits for old SDK cleanup when changing the camera source', async () => {
+    const f = await fixture(); const pending = deferred<void>(); f.sdks[0].disconnect.mockReturnValueOnce(pending.promise);
+    await act(async () => { await f.live.startCamera('another-camera'); }); await flushReact();
+    expect(f.create).toHaveBeenCalledOnce();
+    await act(async () => { pending.resolve(); }); await flushReact();
+    expect(f.create).toHaveBeenCalledTimes(2);
+    expect(f.sdks[0].disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('waits for previous-generation cleanup before starting the next generation', async () => {
     const f = await fixture(); const pending = deferred<void>(); f.sdks[0].disconnect.mockReturnValueOnce(pending.promise);
     let stopping!: Promise<boolean>;
     await act(async () => { stopping = f.live.stopGeneration(); }); await flushReact();
     await act(async () => f.update({ ...f.snapshot, revision: 2, generationNumber: 2 })); await flushReact();
+    expect(f.create).toHaveBeenCalledTimes(1);
+    await act(async () => { pending.resolve(); await stopping; }); await flushReact();
     expect(f.create).toHaveBeenCalledTimes(2);
     await act(async () => f.callbacks[1].onRemoteVideoFirstFrame()); await flushReact();
-    expect(f.live.status).toBe('running');
-    await act(async () => { pending.resolve(); await stopping; }); await flushReact();
     expect(f.live.status).toBe('running'); expect(f.originalStop).not.toHaveBeenCalled();
   });
 });

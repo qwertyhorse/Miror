@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -18,6 +19,19 @@ function terminal(): ExhibitionDeviceConnectInput {
   return { terminalId: `terminal-${randomUUID()}`, token: randomBytes(32).toString('hex'), label: '测试安卓镜端', platform: 'android' };
 }
 
+function assertRegistryHasNoPairingSecrets(value: unknown, secrets: readonly string[]): void {
+  if (Array.isArray(value)) { for (const entry of value) assertRegistryHasNoPairingSecrets(entry, secrets); return; }
+  if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      expect(['code', 'pairing', 'pairingCode', 'token', 'tokenHash', 'terminalToken']).not.toContain(key);
+      assertRegistryHasNoPairingSecrets(entry, secrets);
+    }
+  } else if (typeof value === 'string') {
+    // A four-digit code can coincidentally occur inside an unrelated UUID or timestamp.
+    expect(secrets).not.toContain(value);
+  }
+}
+
 async function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'openbuy-device-http-'));
   let time = Date.now();
@@ -34,7 +48,7 @@ async function fixture() {
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const headers = { Origin: 'http://xuminghong.local:10200', 'Content-Type': 'application/json' };
+  const headers = { Origin: 'http://xuminghong.local:10200', 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' };
   const request = (path: string, input?: unknown, method = input === undefined ? 'GET' : 'POST', origin = headers.Origin) => fetch(base + path, {
     method, headers: { ...headers, Origin: origin }, ...(input === undefined ? {} : { body: JSON.stringify(input) }),
   });
@@ -63,7 +77,7 @@ describe('mirror terminal binding HTTP boundary', () => {
     const native = await request('/api/exhibition/native-identity');
     expect(native.status).toBe(200); expect(await native.json()).toEqual({ native: false });
     const connection = await connect(device);
-    expect(connection).toMatchObject({ terminalId: device.terminalId, mirrorId: null, code: expect.stringMatching(/^\d{6}$/), expiresAt: expect.any(Number) });
+    expect(connection).toMatchObject({ terminalId: device.terminalId, mirrorId: null, code: expect.stringMatching(/^\d{4}$/), expiresAt: expect.any(Number) });
     expect(JSON.stringify(connection)).not.toContain(device.token);
     const bound = await request(root() + '/binding', { code: connection.code });
     expect(bound.status).toBe(200); expect(await bound.json()).toMatchObject({ terminalId: device.terminalId, label: device.label, platform: 'android', online: true });
@@ -72,7 +86,8 @@ describe('mirror terminal binding HTTP boundary', () => {
     expect(following.code).toBeUndefined(); expect(following.expiresAt).toBeUndefined();
     const registry = await request('/api/exhibition/mirrors'); const summary = await registry.json();
     expect(summary.mirrors[0].binding).toMatchObject({ terminalId: device.terminalId, online: true });
-    expect(JSON.stringify(summary)).not.toContain(device.token); expect(JSON.stringify(summary)).not.toContain(connection.code!);
+    expect(JSON.stringify(summary)).not.toContain(device.token);
+    assertRegistryHasNoPairingSecrets(summary, [device.token, connection.code!]);
   });
 
   it('rejects foreign-origin registration and pairing without changing the binding', async () => {
@@ -99,7 +114,7 @@ describe('mirror terminal binding HTTP boundary', () => {
     }
     expect(mirrors.getMirror().get()).toEqual(before); expect(issue).not.toHaveBeenCalled(); expect(store.allocated()).toBe(0);
     const allowed = await request('/api/exhibition/live/session', { ...input, terminalId: device.terminalId, terminalToken: device.token });
-    expect(allowed.status).toBe(201); expect(issue).toHaveBeenCalledOnce(); expect(store.allocated()).toBe(30);
+    expect(allowed.status).toBe(201); expect(issue).toHaveBeenCalledOnce(); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('limits a bound non-default mirror to its own terminal while keeping unbound legacy behavior', async () => {
@@ -113,22 +128,24 @@ describe('mirror terminal binding HTTP boundary', () => {
     expect(issue).toHaveBeenCalledTimes(2);
   });
 
-  it('requires an idle mirror and the exact current terminal ID to unbind', async () => {
-    const { request, root, connect, mirrors, start, issue } = await fixture(); const device = terminal(); const connection = await connect(device);
+  it('allows paused offline unbinding only for the exact current terminal and rejects former credentials', async () => {
+    const { request, root, connect, mirrors, start, issue, advance } = await fixture(); const device = terminal(); const connection = await connect(device);
     mirrors.getMirror().command({ action: 'begin' });
     const busy = await request(root() + '/binding', { code: connection.code });
     expect(busy.status).toBe(409); expect(await busy.json()).toMatchObject({ code: 'EXHIBITION_MIRROR_BUSY' });
     mirrors.getMirror().command({ action: 'end' });
     expect((await request(root() + '/binding', { code: connection.code })).status).toBe(200);
     mirrors.getMirror().command({ action: 'begin' });
-    expect((await request(root() + '/binding', { terminalId: device.terminalId }, 'DELETE')).status).toBe(409);
-    mirrors.getMirror().command({ action: 'end' });
+    mirrors.getMirror().command({ action: 'pause' }); advance(31_000);
+    const before = mirrors.getMirror().get(); expect(mirrors.list().mirrors[0].binding?.online).toBe(false);
     const stale = await request(root() + '/binding', { terminalId: terminal().terminalId }, 'DELETE');
     expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ code: 'EXHIBITION_DEVICE_BINDING_CHANGED' });
     expect(mirrors.list().mirrors[0].binding?.terminalId).toBe(device.terminalId);
+    expect(mirrors.getMirror().get()).toEqual(before);
     const removed = await request(root() + '/binding', { terminalId: device.terminalId }, 'DELETE');
     expect(removed.status).toBe(200); expect(await removed.json()).toEqual({ binding: null });
     expect(mirrors.list().mirrors[0].binding).toBeNull();
+    expect(mirrors.getMirror().get()).toMatchObject({ phase: 'idle', live: null });
     const newConnection = await connect(device); expect(newConnection.mirrorId).toBeNull(); expect(newConnection.code).not.toBe(connection.code);
     const oldCode = await request(root() + '/binding', { code: connection.code });
     expect(oldCode.status).toBe(409); expect(await oldCode.json()).toMatchObject({ code: 'EXHIBITION_PAIRING_CODE_INVALID' });

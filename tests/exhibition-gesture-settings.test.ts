@@ -22,14 +22,16 @@ function settings(overrides: Partial<ExhibitionGestureSettings> = {}): Exhibitio
 }
 const code = (value: string) => expect.objectContaining({ code: value });
 const configured: ExhibitionGestureSettings = settings({ gestures: ['open_palm', 'wave'], minHandDetectionConfidence: 0.4,
-  minHandPresenceConfidence: 0.45, minTrackingConfidence: 0.6, palmConfirmMs: 450, palmReleaseMs: 700, maxFps: 20, inputLongEdge: 960 });
+  minHandPresenceConfidence: 0.45, minTrackingConfidence: 0.6, palmConfirmMs: 450, palmReleaseMs: 700,
+  palmLowerMs: 600, lowerTrackingGraceMs: 750, maxFps: 20, inputLongEdge: 960 });
 
 describe('per-mirror gesture settings', () => {
   it('defaults every new mirror to palm only with independent settings and gesture arrays', () => {
     const manager = new ExhibitionMirrors(directory()); const second = manager.create({ name: '第二台镜' });
     const firstState = manager.getMirror().get(); const secondState = manager.getMirror(second.id).get();
     expect(firstState.settings.gestureRecognition).toEqual({ gestures: ['open_palm'], minHandDetectionConfidence: 0.35,
-      minHandPresenceConfidence: 0.35, minTrackingConfidence: 0.5, palmConfirmMs: 300, palmReleaseMs: 500, maxFps: 15, inputLongEdge: 720 });
+      minHandPresenceConfidence: 0.35, minTrackingConfidence: 0.5, palmConfirmMs: 300, palmReleaseMs: 500,
+      palmLowerMs: 350, lowerTrackingGraceMs: 500, maxFps: 15, inputLongEdge: 720 });
     expect(secondState.settings.gestureRecognition).toEqual(firstState.settings.gestureRecognition);
     firstState.settings.gestureRecognition!.gestures.push('wave'); firstState.settings.gestureRecognition!.maxFps = 30;
     expect(manager.getMirror().get().settings.gestureRecognition).toEqual(DEFAULT_EXHIBITION_GESTURE_SETTINGS);
@@ -47,7 +49,7 @@ describe('per-mirror gesture settings', () => {
     expect(saved).toMatchObject({ revision: before.revision + 1, phase: before.phase, settings: { ...before.settings, gestureRecognition: configured },
       looks: before.looks, enabledLookIds: before.enabledLookIds, selectedLookId: before.selectedLookId,
       sessionNumber: 0, generationNumber: 0, generationReadyAt: null, live: null });
-    submitted.gestures.length = 0; submitted.palmConfirmMs = 999;
+    submitted.gestures.length = 0; submitted.palmConfirmMs = 999; submitted.palmLowerMs = 1499; submitted.lowerTrackingGraceMs = 999;
     expect(service.get()).toEqual(saved);
     expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(saved);
     advance(10_000); expect(service.get()).toEqual(saved); expect(createExhibition).not.toHaveBeenCalled();
@@ -61,9 +63,9 @@ describe('per-mirror gesture settings', () => {
   it('accepts all advertised parameter boundaries', () => {
     const { service } = fixture();
     for (const value of [settings({ minHandDetectionConfidence: 0.1, minHandPresenceConfidence: 0.1, minTrackingConfidence: 0.1,
-      palmConfirmMs: 150, palmReleaseMs: 300, maxFps: 5, inputLongEdge: 480 }),
+      palmConfirmMs: 150, palmReleaseMs: 300, palmLowerMs: 150, lowerTrackingGraceMs: 100, maxFps: 5, inputLongEdge: 480 }),
     settings({ minHandDetectionConfidence: 0.9, minHandPresenceConfidence: 0.9, minTrackingConfidence: 0.9,
-      palmConfirmMs: 1000, palmReleaseMs: 1500, maxFps: 30, inputLongEdge: 960 })]) {
+      palmConfirmMs: 1000, palmReleaseMs: 1500, palmLowerMs: 1500, lowerTrackingGraceMs: 1000, maxFps: 30, inputLongEdge: 960 })]) {
       expect(service.command({ action: 'configure', gestureRecognition: value }).settings.gestureRecognition).toEqual(value);
     }
   });
@@ -75,6 +77,8 @@ describe('per-mirror gesture settings', () => {
     ['minTrackingConfidence', [0, 0.09, 0.91, NaN, Infinity, '0.5', null]],
     ['palmConfirmMs', [0, 149, 1001, 300.5, NaN, Infinity, '300', null]],
     ['palmReleaseMs', [0, 299, 1501, 500.5, NaN, Infinity, '500', null]],
+    ['palmLowerMs', [0, 149, 1501, 350.5, NaN, Infinity, '350', null, undefined]],
+    ['lowerTrackingGraceMs', [0, 99, 1001, 500.5, NaN, Infinity, '500', null, undefined]],
     ['maxFps', [0, 4, 31, 15.5, NaN, Infinity, '15', null]],
     ['inputLongEdge', [0, 479, 721, 1080, NaN, Infinity, '720', null]],
   ] as const)('rejects invalid %s without changing memory or disk', (field, values) => {
@@ -82,6 +86,7 @@ describe('per-mirror gesture settings', () => {
     for (const value of values) {
       const gestureRecognition = { ...configured, [field]: value };
       expect(isExhibitionGestureSettings(gestureRecognition)).toBe(false);
+      expect(resolveExhibitionGestureSettings(gestureRecognition)).toEqual(DEFAULT_EXHIBITION_GESTURE_SETTINGS);
       expect(() => service.command({ action: 'configure', gestureRecognition, autoReturnSeconds: 180 })).toThrow(code('EXHIBITION_INVALID_SETTINGS'));
       expect(service.get()).toEqual(before); expect(readFileSync(file)).toEqual(persisted);
     }
@@ -145,6 +150,54 @@ describe('per-mirror gesture settings', () => {
     expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(state);
   });
 
+  it.each([
+    { missing: ['palmLowerMs', 'lowerTrackingGraceMs'] }, { missing: ['palmLowerMs'] }, { missing: ['lowerTrackingGraceMs'] },
+  ] as const)('fills only missing new timing fields $missing while retaining legacy settings and an explicit disable', ({ missing }) => {
+    const { service, directory, now } = fixture();
+    const customized = settings({ ...configured, gestures: [] });
+    const original = service.command({ action: 'configure', gestureRecognition: customized, autoReturnSeconds: 180,
+      switchMode: 'auto', autoSwitchSeconds: 45, enabledLookIds: ['evening', 'city'] });
+    const file = join(directory, 'exhibition.json');
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    const legacy = { ...customized } as Record<string, unknown>;
+    const expected = { ...customized };
+    for (const field of missing) { delete legacy[field]; expected[field] = DEFAULT_EXHIBITION_GESTURE_SETTINGS[field]; }
+    expect(isExhibitionGestureSettings(legacy)).toBe(false); // New API updates must still be complete.
+    const resolved = resolveExhibitionGestureSettings(legacy);
+    expect(resolved).toEqual(expected);
+    expect(resolved.gestures).not.toBe(legacy.gestures);
+    stored.state.settings.gestureRecognition = legacy;
+    writeFileSync(file, JSON.stringify(stored));
+    const migrated = new ExhibitionService(directory, { now, strictStorage: true }).get();
+    const { logs, ...originalState } = original;
+    expect(migrated).toMatchObject({ ...originalState, revision: original.revision + 1,
+      settings: { ...original.settings, gestureRecognition: expected } });
+    expect(migrated.logs).toEqual(expect.arrayContaining(logs));
+    expect(JSON.parse(readFileSync(file, 'utf8')).state.settings.gestureRecognition).toEqual(expected);
+    expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(migrated);
+  });
+
+  it.each(['palmLowerMs', 'lowerTrackingGraceMs'] as const)('does not migrate an explicitly invalid stored %s into a valid custom configuration', field => {
+    const { service, directory, now } = fixture();
+    service.command({ action: 'configure', gestureRecognition: configured });
+    const file = join(directory, 'exhibition.json');
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    stored.state.settings.gestureRecognition[field] = null;
+    delete stored.state.settings.gestureRecognition[field === 'palmLowerMs' ? 'lowerTrackingGraceMs' : 'palmLowerMs'];
+    writeFileSync(file, JSON.stringify(stored));
+    const migrated = new ExhibitionService(directory, { now, strictStorage: true }).get();
+    expect(migrated.settings.gestureRecognition).toEqual(DEFAULT_EXHIBITION_GESTURE_SETTINGS);
+    expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(migrated);
+  });
+
+  it('does not silently fill missing original settings while migrating the new fields', () => {
+    for (const field of Object.keys(configured).filter(key => key !== 'palmLowerMs' && key !== 'lowerTrackingGraceMs')) {
+      const incomplete = { ...configured } as Record<string, unknown>;
+      delete incomplete.palmLowerMs; delete incomplete.lowerTrackingGraceMs; delete incomplete[field];
+      expect(resolveExhibitionGestureSettings(incomplete)).toEqual(DEFAULT_EXHIBITION_GESTURE_SETTINGS);
+    }
+  });
+
   it('copies settings only when selected and isolates source, target, and returned objects', () => {
     const path = directory(); const manager = new ExhibitionMirrors(path); const targetId = manager.create({ name: '复制目标' }).id;
     const source = manager.getMirror(); const target = manager.getMirror(targetId);
@@ -165,7 +218,7 @@ describe('gesture settings HTTP boundary', () => {
   it('round-trips per mirror, rejects invalid/stale saves, and never contacts XMAX', async () => {
     const mirrors = new ExhibitionMirrors(directory());
     const providerAccess = vi.fn(() => { throw new Error('Gesture settings must not contact XMAX.'); });
-    const unrelated = new Proxy({} as TryOnService, { get: providerAccess });
+    const unrelated = new Proxy({} as TryOnService, { get: (_target, property) => property === 'reconcileMirrorSessions' ? async () => {} : providerAccess() });
     const server = createApiServer(unrelated, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     try {
@@ -175,12 +228,22 @@ describe('gesture settings HTTP boundary', () => {
       const command = (body: unknown) => fetch(`${root}/command`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' }, body: JSON.stringify(body) });
       const invalid = await command({ action: 'configure', gestureRecognition: { ...configured, gestures: ['pinch'] }, expectedRevision: before.revision });
       expect(invalid.status).toBe(400); expect(await invalid.json()).toMatchObject({ code: 'EXHIBITION_INVALID_SETTINGS' });
+      for (const field of ['palmLowerMs', 'lowerTrackingGraceMs'] as const) {
+        const incomplete = { ...configured } as Record<string, unknown>; delete incomplete[field];
+        for (const gestureRecognition of [incomplete, { ...configured, [field]: 0 }]) {
+          const rejected = await command({ action: 'configure', gestureRecognition, expectedRevision: before.revision });
+          expect(rejected.status).toBe(400); expect(await rejected.json()).toMatchObject({ code: 'EXHIBITION_INVALID_SETTINGS' });
+          expect(source.get()).toEqual(before);
+        }
+      }
       const response = await command({ action: 'configure', gestureRecognition: configured, expectedRevision: before.revision });
       expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('no-store');
       expect(await response.json()).toMatchObject({ settings: { gestureRecognition: configured }, revision: before.revision + 1, generationNumber: 0, live: null });
       const stale = await command({ action: 'configure', gestureRecognition: settings({ gestures: [] }), expectedRevision: before.revision });
       expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
-      expect(await (await fetch(root)).json()).toEqual(source.get());
+      const readBack = await (await fetch(root)).json();
+      expect(readBack).toEqual(source.get());
+      expect(readBack.settings.gestureRecognition).toMatchObject({ palmLowerMs: 600, lowerTrackingGraceMs: 750 });
       expect(mirrors.getMirror(otherId).get()).toEqual(other); expect(providerAccess).not.toHaveBeenCalled();
     } finally { server.close(); await once(server, 'close'); }
   });

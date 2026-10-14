@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ExternalLink, Hand, Link2, Maximize2, Monitor, Play, RotateCcw, Sparkles, Square, WifiOff, X } from 'lucide-react';
-import { EXHIBITION_MODE_LABELS, isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionMirrorSummary } from '../../shared/exhibition';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { ArrowLeft, Hand, Link2, Maximize2, Monitor, Play, RotateCcw, Sparkles, Square, WifiOff, X } from 'lucide-react';
+import { EXHIBITION_MODE_LABELS, exhibitionReferenceImage, isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionMirrorSummary } from '../../shared/exhibition';
 import { resolveExhibitionGestureSettings, type ExhibitionGestureKind } from '../../shared/exhibitionGestures';
 import { appUrl } from '../versionScope';
 import { enabledLooksForMode, phaseLabel } from './catalog';
 import { MirrorConsole } from './MirrorConsole';
 import { useMirrors, type MirrorRegistry } from './useMirrors';
 import { exhibitionUrl } from './mirrorApi';
-import { defaultMirrorCameraEntry, exhibitionCameraUrl } from './cameraEntry';
+import { defaultMirrorCameraEntry } from './cameraEntry';
+import { BrowserTestPage } from './BrowserTestPage';
 import { useTerminalBinding, type TerminalBinding } from './useTerminalBinding';
 import { TerminalPairingScreen } from './TerminalPairingScreen';
 import { useExhibitionLive, type ExhibitionLiveController } from './useExhibitionLive';
 import { StreamVideo } from './LiveCameraPanel';
+import { TerminalCameraEntry, TerminalCameraSettings, terminalCameraAvailable, useTerminalCameraRequest, useTerminalCameraReport } from './TerminalCameraSettings';
 import { useExhibitionGestures } from './useExhibitionGestures';
+import { usePresenterKeys } from './usePresenterKeys';
 import { useExhibition, type ExhibitionController } from './useExhibition';
 import { MirrorMaterialDrawer } from './MirrorMaterialDrawer';
 import { MoXDragSurface } from './MoXDragSurface';
@@ -30,10 +33,43 @@ function Brand() {
   return <span className="ex-brand"><img src={appUrl('/assets/exhibition/openbuy-ai-logo-rgb.png')} alt="OpenBuyAI" /></span>;
 }
 
-export function Kiosk({ state, send, disabled = false, passive = false, live, stopExperience, stopPending = false, commandPending = false, selectionPending = false, canControl = true, presentation = 'terminal', diagnostics = null, sendDiagnosed }: {
+interface GestureAcknowledgement {
+  epoch: number;
+  mirrorId: string;
+  sessionNumber: number;
+  mode: ExhibitionState['experienceMode'];
+  revision: number;
+  generationNumber: number;
+  previousLookId: ExhibitionState['selectedLookId'];
+  lookId: string;
+  action: 'select' | 'switch';
+  label: string;
+  showSuccess: boolean;
+}
+
+interface PresenterSelection {
+  scope: string;
+  lookId: string;
+  revision: number;
+  pending: boolean;
+}
+
+function presenterScope(state: ExhibitionState) {
+  return `${state.mirrorId ?? 'default'}:${state.sessionNumber}:${state.experienceMode ?? 'clothx'}`;
+}
+
+function matchesGestureTarget(ack: GestureAcknowledgement, state: ExhibitionState) {
+  const generation = ack.generationNumber + (ack.action === 'switch' ? 1 : 0);
+  return (state.mirrorId ?? 'default') === ack.mirrorId && state.sessionNumber === ack.sessionNumber
+    && state.experienceMode === ack.mode && ['idle', 'select', 'generating', 'showcase'].includes(state.phase)
+    && state.generationNumber >= ack.generationNumber && state.generationNumber <= generation
+    && (state.selectedLookId === ack.lookId || (state.selectedLookId === ack.previousLookId && state.revision === ack.revision));
+}
+
+export function Kiosk({ state, send, disabled = false, passive = false, live, stopExperience, stopPending = false, commandPending = false, selectionPending = false, canControl = true, presentation = 'terminal', diagnostics = null, sendDiagnosed, cameraControl }: {
   state: ExhibitionState; send?: ExhibitionController['send']; disabled?: boolean; passive?: boolean; live?: ExhibitionLiveController;
   stopExperience?: ExhibitionController['stopExperience']; stopPending?: boolean; commandPending?: boolean; selectionPending?: boolean; canControl?: boolean;
-  presentation?: 'terminal' | 'remote'; diagnostics?: ExhibitionDiagnostics | null; sendDiagnosed?: ExhibitionController['sendDiagnosed'];
+  presentation?: 'terminal' | 'remote'; diagnostics?: ExhibitionDiagnostics | null; sendDiagnosed?: ExhibitionController['sendDiagnosed']; cameraControl?: ReactNode;
 }) {
   const remote = presentation === 'remote';
   const kioskLabel = passive ? '镜端状态预览' : remote ? '镜端远程控制' : 'AI 试衣镜';
@@ -51,7 +87,11 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const [gesturesOn, setGesturesOn] = useState(true);
   const [gestureReset, setGestureReset] = useState(0);
   const [gestureSelection, setGestureSelection] = useState<{ lookId: string; revision: number } | null>(null);
+  const [gestureAcknowledgement, setGestureAcknowledgement] = useState<GestureAcknowledgement | null>(null);
+  const gestureFeedbackEpoch = useRef(0);
   const gesturePending = useRef(false);
+  const presenterTarget = useRef<PresenterSelection | null>(null);
+  const [presenterSelection, setPresenterSelection] = useState<PresenterSelection | null>(null);
   const starting = useRef(false);
   const beginIntent = useRef(0);
   const stopping = useRef(false);
@@ -74,8 +114,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const visualSource = !localView || welcome ? null : showingInputImage ? '素材预览'
     : live?.outputStream ? (live.status === 'running' && state.phase === 'showcase') || (state.live?.status === 'running' && state.phase === 'generating') ? '生成结果' : null
       : null;
-  const generationPending = localView && state.phase === 'generating' && live?.status !== 'stopping' && live?.status !== 'error';
-  const preparationLabel = live?.outputStream && state.live?.status === 'running' ? '正在换装'
+  const generationPending = localView && (state.phase === 'generating' || !!state.live?.renewal) && live?.status !== 'stopping' && live?.status !== 'error';
+  const preparationLabel = state.live?.renewal ? '正在续接体验' : live?.outputStream && state.live?.status === 'running' ? '正在换装'
     : live?.status === 'opening' ? '开启摄像头'
     : live?.status === 'preparing' ? '准备素材'
       : live?.status === 'connecting' ? '连接实时服务' : live?.status === 'running' ? '等待生成画面' : '等待连接';
@@ -122,6 +162,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       if (stopping.current || stopPending) return false;
       stopping.current = true; ++beginIntent.current; starting.current = false;
       diagnosticEpoch.current++;
+      gestureFeedbackEpoch.current++;
+      setGestureAcknowledgement(null);
       diagnostics?.observe(diagnosticContext(currentRound.current.state), { active: false });
       setGestureReset(value => value + 1);
       setGestureSelection(null);
@@ -172,14 +214,66 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const stopButton = hasStop ? <button type="button" className="ex-kiosk-primary ex-kiosk-stop" disabled={passive || !canControl || !send || stopPending || localStopPending} onClick={() => void command({ action: 'end' })}><Square fill="currentColor" />{stopPending || localStopPending ? '正在停止…' : '停止生成'}</button> : null;
   const recoveryButton = locallyEnded ? <button type="button" className="ex-kiosk-primary" disabled={disabled || passive || !canControl || !send || commandPending || stopPending || localStopPending} onClick={() => void command({ action: 'recover' })}><RotateCcw />{commandPending ? '恢复中…' : '恢复操作'}</button> : null;
   const canChoose = !disabled && !passive && canControl && !!send && !localStopPending && !stopPending && !beginPending
-    && (!commandPending || selectionPending) && !needsRetry && !serverError && !live?.opening
+    && (!commandPending || selectionPending) && !needsRetry && !serverError && !live?.opening && !state.live?.renewal
     && ((welcome && !state.live) || state.phase === 'generating' || state.phase === 'showcase');
   currentRound.current.canChoose = canChoose;
+  const clearPresenterSelection = (target: PresenterSelection) => {
+    if (presenterTarget.current !== target) return;
+    presenterTarget.current = null;
+    setPresenterSelection(null);
+  };
+  useEffect(() => {
+    const target = presenterTarget.current;
+    if (target && (target.scope !== presenterScope(state) || paused || locallyEnded || stopPending || localStopPending
+      || !enabled.some(item => item.id === target.lookId)
+      || (!target.pending && (state.selectedLookId === target.lookId || state.revision > target.revision)))) clearPresenterSelection(target);
+  }, [state.mirrorId, state.sessionNumber, mode, state.selectedLookId, state.revision, paused, locallyEnded, stopPending, localStopPending, enabled]);
+  usePresenterKeys({
+    enabled: !remote && !passive && !otherDevice && canControl && !!send,
+    scope: presenterScope(state),
+    onStep: direction => {
+      const latest = currentRound.current;
+      if (!latest.canChoose || carouselBusy || gesturePending.current || gestureSelection || presenterTarget.current
+        || starting.current || stopping.current) return;
+      const ordered = enabledLooksForMode(latest.state);
+      if (ordered.length < 2) return;
+      const index = ordered.findIndex(item => item.id === latest.state.selectedLookId);
+      const next = ordered[index < 0 ? direction > 0 ? 0 : ordered.length - 1 : (index + direction + ordered.length) % ordered.length];
+      const target: PresenterSelection = { scope: presenterScope(latest.state), lookId: next.id, revision: latest.state.revision, pending: true };
+      presenterTarget.current = target;
+      setPresenterSelection(target);
+      // Retain the target until its state is observed, even if the response wins the React render.
+      void command({ action: ['idle', 'select'].includes(latest.state.phase) ? 'select' : 'switch', lookId: next.id })
+        .then(accepted => {
+          target.pending = false;
+          const current = currentRound.current.state;
+          if (!accepted || target.scope !== presenterScope(current) || current.selectedLookId === target.lookId
+            || current.revision > target.revision) clearPresenterSelection(target);
+        })
+        .catch(() => {
+          if (presenterTarget.current !== target) return;
+          setBeginError('素材切换未完成，请重试。');
+          clearPresenterSelection(target);
+        });
+    },
+  });
   const gestureCamera = !!live?.cameraStream?.getVideoTracks?.().some(track => track.readyState === 'live');
   const recognitionSettings = resolveExhibitionGestureSettings(state.settings.gestureRecognition);
   const configuredGestures = recognitionSettings.gestures;
   const gestureAvailable = realtime && !mox && !remote && !passive && !otherDevice && canControl && !!live?.secure && !locallyEnded && gestureCamera;
-  const gestureProcessing = gestureSelection !== null || beginPending || commandPending || selectionPending || !!live?.opening
+  useEffect(() => {
+    ++gestureFeedbackEpoch.current;
+    setGestureAcknowledgement(null);
+    return () => { ++gestureFeedbackEpoch.current; };
+  }, [state.mirrorId, state.sessionNumber, mode, gesturesOn, gestureAvailable, disabled, paused, locallyEnded,
+    stopPending, localStopPending, needsRetry, serverError, configuredGestures.join(',')]);
+  useEffect(() => {
+    if (!gestureAcknowledgement?.showSuccess) return;
+    const timer = setTimeout(() => setGestureAcknowledgement(current => current === gestureAcknowledgement
+      ? { ...current, showSuccess: false } : current), 1200);
+    return () => clearTimeout(timer);
+  }, [gestureAcknowledgement]);
+  const gestureProcessing = gestureSelection !== null || presenterSelection !== null || beginPending || commandPending || selectionPending || !!live?.opening
     || (!welcome && (state.phase === 'generating' || live?.status === 'preparing' || live?.status === 'connecting'));
   const gestureBlocked = !canChoose || carouselBusy || gestureProcessing;
   useEffect(() => {
@@ -208,16 +302,27 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
             ...(metadata.raiseStartedAt === undefined ? {} : { raiseLatencyMs: metadata.detectedAt - metadata.raiseStartedAt }) } });
       }
       if (!resolveExhibitionGestureSettings(latest.state.settings.gestureRecognition).gestures.includes(gesture as ExhibitionGestureKind) || !gesturesOn || !gestureAvailable || gestureBlocked
-        || gesturePending.current || gestures.operatorStatus !== 'locked'
+        || gesturePending.current || presenterTarget.current || gestures.operatorStatus !== 'locked'
         || gestures.status !== 'ready' || gestures.captureStatus !== 'active' || ordered.length < 2) {
         if (metadata) diagnostics?.record({ type: 'gesture_ignored', context, interactionId: metadata.eventId, actionId: `${metadata.eventId}-attempt-1`, reason: ordered.length < 2 ? 'insufficient_materials' : 'blocked' });
         return;
       }
       gesturePending.current = true;
       setGestureSelection({ lookId: next.id, revision: latest.state.revision });
+      setGestureAcknowledgement(null);
+      const acknowledgement: GestureAcknowledgement = {
+        epoch: gestureFeedbackEpoch.current, mirrorId: latest.state.mirrorId ?? 'default', sessionNumber: latest.state.sessionNumber,
+        mode: latest.state.experienceMode, revision: latest.state.revision, generationNumber: latest.state.generationNumber,
+        previousLookId: latest.state.selectedLookId, lookId: next.id, action: input.action as 'select' | 'switch',
+        label: input.action === 'select' ? '已选中' : mode === 'clothx' ? '换装已提交' : '素材切换已提交', showSuccess: true,
+      };
       // Use the same selection path as the material drawer, including stop and lease guards.
       void command(input, metadata?.eventId)
-        .then(accepted => { if (accepted === false) setGestureSelection(null); })
+        .then(accepted => {
+          if (accepted === false) setGestureSelection(null);
+          else if (accepted === true && acknowledgement.epoch === gestureFeedbackEpoch.current
+            && matchesGestureTarget(acknowledgement, currentRound.current.state)) setGestureAcknowledgement(acknowledgement);
+        })
         .catch(() => { setBeginError('素材切换未完成，请重试。'); setGestureSelection(null); })
         .finally(() => {
           gesturePending.current = false;
@@ -240,40 +345,50 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       diagnostics.record({ type: 'sample', context: diagnosticContext(current), metrics: { operatorStatus: value.operatorStatus,
         captureStatus: value.captureStatus, width: value.inputWidth, height: value.inputHeight, fps: value.fps, inferenceMs: value.inferenceMs, recognitionMs: value.recognitionMs,
         armed: value.armed, handDetected: value.handDetected, handRaised: value.handRaised, needsRelease: value.needsRelease, controlSource: value.controlSource,
-        confirmationState: value.confirmationState, palmHoldMs: value.palmHoldMs, rawHandCount: value.rawHandCount, matchedHandCount: value.matchedHandCount,
+        confirmationState: value.confirmationState, palmHoldMs: value.palmHoldMs,
+        palmConfirmMs: resolveExhibitionGestureSettings(current.settings.gestureRecognition).palmConfirmMs,
+        rawHandCount: value.rawHandCount, matchedHandCount: value.matchedHandCount,
         ...(value.ambiguityReason ? { ambiguityReason: value.ambiguityReason } : {}) } });
     };
     sample();
     const timer = setInterval(sample, 1000);
     return () => clearInterval(timer);
-  }, [diagnostics, gestures.confirmationState, gestures.palmHoldMs, gestures.rawHandCount, gestures.matchedHandCount, gestures.controlSource, gestures.captureStatus]);
+  }, [diagnostics, gestures.confirmationState, gestures.palmHoldMs, gestures.rawHandCount, gestures.matchedHandCount, gestures.controlSource, gestures.captureStatus, recognitionSettings.palmConfirmMs]);
   const gestureCapturing = gestures.captureStatus === 'active';
   const gestureSeeingHand = gesturesOn && gestureAvailable && !gestureBlocked && gestureCapturing
     && gestures.operatorStatus === 'locked' && gestures.handDetected;
   const gestureAction = mode === 'clothx' ? '换装' : '换素材';
   const gestureInstruction = configuredGestures.length > 1 ? `挥手或展掌${gestureAction}` : configuredGestures[0] === 'wave' ? `挥手${gestureAction}` : `展掌${gestureAction}`;
+  const currentAcknowledgement = !disabled && !needsRetry && !serverError && !stopPending && !localStopPending
+    && gestureAcknowledgement?.epoch === gestureFeedbackEpoch.current
+    && matchesGestureTarget(gestureAcknowledgement, state) ? gestureAcknowledgement : null;
   const gestureLabel = !configuredGestures.length ? '手势已关闭' : !gestureAvailable ? '等待摄像头' : !gesturesOn ? '手势已关闭'
     : gestures.status === 'error' ? '重试手势' : gestures.status === 'loading' ? '加载手势…'
       : gestures.captureStatus === 'stalled' ? '取景未更新'
         : ['disabled', 'muted', 'hidden'].includes(gestures.captureStatus) ? '取景已暂停'
-          : gestureProcessing ? '切换中'
+          : currentAcknowledgement?.showSuccess && gestures.operatorStatus !== 'ambiguous' ? currentAcknowledgement.label
+            : gestureProcessing ? '切换中'
             : gestureBlocked ? '手势已暂停'
               : !gestureCapturing ? '等待取景'
                 : gestures.operatorStatus === 'ambiguous' ? gestures.ambiguityReason === 'hands' ? '请只露一只手' : '请单人体验'
                   : gestures.operatorStatus !== 'locked' ? '请露出手掌'
-                    : !gestures.handDetected ? '请露出手'
-                      : !configuredGestures.includes('wave') && (gestures.needsRelease || gestures.confirmationState === 'already_triggered') ? '请收手'
-                        : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
-  if (!look || !visualLook || !enabled.length) return <section className="ex-kiosk ex-mirror-minimal ex-empty-mode" style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
+                    : gestures.confirmationState === 'raise_required' ? '可以再次抬手'
+                      : gestures.confirmationState === 'lowering' || (configuredGestures.includes('open_palm')
+                        && (gestures.needsRelease || gestures.confirmationState === 'already_triggered')) ? '请放下手'
+                        : currentAcknowledgement && configuredGestures.includes('open_palm') && gestures.armed && !gestures.needsRelease ? '可以再次抬手'
+                          : !gestures.handDetected ? '请露出手'
+                            : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
+  if (!look || !visualLook || !enabled.length) return <section className={`ex-kiosk ex-mirror-minimal ex-empty-mode${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className="ex-mirror-stage ex-mirror-empty"><Sparkles aria-hidden="true" /><span>暂无可用素材</span><div className="ex-mirror-stage-actions">{recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>}</div></div>
+    <footer className="ex-mirror-footer"><div className="ex-mirror-footer-tools">{cameraControl}</div></footer>
   </section>;
   const feedback = !locallyEnded && !passive && !otherDevice ? beginError || (realtime ? live?.error || live?.updateError || (serverError ? '换装连接状态未确认，请联系工作人员。' : '') : '') : '';
-  return <section className={`ex-kiosk ex-mirror-minimal ex-phase-${state.phase}${welcome ? ' ex-welcome' : ''}${passive ? ' ex-passive' : ''}`} style={skinStyle} aria-label={kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
+  return <section className={`ex-kiosk ex-mirror-minimal ex-phase-${state.phase}${welcome ? ' ex-welcome' : ''}${passive ? ' ex-passive' : ''}${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className="ex-mirror-stage">
       {welcome ? (live?.cameraStream && !passive && !otherDevice && !mox ? <StreamVideo stream={live.cameraStream} mirrored={live?.mirrored} label="本地取景" /> : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={visualLook.name} />)
-        : realtime && mox && !passive && !otherDevice && !needsRetry ? <MoXDragSurface interaction={live?.interaction ?? null} disabled={disabled || paused || !live?.interaction} imageUrl={!live?.outputStream || live?.presentation?.showInputImage ? live?.presentation?.inputImageUrl ?? appUrl(visualLook.image) : undefined}>
+        : realtime && mox && !passive && !otherDevice && !needsRetry ? <MoXDragSurface interaction={live?.interaction ?? null} disabled={disabled || paused || !live?.interaction} imageUrl={!live?.outputStream || live?.presentation?.showInputImage ? live?.presentation?.inputImageUrl ?? appUrl(exhibitionReferenceImage(visualLook) ?? '') : undefined}>
           {live?.outputStream && <StreamVideo stream={live.outputStream} mirrored={false} label={outputLabel} onFirstFrame={live.reportFirstFrame} />}
         </MoXDragSurface> : realtime ? (stream && !passive && (!needsRetry || cameraFallback) ? <StreamVideo key={!cameraFallback && live?.outputStream ? 'output' : 'camera'} stream={stream} mirrored={live?.mirrored} label={!cameraFallback && live?.outputStream ? outputLabel : '本地取景'} onFirstFrame={!cameraFallback && live?.outputStream ? live.reportFirstFrame : undefined} /> : <div className="ex-mirror-placeholder"><Sparkles aria-hidden="true" /><span>{livePlaceholder}</span>{passive ? <small>仅同步状态，未回传镜端视频</small> : otherDevice ? <small>当前页面未接收镜端视频</small> : needsRetry && !serverError && <button type="button" className="ex-kiosk-retry" disabled={disabled || live?.opening} onClick={() => void retryExperience()}><RotateCcw />重试</button>}</div>) : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={`${visualLook.name}素材预览`} />}
       {cameraFallback && <div className="ex-visual-status" role="status"><span>本地取景</span></div>}
@@ -282,7 +397,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
         {generationPending && <span className="ex-visual-generating"><Sparkles aria-hidden="true" />{preparationLabel}</span>}
       </div>}
       {!realtime && loading && <div className="ex-visual-status" role="status"><span>正在生成</span></div>}
-      <MirrorMaterialDrawer key={mode} looks={enabled} selectedId={state.selectedLookId} disabled={!canChoose} passive={passive}
+      <MirrorMaterialDrawer key={mode} looks={enabled} selectedId={state.selectedLookId} disabled={!canChoose} passive={passive} columns={state.settings.materialDrawerColumns ?? 2}
         title={mode === 'clothx' ? '选择服装' : '选择素材'} onBusyChange={setCarouselBusy} onSelect={lookId => {
           const latest = currentRound.current;
           if (!latest.canChoose) return Promise.resolve(false);
@@ -290,7 +405,9 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
           if (latest.state.phase === 'showcase' || latest.state.phase === 'generating') return command({ action: 'switch', lookId });
           return Promise.resolve(false);
         }} />
-      {feedback && <div className="ex-mirror-feedback" role="alert"><span>{feedback}</span>{live?.updateError && !live.error && <button type="button" className="ex-kiosk-retry" disabled={disabled || stopPending || localStopPending} onClick={() => void live.retryUpdate()}><RotateCcw aria-hidden="true" />重试换装</button>}{welcome && realtime && !mox && live?.secure && live.error && !state.live && <><button type="button" className="ex-kiosk-retry" disabled={disabled || live.opening} onClick={() => { setBeginError(''); void live.startCamera(); }}><RotateCcw aria-hidden="true" />重试摄像头</button><a className="ex-kiosk-retry" href={appUrl(`/camera-check.html?mirror=${encodeURIComponent(state.mirrorId ?? 'default')}`)}>选择摄像头</a></>}</div>}
+      {feedback && <div className="ex-mirror-feedback" role="alert"><span>{feedback}</span>{live?.updateError && !live.error && <button type="button" className="ex-kiosk-retry" disabled={disabled || stopPending || localStopPending} onClick={() => void live.retryUpdate()}><RotateCcw aria-hidden="true" />重试换装</button>}{welcome && realtime && !mox && live?.secure && live.error && !state.live && <button type="button" className="ex-kiosk-retry" disabled={disabled || live.opening} onClick={() => { setBeginError(''); void live.startCamera(); }}><RotateCcw aria-hidden="true" />重试摄像头</button>}</div>}
+      {state.lifecycle?.idleEndsAt && !welcome && !passive && <div className="ex-mirror-feedback" role="status"><span>即将返回待机</span><button className="ex-kiosk-retry" disabled={disabled} onClick={() => void command({ action: 'keepalive' })}>继续体验</button></div>}
+      {state.lifecycle?.connection === 'recovering' && !welcome && <div className="ex-mirror-feedback" role="status"><span>正在恢复连接</span></div>}
       {locallyEnded && !passive && <div className="ex-mirror-feedback" role="status"><span>本地体验已结束，云端凭证状态待确认。</span></div>}
       <div className="ex-mirror-stage-actions">
         {recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled={disabled || passive || carouselBusy || beginPending || live?.opening || !!state.live} onClick={() => void command({ action: 'begin' })}><Play fill="currentColor" />{beginPending || live?.opening ? '等待摄像头…' : '开始体验'}</button>}
@@ -299,6 +416,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
     </div>
     <footer className="ex-mirror-footer">
       {!welcome && <button type="button" className="ex-mirror-home" aria-label="返回首页" disabled={passive || !canControl || stopPending || localStopPending} onClick={() => void command({ action: 'idle' })}><ArrowLeft /></button>}
+      <div className="ex-mirror-footer-tools">
       {realtime && !mox && !remote && !passive && !otherDevice && canControl && <button type="button" className="ex-mirror-gesture" data-status={gestures.status}
         data-detection={gestureSeeingHand ? 'hand' : gestureBlocked ? 'paused' : 'waiting'} data-capture={gestures.captureStatus}
         data-hand-detected={!!gestures.handDetected} data-hand-raised={!!gestures.handRaised} data-inference-fps={gestures.fps}
@@ -310,6 +428,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
         title={gestures.error || gestureLabel} onClick={() => { if (!configuredGestures.length) return; if (gestures.status === 'error') gestures.retry(); else setGesturesOn(value => !value); }}>
         <Hand aria-hidden="true" /><span aria-live="polite">{gestureLabel}</span><i aria-hidden="true" />
       </button>}
+      {cameraControl}
+      </div>
     </footer>
   </section>;
 }
@@ -326,7 +446,7 @@ export function MirrorPreview({ state, controller }: { state: ExhibitionState; c
   </section>;
 }
 
-function MirrorPage({ mirror, registry, selectMirror, terminal }: { mirror: ExhibitionMirrorSummary; registry: MirrorRegistry; selectMirror: (id: string) => void; terminal?: TerminalBinding }) {
+function MirrorPage({ mirror, registry, selectMirror, terminal, browserTest = false, browserTestControls }: { mirror: ExhibitionMirrorSummary; registry?: MirrorRegistry; selectMirror?: (id: string) => void; terminal?: TerminalBinding; browserTest?: boolean; browserTestControls?: ReactNode }) {
   const mirrorId = mirror.id;
   const controller = useExhibition(mirrorId);
   const { state, connected, pending, error, clearError, refresh } = controller;
@@ -340,18 +460,23 @@ function MirrorPage({ mirror, registry, selectMirror, terminal }: { mirror: Exhi
     const url = new URL(window.location.href); url.searchParams.delete('diagnostics'); window.history.replaceState(null, '', url);
   };
   const ownsMirror = !mirror.binding || (!!terminal?.connected && terminal.connection?.mirrorId === mirror.id && terminal.identity?.terminalId === mirror.binding.terminalId);
-  const live = useExhibitionLive({ state, active: !control && ownsMirror, refresh, mirrorId, onDiagnostic: diagnostics ? onDiagnostic : undefined, selectionPending: controller.selectionPending, terminal: terminal?.connected && terminal.connection?.mirrorId === mirror.id ? terminal.identity ?? undefined : undefined });
+  const cameraSettings = useTerminalCameraRequest(terminal, mirrorId, state, control || pending || controller.stopPending || !connected || !ownsMirror,
+    screen && !mirror.binding && !terminal?.identity);
+  const cameraPreferenceScope = browserTest ? mirrorId : undefined;
+  const live = useExhibitionLive({ state, active: !control && ownsMirror, refresh, mirrorId, cameraPreferenceScope, cameraSettingsOpen: cameraSettings.blocksGeneration, onDiagnostic: diagnostics ? onDiagnostic : undefined, selectionPending: controller.selectionPending, terminal: terminal?.connected && terminal.connection?.mirrorId === mirror.id ? terminal.identity ?? undefined : undefined });
+  useTerminalCameraReport(terminal, mirrorId, live, cameraSettings.request);
   const [fullError, setFullError] = useState('');
-  useEffect(() => { document.title = screen ? 'OpenBuy.AI · 轻触试衣镜' : 'OpenBuy.AI · 展会控制台'; }, [screen]);
+  useEffect(() => { document.title = browserTest ? 'OpenBuy.AI · 浏览器测试' : screen ? 'OpenBuy.AI · 轻触试衣镜' : 'OpenBuy.AI · 展会控制台'; }, [screen, browserTest]);
   const fullScreen = async () => {
     try { await document.documentElement.requestFullscreen(); }
     catch { setFullError('当前浏览器不支持一键全屏，请使用浏览器的全屏功能。'); }
   };
-  if (new URLSearchParams(window.location.search).get('credentialForm') === '1') return <main className="ex-app ex-credential-embedded-page"><MirrorCredentialSettings embedded controller={controller} live={live} /></main>;
-  if (!state) return <main className="ex-app ex-connection-screen"><Brand /><Sparkles size={36} /><h1>连接试衣镜</h1><p>{error || (connected ? '正在准备你的展会页面…' : '正在连接本地后台，请稍候。')}</p><button className="ex-button" onClick={() => void refresh()}>重新连接</button></main>;
+  if (!browserTest && new URLSearchParams(window.location.search).get('credentialForm') === '1') return <main className="ex-app ex-credential-embedded-page"><MirrorCredentialSettings embedded controller={controller} live={live} /></main>;
+  if (!state) return <main className="ex-app ex-connection-screen">{browserTestControls}<Brand /><Sparkles size={36} /><h1>连接试衣镜</h1><p>{error || (connected ? '正在准备你的展会页面…' : '正在连接本地后台，请稍候。')}</p><button className="ex-button" onClick={() => void refresh()}>重新连接</button></main>;
   return <main className={`ex-app${screen ? ' ex-screen-page' : ' ex-control-page'}`}>
-    {!screen && <header className="ex-topbar"><a href={exhibitionUrl('/exhibition/control', mirrorId)} aria-label="展会后台首页"><Brand /></a><nav aria-label="预览入口"><a href={exhibitionCameraUrl(mirrorId)} target="_blank" rel="noreferrer">竖屏大屏<ExternalLink size={12} /></a><a className={control ? 'is-current' : ''} href={exhibitionUrl('/exhibition/control', mirrorId)}>工作人员后台</a></nav><span className="ex-topbar-badge">{state.providerMode === 'xmax' ? 'XMAX 实时' : '交互演示'}</span></header>}
-    {screen ? <><Kiosk state={state} send={controller.send} stopExperience={controller.stopExperience} stopPending={controller.stopPending} commandPending={pending} selectionPending={controller.selectionPending} canControl={ownsMirror} disabled={(pending && !controller.selectionPending) || controller.stopPending || !connected || !ownsMirror} live={live} diagnostics={diagnostics} sendDiagnosed={controller.sendDiagnosed} />{diagnostics && <DiagnosticsPanel store={diagnostics} onClose={closeDiagnostics} />}{!terminal?.identity && <button className="ex-terminal-bind-trigger" onClick={terminal?.beginPairing}><Link2 size={14} />绑定设备</button>}{!ownsMirror && <span className="ex-terminal-preview-note">已绑定其他镜端 · 此页仅预览</span>}<button className="ex-fullscreen" aria-label="进入全屏" onClick={() => void fullScreen()}><Maximize2 size={16} /></button></> : <div className="ex-control-container"><MirrorConsole controller={controller} live={live} mirror={mirror} registry={registry} selectMirror={selectMirror} preview={<MirrorPreview key={mirror.id} state={state} controller={controller} />} /></div>}
+    {browserTestControls}
+    {!screen && <header className="ex-topbar"><a href={exhibitionUrl('/exhibition/control', mirrorId)} aria-label="展会后台首页"><Brand /></a></header>}
+    {screen ? <><Kiosk state={state} send={controller.send} stopExperience={controller.stopExperience} stopPending={controller.stopPending} commandPending={pending} selectionPending={controller.selectionPending} canControl={ownsMirror && !cameraSettings.blocksGeneration} disabled={(pending && !controller.selectionPending) || controller.stopPending || !connected || !ownsMirror || cameraSettings.blocksGeneration} live={live} diagnostics={diagnostics} sendDiagnosed={controller.sendDiagnosed} cameraControl={ownsMirror && <TerminalCameraEntry settings={cameraSettings} busy={!terminalCameraAvailable(state)} connected={connected} />} />{cameraSettings.request && <TerminalCameraSettings key={cameraSettings.request.id} request={cameraSettings.request} live={live} cameraPreferenceScope={cameraPreferenceScope} report={cameraSettings.request.localPreview ? undefined : terminal?.reportCamera} close={cameraSettings.close} keepPreview={state.providerMode === 'xmax' && state.experienceMode !== 'mox'} />}{diagnostics && <DiagnosticsPanel store={diagnostics} onClose={closeDiagnostics} />}{!browserTest && !terminal?.identity && <button className="ex-terminal-bind-trigger" onClick={terminal?.beginPairing}><Link2 size={14} />绑定设备</button>}{!ownsMirror && <span className="ex-terminal-preview-note">已绑定其他镜端 · 此页仅预览</span>}<button className="ex-fullscreen" aria-label="进入全屏" onClick={() => void fullScreen()}><Maximize2 size={16} /></button></> : registry && selectMirror ? <div className="ex-control-container"><MirrorConsole controller={controller} live={live} mirror={mirror} registry={registry} selectMirror={selectMirror} preview={<MirrorPreview key={mirror.id} state={state} controller={controller} />} /></div> : null}
 
     {!connected && <div className="ex-connection-alert" role="alert"><WifiOff size={17} /><span>后台连接中断，操作暂不可用。正在重新连接…</span><button onClick={() => void refresh()}>重试</button></div>}
     {(error || fullError) && <div className="ex-toast" role="alert"><span>{error || fullError}</span><button aria-label="关闭提示" onClick={() => { clearError(); setFullError(''); }}><X size={16} /></button></div>}
@@ -372,6 +497,7 @@ function ExhibitionContent() {
   }, [isScreen, currentPath]);
   const terminal = useTerminalBinding(isScreen);
   const [mirrorId, setMirrorId] = useState(() => new URLSearchParams(window.location.search).get('mirror') ?? 'default');
+  const lastKnownControlMirror = useRef<string | null>(null);
   useEffect(() => {
     const changed = () => setMirrorId(new URLSearchParams(window.location.search).get('mirror') ?? 'default');
     window.addEventListener('popstate', changed);
@@ -391,6 +517,22 @@ function ExhibitionContent() {
     if (url.searchParams.get('mirror') !== boundMirrorId) { url.searchParams.set('mirror', boundMirrorId); window.history.replaceState(null, '', url); }
     setMirrorId(boundMirrorId);
   }, [boundMirrorId]);
+  useEffect(() => {
+    if (isScreen || !registry.data) return;
+    if (registry.data.mirrors.some(item => item.id === mirrorId)) {
+      lastKnownControlMirror.current = mirrorId;
+      return;
+    }
+    // Another staff page may remove the selected mirror between list polls.
+    // Unknown links and terminal pages must still fail closed.
+    if (lastKnownControlMirror.current !== mirrorId) return;
+    const fallback = registry.data.defaultMirrorId;
+    if (!registry.data.mirrors.some(item => item.id === fallback)) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('mirror', fallback);
+    window.history.replaceState(null, '', url);
+    setMirrorId(fallback);
+  }, [isScreen, mirrorId, registry.data]);
   if (isScreen && (!terminal.ready || terminal.error || (terminal.identity && (!terminal.connected || !boundMirrorId)))) return <TerminalPairingScreen terminal={terminal} />;
   const selectedMirrorId = boundMirrorId ?? mirrorId;
   const mirror = registry.data?.mirrors.find(item => item.id === selectedMirrorId);
@@ -403,5 +545,6 @@ export default function ExhibitionApp() {
   const cameraEntry = defaultMirrorCameraEntry(window.location.href);
   useEffect(() => { if (cameraEntry) window.location.replace(cameraEntry); }, [cameraEntry]);
   // Do not mount screen clients on the origin we are about to leave.
-  return cameraEntry ? null : <ExhibitionContent />;
+  const browserTest = /\/screen\/?$/.test(window.location.pathname) && new URLSearchParams(window.location.search).has('browserTest');
+  return cameraEntry ? null : browserTest ? <BrowserTestPage renderMirror={(mirror, controls) => <MirrorPage key={mirror.id} mirror={mirror} browserTest browserTestControls={controls} />} /> : <ExhibitionContent />;
 }

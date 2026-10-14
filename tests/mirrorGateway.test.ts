@@ -94,6 +94,28 @@ describe('standalone mirror gateway boundaries', () => {
     }
   });
 
+  it('keeps browser-test creation, cookies and session access on HTTPS', async () => {
+    let forwarded = 0;
+    const upstream = await listen((_request, response) => { forwarded++; response.end('unexpected'); });
+    const gateway = await listen();
+    gateway.server.on('request', createLanRequestHandler({ ports: [gateway.port], targetPort: upstream.port }));
+    const creation = `/v1.1/api/exhibition/mirrors/${mirrorId}/browser-tests`;
+    const testRoot = '/v1.1/api/exhibition/mirrors/test-12345678-1234-1234-1234-123456789abc';
+    for (const [method, path] of [
+      ['POST', creation], ['POST', creation.replace('/browser-tests', '/%62rowser-tests')],
+      ['GET', testRoot], ['GET', `${testRoot}/browser-test`], ['GET', `${testRoot}/assets/test-image`],
+      ['POST', `${testRoot}/live/session`], ['POST', `${testRoot}/browser-test/close`],
+    ]) {
+      const response = await rawRequest(gateway.port, path, { method, body: method === 'POST' ? '{}' : '',
+        headers: { origin: `http://127.0.0.1:${gateway.port}`, 'content-type': 'application/json' } });
+      expect(response.status, path).toBe(403);
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(validateCameraRequest(guardRequest({ port: 10202, path, method,
+        headers: { origin: 'https://xuminghong.local:10202' } }))).toBeNull();
+    }
+    expect(forwarded).toBe(0);
+  });
+
   it('redirects HTTP and camera roots with the full mirror query and no cache', async () => {
     const query = `?mirror=${mirrorId}&view=camera`;
     const lan = await listen();
@@ -108,6 +130,25 @@ describe('standalone mirror gateway boundaries', () => {
       expect(response.headers['cache-control']).toBe('no-store');
       expect((await rawRequest(port, '/v1.1/api/settings/api-key')).status).toBe(404);
     }
+  });
+
+  it('preserves the scoped test cookie through the HTTPS proxy', async () => {
+    const path = '/v1.1/api/exhibition/mirrors/test-12345678-1234-1234-1234-123456789abc/browser-test';
+    const cookie = 'miror_browser_test=example-test-token';
+    const setCookie = `${cookie}; Path=${path.replace('/browser-test', '')}; Secure; HttpOnly; SameSite=Strict`;
+    let receivedCookie: string | undefined;
+    const upstream = await listen((request, response) => {
+      receivedCookie = request.headers.cookie;
+      response.writeHead(200, { 'set-cookie': setCookie, 'content-type': 'application/json' });
+      response.end('{"ready":true}');
+    });
+    const gateway = await listen();
+    gateway.server.on('request', createCameraRequestHandler({ port: gateway.port, targetPort: upstream.port }));
+    const response = await rawRequest(gateway.port, path, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    expect(receivedCookie).toBe(cookie);
+    expect(response.headers['set-cookie']).toEqual([setCookie]);
+    expect(response.headers['cache-control']).toBe('no-store');
   });
 
   it('proxies secure credentials with body, rewritten Host and Origin, and no forwarded identity', async () => {

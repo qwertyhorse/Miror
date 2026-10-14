@@ -3,15 +3,21 @@ package ai.openbuy.exhibition
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Dns
+import okhttp3.MediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.Response
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.UnknownHostException
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -22,9 +28,14 @@ class ExhibitionApi(
     private val terminalId: String,
     private val terminalToken: String,
     private val label: String,
+    dns: Dns = Dns.SYSTEM,
 ) {
     private val screen = URI(UrlPolicy.cameraScreenUrl(screenUrl))
     private val origin: String
+    // Keep the configured hostname for Host, SNI and certificate verification.
+    // DNS may supply a LAN address; paid POSTs must never be retried automatically.
+    private val client = OkHttpClient.Builder().dns(dns)
+        .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build()
 
     init {
         require(screen.rawPath == SCREEN_PATH || screen.rawPath == "$SCREEN_PATH/") {
@@ -62,13 +73,25 @@ class ExhibitionApi(
         return resolved.toASCIIString()
     }
 
-    suspend fun connectTerminal(): JSONObject = json(
+    suspend fun connectTerminal(cameraReport: JSONObject? = null): JSONObject = json(
         "/exhibition/terminals/connect", "POST", JSONObject()
             .put("terminalId", terminalId).put("token", terminalToken)
-            .put("label", label).put("platform", "android"),
+            .put("label", label).put("platform", "android")
+            .put("cameraCapabilities", JSONObject().put("version", 1))
+            .apply { cameraReport?.let { put("cameraReport", it) } },
     )
 
     suspend fun state(mirrorId: String): JSONObject = json(mirrorPath(mirrorId))
+
+    private var changesSupported = true
+    suspend fun changes(mirrorId: String, after: Long): JSONObject {
+        if (!changesSupported) return state(mirrorId)
+        return try { json("${mirrorPath(mirrorId)}/changes?after=$after", timeoutMs = 10_000) }
+        catch (error: ExhibitionApiException) {
+            if (error.code != "NOT_FOUND") throw error
+            changesSupported = false; state(mirrorId)
+        }
+    }
 
     suspend fun liveStatus(mirrorId: String): JSONObject = json("${mirrorPath(mirrorId)}/live/status")
 
@@ -78,7 +101,7 @@ class ExhibitionApi(
         revision: Long? = null,
         lookId: String? = null,
     ): JSONObject {
-        val body = JSONObject().put("action", action)
+        val body = JSONObject().put("action", action).put("commandId", java.util.UUID.randomUUID().toString())
         // Stop always has priority over a stale selection/start revision.
         if (revision != null && action != "end" && action != "idle") body.put("expectedRevision", revision)
         if (lookId != null) body.put("lookId", lookId)
@@ -105,6 +128,17 @@ class ExhibitionApi(
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/reference", "POST",
         JSONObject().put("deviceId", deviceId).put("lookId", lookId).put("refImageUrl", refImageUrl), 20_000)
 
+    suspend fun readyReference(mirrorId: String, lookId: String): JSONObject? {
+        require(Regex("[A-Za-z0-9_-]{1,100}").matches(lookId)) { "素材编号无效。" }
+        return json("${mirrorPath(mirrorId)}/references/$lookId", timeoutMs = 1_500).optJSONObject("reference")
+    }
+
+    suspend fun condition(mirrorId: String, sessionId: String, input: JSONObject): JSONObject =
+        json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/condition", "POST", input, 12_000)
+
+    suspend fun conditionApplied(mirrorId: String, sessionId: String, input: JSONObject): JSONObject =
+        json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/condition/applied", "POST", input)
+
     suspend fun link(mirrorId: String, sessionId: String, providerSessionId: String): JSONObject = json(
         "${sessionPath(mirrorId, sessionId)}/link", "POST",
         JSONObject().put("providerSessionId", providerSessionId), 20_000,
@@ -117,8 +151,16 @@ class ExhibitionApi(
 
     suspend fun heartbeat(mirrorId: String, sessionId: String, deviceId: String): JSONObject = json(
         "${mirrorPath(mirrorId)}/live/heartbeat", "POST",
-        JSONObject().put("sessionId", sessionId).put("deviceId", deviceId), 6_000,
+        JSONObject().put("sessionId", sessionId).put("deviceId", deviceId), 4_000,
     )
+
+    suspend fun prepareRenewal(mirrorId: String, sessionId: String, deviceId: String, sessionNumber: Long, generationNumber: Long): JSONObject = json(
+        "${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/renewal", "POST", JSONObject()
+            .put("deviceId", deviceId).put("sessionNumber", sessionNumber).put("generationNumber", generationNumber), 8_000)
+
+    suspend fun commitRenewal(mirrorId: String, sessionId: String, deviceId: String, renewalId: String): JSONObject = json(
+        "${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/renewal/commit", "POST", JSONObject()
+            .put("deviceId", deviceId).put("renewalId", renewalId), 8_000)
 
     suspend fun stopSession(mirrorId: String, sessionId: String): JSONObject {
         val stopped = json("${sessionPath(mirrorId, sessionId)}/stop", "POST", JSONObject(), 15_000)
@@ -136,20 +178,23 @@ class ExhibitionApi(
         sessionNumber: Long,
         generationNumber: Long,
         message: String,
+        reason: String? = null,
     ): JSONObject {
         val body = JSONObject().put("deviceId", deviceId).put("lookId", lookId)
             .put("sessionNumber", sessionNumber).put("generationNumber", generationNumber)
             .put("message", safeMessage(message).take(300))
+        if (reason != null) body.put("reason", reason)
         if (sessionId != null) body.put("sessionId", sessionId)
         return json("${mirrorPath(mirrorId)}/live/error", "POST", body, 15_000)
     }
 
-    suspend fun image(path: String): ByteArray = request(assetUrl(path), "GET", null, 20_000) { connection, active ->
-        checkStatus(connection, active)
-        val mime = connection.contentType.orEmpty().substringBefore(';').trim().lowercase(Locale.ROOT)
+    suspend fun image(path: String): ByteArray = request(assetUrl(path), "GET", null, 20_000) { response, active ->
+        checkStatus(response, active)
+        val mime = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase(Locale.ROOT)
         if (mime !in IMAGE_TYPES) throw ExhibitionApiException("INVALID_IMAGE", "素材不是有效图片，请在后台重新上传。")
-        if (connection.contentLengthLong > MAX_IMAGE_BYTES) throw ExhibitionApiException("IMAGE_TOO_LARGE", "素材图片过大。")
-        val result = connection.inputStream.use { readLimited(it, MAX_IMAGE_BYTES, active) }
+        val body = response.body() ?: throw ExhibitionApiException("INVALID_IMAGE", "素材图片为空，请重新上传。")
+        if (body.contentLength() > MAX_IMAGE_BYTES) throw ExhibitionApiException("IMAGE_TOO_LARGE", "素材图片过大。")
+        val result = body.byteStream().use { readLimited(it, MAX_IMAGE_BYTES, active) }
         if (result.isEmpty()) throw ExhibitionApiException("INVALID_IMAGE", "素材图片为空，请在后台重新上传。")
         result
     }
@@ -171,12 +216,13 @@ class ExhibitionApi(
         method: String = "GET",
         body: JSONObject? = null,
         timeoutMs: Int = 8_000,
-    ): JSONObject = request("$origin$VERSION_PATH/api$path", method, body?.toString()?.toByteArray(Charsets.UTF_8), timeoutMs) { connection, active ->
-        checkStatus(connection, active)
-        if (!connection.contentType.orEmpty().substringBefore(';').trim().equals("application/json", true)) {
+    ): JSONObject = request("$origin$VERSION_PATH/api$path", method, body?.toString()?.toByteArray(Charsets.UTF_8), timeoutMs) { response, active ->
+        checkStatus(response, active)
+        if (!response.header("Content-Type").orEmpty().substringBefore(';').trim().equals("application/json", true)) {
             throw ExhibitionApiException("INVALID_RESPONSE", "后台返回异常，请检查展台网址。")
         }
-        val text = connection.inputStream.use { readLimited(it, MAX_JSON_BYTES, active) }.toString(Charsets.UTF_8)
+        val responseBody = response.body() ?: throw ExhibitionApiException("INVALID_RESPONSE", "后台返回为空，请重试。")
+        val text = responseBody.byteStream().use { readLimited(it, MAX_JSON_BYTES, active) }.toString(Charsets.UTF_8)
         try { JSONObject(text) } catch (_: Exception) {
             throw ExhibitionApiException("INVALID_RESPONSE", "后台返回异常，请重试。")
         }
@@ -188,47 +234,36 @@ class ExhibitionApi(
         method: String,
         body: ByteArray?,
         timeoutMs: Int,
-        read: (HttpURLConnection, () -> Boolean) -> T,
+        read: (Response, () -> Boolean) -> T,
     ): T = withContext(Dispatchers.IO) {
         suspendCancellableCoroutine { continuation ->
-            val connection = URI(url).toURL().openConnection() as HttpURLConnection
-            continuation.invokeOnCancellation { connection.disconnect() }
+            val requestBody = body?.let { RequestBody.create(MediaType.parse("application/json; charset=utf-8"), it) }
+            val request = Request.Builder().url(url).method(method, requestBody)
+                .header("Accept", "application/json, image/png, image/jpeg, image/webp")
+                .header("Cache-Control", "no-store").header("Pragma", "no-cache")
+                .header("Origin", origin).header("X-Miror-Protocol", "2").build()
+            val call = client.newBuilder()
+                .connectTimeout(minOf(timeoutMs, 8_000).toLong(), TimeUnit.MILLISECONDS)
+                .readTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+                .writeTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+                .callTimeout(timeoutMs.toLong() + 8_000, TimeUnit.MILLISECONDS)
+                .build().newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
             try {
                 if (!continuation.isActive) return@suspendCancellableCoroutine
-                connection.instanceFollowRedirects = false
-                connection.useCaches = false
-                connection.defaultUseCaches = false
-                connection.connectTimeout = minOf(timeoutMs, 8_000)
-                connection.readTimeout = timeoutMs
-                connection.requestMethod = method
-                connection.setRequestProperty("Accept", "application/json, image/png, image/jpeg, image/webp")
-                connection.setRequestProperty("Cache-Control", "no-store")
-                connection.setRequestProperty("Pragma", "no-cache")
-                connection.setRequestProperty("Origin", origin)
-                if (body != null) {
-                    connection.doOutput = true
-                    connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    connection.setFixedLengthStreamingMode(body.size)
-                    connection.outputStream.use { output ->
-                        if (!continuation.isActive) throw IOException("cancelled")
-                        output.write(body)
-                    }
-                }
-                val result = read(connection) { continuation.isActive }
+                val result = call.execute().use { response -> read(response) { continuation.isActive } }
                 if (continuation.isActive) continuation.resume(result)
             } catch (error: Exception) {
                 if (continuation.isActive) continuation.resumeWithException(networkError(error))
-            } finally {
-                connection.disconnect()
             }
         }
     }
 
-    private fun checkStatus(connection: HttpURLConnection, active: () -> Boolean) {
-        val status = connection.responseCode
+    private fun checkStatus(response: Response, active: () -> Boolean) {
+        val status = response.code()
         if (status in 200..299) return
         if (status in 300..399) throw ExhibitionApiException("BACKEND_REDIRECT", "后台地址已变化，请检查展台网址。", status)
-        val text = connection.errorStream?.use { readLimited(it, MAX_ERROR_BYTES, active) }?.toString(Charsets.UTF_8).orEmpty()
+        val text = response.body()?.byteStream()?.use { readLimited(it, MAX_ERROR_BYTES, active) }?.toString(Charsets.UTF_8).orEmpty()
         val payload = try { JSONObject(text) } catch (_: Exception) { null }
         val nested = payload?.optJSONObject("error")
         val rawCode = nested?.optString("code")?.takeIf { it.isNotEmpty() }
@@ -260,7 +295,7 @@ class ExhibitionApi(
         is ExhibitionApiException -> error
         is SSLException -> ExhibitionApiException("TLS_ERROR", "安全连接验证失败，请检查设备证书与日期。")
         is SocketTimeoutException -> ExhibitionApiException("NETWORK_TIMEOUT", "后台连接超时，请重试。")
-        is UnknownHostException -> ExhibitionApiException("HOST_UNAVAILABLE", "无法解析后台地址，请检查网络或展台网址。")
+        is UnknownHostException -> ExhibitionApiException("HOST_UNAVAILABLE", "未找到后台，请检查网络或设置备用 IP。")
         else -> ExhibitionApiException("NETWORK_ERROR", "后台连接中断，请检查网络后重试。")
     }
 

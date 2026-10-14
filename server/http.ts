@@ -4,6 +4,27 @@ import { TryOnService } from './service.ts';
 import type { ExhibitionService } from './exhibition.ts';
 import type { ExhibitionMirrors } from './exhibitionMirrors.ts';
 
+const BROWSER_TEST_ID = /^test-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const BROWSER_TEST_COOKIE = 'miror_browser_test';
+const BROWSER_TEST_COMMANDS = new Set(['keepalive', 'select', 'begin', 'confirm', 'switch', 'next', 'previous', 'pause', 'resume', 'end', 'idle', 'recover']);
+function browserTestToken(request: IncomingMessage): string {
+  const values = (request.headers.cookie ?? '').split(';').map(value => value.trim()).filter(value => value.startsWith(`${BROWSER_TEST_COOKIE}=`));
+  return values.length === 1 ? values[0].slice(BROWSER_TEST_COOKIE.length + 1) : '';
+}
+function browserTestCookie(id: string, token: string, expired = false): string {
+  return `${BROWSER_TEST_COOKIE}=${token}; Path=/v1.1/api/exhibition/mirrors/${id}; Max-Age=${expired ? 0 : 3600}; HttpOnly; Secure; SameSite=Strict`;
+}
+function browserTestRouteAllowed(method: string, path: string): boolean {
+  if (['GET', 'HEAD'].includes(method) && (/^\/assets\/[^/]+(?:\/(?:display|reference)\/[^/]+)?$/.test(path) || /^\/skin\/[a-f0-9-]{36}$/.test(path))) return true;
+  if (method === 'GET') return ['', '/changes', '/diagnostics', '/live/status', '/references', '/browser-test'].includes(path)
+    || /^\/references\/[^/]+$/.test(path) || /^\/sessions\/[a-f0-9-]{36}$/.test(path);
+  if (method !== 'POST') return false;
+  return ['/command', '/live/session', '/live/heartbeat', '/live/error'].includes(path)
+    || /^\/references\/[^/]+(?:\/retry)?$/.test(path)
+    || /^\/live\/session\/[a-f0-9-]{36}\/(?:reference|condition(?:\/applied)?|renewal(?:\/commit)?)$/.test(path)
+    || /^\/sessions\/[a-f0-9-]{36}\/(?:stop|link|first-frame)$/.test(path);
+}
+
 function json(response: ServerResponse, status: number, body: unknown) {
   if (response.destroyed) return;
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -24,6 +45,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
   exhibition?.attachLiveService(service);
   const mirrors = exhibition && 'getMirror' in exhibition ? exhibition : undefined;
   const defaultExhibition = () => mirrors ? mirrors.getMirror() : exhibition as ExhibitionService | undefined;
+  let waitingForChanges = 0;
   const server = createServer(async (request, response) => {
     try {
       const host = request.headers.host ?? '';
@@ -38,7 +60,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (!exhibition) throw new ApiError('EXHIBITION_UNAVAILABLE', '展会演示服务尚未启动。', 503);
         if (request.method === 'POST' && url.pathname === '/api/exhibition/terminals/connect') {
           if (!mirrors) throw new ApiError('EXHIBITION_UNAVAILABLE', '镜端设备服务尚未启动。', 503);
-          return json(response, 200, await mirrors.connectDevice(await body(request)));
+          // Bounded UTF-8 metadata for up to 24 cameras; no frame payload is retained.
+          return json(response, 200, await mirrors.connectDevice(await body(request, 65_536)));
         }
         if (url.pathname === '/api/exhibition/mirrors') {
           if (!mirrors) throw new ApiError('EXHIBITION_UNAVAILABLE', '多试衣镜服务尚未启动。', 503);
@@ -48,53 +71,135 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         }
         const mirrorRoute = /^\/api\/exhibition\/mirrors\/([^/]+)(\/.*)?$/.exec(url.pathname);
         const mirrorId = mirrorRoute?.[1] ?? mirrors?.defaultMirrorId ?? 'default';
-        const current = mirrorRoute ? mirrors?.getMirror(mirrorId) : defaultExhibition();
-        if (!current) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这面试衣镜。', 404);
         const path = mirrorRoute ? mirrorRoute[2] ?? '' : url.pathname.slice('/api/exhibition'.length);
+        const browserTest = !!mirrorRoute && BROWSER_TEST_ID.test(mirrorId);
+        const testToken = browserTest ? browserTestToken(request) : '';
+        // A failed close remains retryable with its original cookie even while
+        // ordinary test reads/writes are fenced by the manager's closing state.
+        if (browserTest && mirrors && path === '/browser-test/close' && request.method === 'POST') {
+          await body(request, 2_048);
+          await mirrors.browserTests.close(mirrorId, testToken);
+          response.setHeader('Set-Cookie', browserTestCookie(mirrorId, '', true));
+          return json(response, 200, { closed: true });
+        }
+        const context = browserTest ? mirrors?.browserTests.resolve(mirrorId, testToken) : undefined;
+        const current = context?.exhibition ?? (browserTest ? undefined : mirrorRoute ? mirrors?.getMirror(mirrorId) : defaultExhibition());
+        const currentService = context?.service ?? service;
+        if (!current) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这面试衣镜。', 404);
+        if (browserTest && !browserTestRouteAllowed(request.method ?? '', path)) throw new ApiError('BROWSER_TEST_OPERATION_FORBIDDEN', '浏览器测试不支持此操作。', 403);
+        const assertCurrent = () => {
+          if (browserTest) mirrors!.browserTests.resolve(mirrorId, testToken);
+          else if (mirrors) mirrors.getMirror(mirrorId);
+        };
+        const readBody = async (maximumBytes?: number) => {
+          const input = await body(request, maximumBytes);
+          // The body can arrive after removal, expiration or an explicit close.
+          assertCurrent();
+          return input;
+        };
+        if (browserTest && path === '/browser-test' && request.method === 'GET') return json(response, 200, { mirror: context!.mirror, expiresAt: context!.expiresAt });
+        if (!browserTest && mirrorRoute && path === '/browser-tests' && request.method === 'POST') {
+          const input = await readBody(2_048);
+          if (Object.keys(input).length) throw new ApiError('BROWSER_TEST_INVALID_INPUT', '浏览器测试请求无效。');
+          const created = mirrors!.browserTests.create(current);
+          response.setHeader('Set-Cookie', browserTestCookie(created.mirror.id, created.token));
+          return json(response, 201, { mirror: created.mirror, expiresAt: created.expiresAt });
+        }
+        if (mirrorRoute && !path && request.method === 'DELETE') return json(response, 200, mirrors!.remove(mirrorId, await readBody()));
         if (mirrorRoute && path === '/credentials') {
-          if (request.method === 'GET') return json(response, 200, service.mirrorCredentialsStatus(mirrorId, current.credentialsEditable()));
+          if (request.method === 'GET') return json(response, 200, { ...currentService.mirrorCredentialsStatus(mirrorId, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
           if (request.method === 'PUT') {
-            const input = await body(request, 2_048);
-            return json(response, 200, service.saveMirrorCredentials(mirrorId, input, current.credentialsEditable()));
+            const input = await readBody(2_048);
+            return json(response, 200, { ...currentService.saveMirrorCredentials(mirrorId, input, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
           }
           throw new ApiError('NOT_FOUND', '未找到镜端密钥接口。', 404);
         }
-        if (mirrorRoute && !path && request.method === 'PATCH') return json(response, 200, mirrors!.rename(mirrorId, await body(request)));
-        if (mirrorRoute && path === '/copy' && request.method === 'POST') return json(response, 200, await mirrors!.copy(mirrorId, await body(request)));
-        if (mirrorRoute && path === '/binding' && request.method === 'POST') return json(response, 200, await mirrors!.bindDevice(mirrorId, await body(request)));
+        if (mirrorRoute && !path && request.method === 'PATCH') return json(response, 200, mirrors!.rename(mirrorId, await readBody()));
+        if (mirrorRoute && path === '/copy' && request.method === 'POST') return json(response, 200, await mirrors!.copy(mirrorId, await readBody()));
+        if (mirrorRoute && path === '/looks/copy' && request.method === 'POST') return json(response, 200, await mirrors!.copyLook(mirrorId, await readBody()));
+        if (mirrorRoute && path === '/binding' && request.method === 'POST') return json(response, 200, await mirrors!.bindDevice(mirrorId, await readBody()));
         if (mirrorRoute && path === '/binding' && request.method === 'DELETE') {
-          await mirrors!.unbindDevice(mirrorId, await body(request));
+          await mirrors!.unbindDevice(mirrorId, await readBody());
           return json(response, 200, { binding: null });
         }
-        if (request.method === 'GET' && !path) { void current.sweepLive().catch(() => undefined); return json(response, 200, current.get()); }
-        if (request.method === 'POST' && path === '/skin') return json(response, 200, await current.uploadUiSkin(await body(request, Infinity)));
-        if (request.method === 'DELETE' && path === '/skin') return json(response, 200, current.removeUiSkin(await body(request)));
+        if (mirrorRoute && path === '/camera' && request.method === 'GET') return json(response, 200, mirrors!.cameraStatus(mirrorId));
+        if (mirrorRoute && path === '/camera' && request.method === 'POST') return json(response, 200, mirrors!.openCamera(mirrorId, await readBody(2_048)));
+        if (request.method === 'GET' && path === '/changes') {
+          const after = Number(url.searchParams.get('after'));
+          if (!url.searchParams.has('after') || !Number.isSafeInteger(after) || after < 0) throw new ApiError('INVALID_REVISION', '状态版本无效。');
+          const state = current.read();
+          if (state.revision !== after) return json(response, 200, state);
+          if (waitingForChanges >= 128) throw new ApiError('TOO_MANY_REQUESTS', '连接繁忙，请稍后重试。', 429);
+          waitingForChanges++;
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            try { assertCurrent(); json(response, 200, current.read()); }
+            catch (error) {
+              const safe = error instanceof ApiError ? error : new ApiError('INTERNAL_ERROR', '本地服务暂时不可用。', 500);
+              json(response, safe.statusCode, { error: { code: safe.code, message: safe.message }, code: safe.code, message: safe.message });
+            }
+          };
+          const unsubscribe = current.subscribe(finish);
+          const timer = setTimeout(finish, 8_000);
+          response.once('close', () => { done = true; clearTimeout(timer); unsubscribe(); waitingForChanges--; });
+          return;
+        }
+        if (request.method === 'GET' && path === '/diagnostics') return json(response, 200, { mirrorId, state: current.read().lifecycle, policy: { sessionLimits: current.sessionLimits(), autoReturnSeconds: current.read().settings.autoReturnSeconds, leaseTtlMs: 20000 }, events: current.diagnosticTimeline() });
+        if (request.method === 'GET' && path === '/references') return json(response, 200, { references: current.referencePreparationStatuses() });
+        const retryReference = /^\/references\/([^/]+)\/retry$/.exec(path);
+        if (request.method === 'POST' && retryReference) {
+          await readBody();
+          return json(response, 202, { status: current.retryReferencePreparation(retryReference[1]) });
+        }
+        const preparedReference = /^\/references\/([^/]+)$/.exec(path);
+        if (preparedReference && request.method === 'GET') return json(response, 200, { reference: current.readyReference(preparedReference[1]) });
+        if (preparedReference && request.method === 'POST') {
+          await readBody();
+          return json(response, 200, { reference: await current.prepareReference(preparedReference[1]) });
+        }
+        if (request.method === 'GET' && !path) { return json(response, 200, current.read()); }
+        if (request.method === 'POST' && path === '/skin') return json(response, 200, await current.uploadUiSkin(await readBody(Infinity)));
+        if (request.method === 'DELETE' && path === '/skin') return json(response, 200, current.removeUiSkin(await readBody()));
         const skin = /^\/skin\/([a-f0-9-]{36})$/.exec(path);
         if (skin && ['GET', 'HEAD'].includes(request.method ?? '')) {
           const image = current.uiSkinAsset(skin[1]);
           response.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.data.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
           return response.end(request.method === 'HEAD' ? undefined : image.data);
         }
-        if (request.method === 'GET' && path === '/live/status') { void current.sweepLive().catch(() => undefined); return json(response, 200, current.liveStatus()); }
-        if (request.method === 'POST' && path === '/live/error') return json(response, 200, await current.reportLiveError(await body(request)));
-        if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await body(request)));
+        if (request.method === 'GET' && path === '/live/status') { return json(response, 200, current.liveStatus()); }
+        if (request.method === 'POST' && path === '/live/error') return json(response, 200, await current.reportLiveError(await readBody()));
+        if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await readBody()));
         if (request.method === 'POST' && path === '/live/session') {
-          const input = await body(request); let localId: string | undefined;
-          mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
-          response.once('close', () => { if (!response.writableEnded && localId) void service.stop(localId).then(() => current.reconcileLive()).catch(() => undefined); });
+          if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
+          const input = await readBody(); let localId: string | undefined;
+          if (!browserTest) {
+            mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
+            mirrors?.devices.assertCameraClosed(mirrorId);
+          }
+          response.once('close', () => { if (!response.writableEnded && localId) void currentService.stop(localId).then(() => current.reconcileLive()).catch(() => undefined); });
           const created = await current.createLiveSession(input, { cancelled: () => response.destroyed }); localId = created.id;
-          if (response.destroyed) { await service.stop(created.id); await current.reconcileLive(); return; }
+          if (response.destroyed) { await currentService.stop(created.id); await current.reconcileLive(); return; }
           return json(response, 201, created);
+        }
+        const liveRenewal = /^\/live\/session\/([a-f0-9-]{36})\/renewal(?:\/(commit))?$/.exec(path);
+        if (request.method === 'POST' && liveRenewal) {
+          currentService.assertSessionMirror(liveRenewal[1], mirrorId, true);
+          const input = await readBody();
+          return json(response, 200, liveRenewal[2]
+            ? await current.commitLiveRenewal(liveRenewal[1], input)
+            : await current.prepareLiveRenewal(liveRenewal[1], input));
         }
         const liveReference = /^\/live\/session\/([a-f0-9-]{36})\/reference$/.exec(path);
         if (request.method === 'POST' && liveReference) {
-          service.assertSessionMirror(liveReference[1], mirrorId, true);
-          return json(response, 200, await current.bindLiveReference(liveReference[1], await body(request)));
+          currentService.assertSessionMirror(liveReference[1], mirrorId, true);
+          return json(response, 200, await current.bindLiveReference(liveReference[1], await readBody()));
         }
         const liveCondition = /^\/live\/session\/([a-f0-9-]{36})\/condition(?:\/(applied))?$/.exec(path);
         if (request.method === 'POST' && liveCondition) {
-          service.assertSessionMirror(liveCondition[1], mirrorId, true);
-          const input = await body(request);
+          currentService.assertSessionMirror(liveCondition[1], mirrorId, true);
+          const input = await readBody();
           return json(response, 200, liveCondition[2]
             ? await current.liveConditionApplied(liveCondition[1], input)
             : await current.updateLiveCondition(liveCondition[1], input));
@@ -102,30 +207,32 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         const session = /^\/sessions\/([a-f0-9-]{36})(?:\/(stop|link|first-frame))?$/.exec(path);
         if (mirrorRoute && session) {
           const [, id, action] = session;
-          service.assertSessionMirror(id, mirrorId, true);
-          if (!action && request.method === 'GET') return json(response, 200, await service.get(id));
-          if (action === 'stop' && request.method === 'POST') { const stopped = await service.stop(id); await current.reconcileLive(); return json(response, 200, stopped); }
-          if (action === 'link' && request.method === 'POST') { const input = await body(request); return json(response, 200, await service.link(id, input.providerSessionId as string)); }
-          if (action === 'first-frame' && request.method === 'POST') { const input = await body(request); const framed = await service.firstFrame(id, input.firstFrameMs as number); current.liveFirstFrame(id, framed.firstFrameMs!); return json(response, 200, framed); }
+          currentService.assertSessionMirror(id, mirrorId, true);
+          if (!action && request.method === 'GET') return json(response, 200, await currentService.get(id));
+          if (action === 'stop' && request.method === 'POST') { const stopped = await currentService.stop(id); await current.reconcileLive(); return json(response, 200, stopped); }
+          if (action === 'link' && request.method === 'POST') { const input = await readBody(); return json(response, 200, await currentService.link(id, input.providerSessionId as string)); }
+          if (action === 'first-frame' && request.method === 'POST') { const input = await readBody(); const framed = await currentService.firstFrame(id, input.firstFrameMs as number); current.liveFirstFrame(id, framed.firstFrameMs!); return json(response, 200, framed); }
         }
         if (request.method === 'POST' && path === '/command') {
-          const input = await body(request);
+          const input = await readBody();
+          if (browserTest && !BROWSER_TEST_COMMANDS.has(String(input.action))) throw new ApiError('BROWSER_TEST_OPERATION_FORBIDDEN', '浏览器测试不支持此操作。', 403);
+          if (!browserTest && ['begin', 'confirm', 'resume', 'recover'].includes(String(input.action))) mirrors?.devices.assertCameraClosed(mirrorId);
           current.command(input);
           // Selection is immediate. Running camera sessions apply conditions in place;
           // incompatible or unfinished connections stop in the background.
           const reconciling = current.reconcileLive();
           if (['switch', 'next', 'previous'].includes(String(input.action))) void reconciling.catch(() => undefined);
           else await reconciling;
-          return json(response, 200, current.get());
+          return json(response, 200, current.read());
         }
-        if (request.method === 'POST' && path === '/looks') return json(response, 201, await current.upload(await body(request, current.uploadRequestLimit())));
-        if (request.method === 'POST' && path === '/taxonomy') return json(response, 200, current.taxonomy(await body(request)));
+        if (request.method === 'POST' && path === '/looks') return json(response, 201, await current.upload(await readBody(current.uploadRequestLimit())));
+        if (request.method === 'POST' && path === '/taxonomy') return json(response, 200, current.taxonomy(await readBody()));
         const look = /^\/looks\/([^/]+)$/.exec(path);
-        if (request.method === 'PATCH' && look) return json(response, 200, current.updateLook(look[1], await body(request)));
-        if (request.method === 'DELETE' && look) return json(response, 200, current.removeLook(look[1], await body(request)));
-        const asset = /^\/assets\/([^/]+)$/.exec(path);
+        if (request.method === 'PATCH' && look) return json(response, 200, await current.updateLook(look[1], await readBody(current.uploadRequestLimit())));
+        if (request.method === 'DELETE' && look) return json(response, 200, current.removeLook(look[1], await readBody()));
+        const asset = /^\/assets\/([^/]+)(?:\/(display|reference)\/([^/]+))?$/.exec(path);
         if (asset && ['GET', 'HEAD'].includes(request.method ?? '')) {
-          const image = current.asset(asset[1]);
+          const image = current.assetResource(asset[1], asset[2], asset[3]);
           response.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.data.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
           return response.end(request.method === 'HEAD' ? undefined : image.data);
         }

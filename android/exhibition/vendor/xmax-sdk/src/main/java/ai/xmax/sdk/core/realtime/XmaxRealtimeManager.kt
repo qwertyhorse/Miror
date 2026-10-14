@@ -85,15 +85,19 @@ internal class XmaxRealtimeManager(
         }
     }
 
+    override suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice> =
+        execute(OperationKind.SETTING) { _, c -> c.media.enumerateCameraDevices() }
+
     override suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean,
+        cameraDeviceId: String?,
     ): RealtimeMediaStream = mediaOperation(
         sourceRemoteAudioVolume = 0f,
         waitForCameraPreview = true,
     ) {
-        it.createLocalCameraStream(videoFormat, position, useMicrophone)
+        it.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId)
     }
     override suspend fun createLocalImageStream(imageData: ByteArray, videoFormat: RealtimeVideoFormat?): RealtimeMediaStream =
         mediaOperation(sourceRemoteAudioVolume = 0f) { it.createLocalImageStream(imageData, videoFormat) }

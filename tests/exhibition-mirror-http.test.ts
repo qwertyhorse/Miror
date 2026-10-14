@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -37,8 +38,8 @@ async function fixture(totalLimit = 360) {
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST') => fetch(base + path, {
-    method, headers: { 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+  const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', protocol = '2') => fetch(base + path, {
+    method, headers: { 'X-Miror-Protocol': protocol, 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
     ...(value === undefined ? {} : { body: JSON.stringify(value) }),
   });
   const root = (id: string) => `/api/exhibition/mirrors/${id}`;
@@ -53,6 +54,14 @@ async function fixture(totalLimit = 360) {
 }
 
 describe('mirror-scoped exhibition HTTP APIs', () => {
+  it('requires the current terminal protocol before issuing a credential', async () => {
+    const { request, root, start, issue } = await fixture(); const input = start('default');
+    const response = await request(root('default') + '/live/session', input, 'POST', '1');
+    expect(response.status).toBe(426);
+    expect(await response.json()).toMatchObject({ code: 'EXHIBITION_CLIENT_UPGRADE_REQUIRED' });
+    expect(issue).not.toHaveBeenCalled();
+  });
+
   it('returns a reference DNS failure without binding, linking, or allocating another credential', async () => {
     const { request, root, start, resolveHost, store, issue, sessionStatus } = await fixture();
     const input = start('default');
@@ -100,6 +109,36 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     const stale = await request(root(target.id) + '/copy', input);
     expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
     expect(mirrors.getMirror(source.id).get()).toEqual(sourceState);
+  });
+
+  it('appends one independent material to the addressed target group with revision protection', async () => {
+    const { mirrors, request, root } = await fixture();
+    const source = mirrors.create({ name: '素材来源镜' }); const target = mirrors.create({ name: '素材目标镜' });
+    const sourceBefore = mirrors.getMirror(source.id).read(); const before = mirrors.getMirror(target.id).read();
+    const input = { sourceMirrorId: source.id, sourceLookId: 'commute', mode: 'free', prompt: '人物身后出现彩虹', expectedRevision: before.revision };
+    const response = await request(root(target.id) + '/looks/copy', input);
+    expect(response.status).toBe(200); const state = await response.json(); const copied = state.looks.at(-1);
+    expect(copied).toMatchObject({ mode: 'free', prompt: input.prompt, source: 'upload', name: sourceBefore.looks[0].name, mime: 'image/webp' });
+    expect(copied.id).not.toBe('commute'); expect(copied.image).toContain(root(target.id) + '/assets/');
+    expect(state).toMatchObject({ mirrorId: target.id, selectedLookId: before.selectedLookId, experienceMode: before.experienceMode, settings: before.settings });
+    expect(state.looks.slice(0, -1)).toEqual(before.looks); expect(mirrors.getMirror(source.id).read()).toEqual(sourceBefore);
+    expect((await request(copied.image)).status).toBe(200); expect((await request(copied.referenceImage)).status).toBe(200);
+    const stale = await request(root(target.id) + '/looks/copy', input);
+    expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
+    const ownGroup = await request(root(target.id) + '/looks/copy', { ...input, sourceMirrorId: target.id, sourceLookId: copied.id, mode: 'mox', expectedRevision: state.revision });
+    expect(ownGroup.status).toBe(200); expect((await ownGroup.json()).looks.at(-1)).toMatchObject({ mode: 'mox' });
+  });
+
+  it('validates material-copy bodies and never falls back from a missing source or target', async () => {
+    const { mirrors, request, root } = await fixture(); const before = mirrors.getMirror().read();
+    const path = root('default') + '/looks/copy';
+    const input = { sourceMirrorId: 'default', sourceLookId: 'commute', mode: 'clothx', expectedRevision: before.revision };
+    expect((await request(path, {})).status).toBe(400);
+    expect((await request(root('missing') + '/looks/copy', input)).status).toBe(404);
+    expect((await request(path, { ...input, sourceMirrorId: 'missing' })).status).toBe(404);
+    expect((await request(path, { ...input, sourceLookId: 'missing' })).status).toBe(404);
+    expect((await request('/api/exhibition/looks/copy', input)).status).toBe(404);
+    expect(mirrors.getMirror().read()).toEqual(before);
   });
 
   it('rejects every wrong-mirror and legacy session path before provider calls or mutations', async () => {
@@ -160,12 +199,13 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     expect(store.get(sessions[1].id).status).toBe('active'); expect(deactivate).toHaveBeenCalledTimes(1);
     expect(mirrors.getMirror(b.id).get()).toEqual(beforeB);
     expect((await request(root(b.id) + `/sessions/${sessions[1].id}`)).status).toBe(200);
-    expect(store.allocated()).toBe(60);
+    expect(store.allocated()).toBe(2 * CONTINUOUS_SEGMENT_CREDITS);
   });
 
   it('allows simultaneous mirror reservations regardless of the ordinary local test limit', async () => {
     const { mirrors, store, issue, request, root, start } = await fixture(30);
     const a = mirrors.create({ name: '左镜' }); const b = mirrors.create({ name: '右镜' });
+    for (const mirror of [a, b]) mirrors.getMirror(mirror.id).command({ action: 'configure', sessionLimits: { credits: 30, expireSeconds: 120 } });
     const responses = await Promise.all([a, b].map(mirror => request(root(mirror.id) + '/live/session', start(mirror.id))));
     expect(responses.map(response => response.status)).toEqual([201, 201]);
     expect(issue).toHaveBeenCalledTimes(2); expect(store.allocated()).toBe(60); expect(store.list()).toHaveLength(2);
@@ -175,9 +215,10 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     const { mirrors, request, root } = await fixture();
     const a = mirrors.create({ name: '左镜' }); const b = mirrors.create({ name: '右镜' });
     const bytes = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#aa88ff' } }).png().toBuffer();
-    const uploaded = await request(root(a.id) + '/looks', { name: '临时素材', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64') });
+    const uploaded = await request(root(a.id) + '/looks', { name: '临时素材', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), referenceImageBase64: bytes.toString('base64') });
     expect(uploaded.status).toBe(201); const state = await uploaded.json(); const look = state.looks.at(-1)!;
-    expect(look.image).toBe(root(a.id) + `/assets/${look.id}`);
+    expect(look.image).toMatch(new RegExp(`^${root(a.id)}/assets/${look.id}/display/[a-f0-9-]+$`));
+    expect((await request(look.referenceImage)).status).toBe(200);
     expect((await request(look.image)).status).toBe(200);
     expect((await request(root(b.id) + `/assets/${look.id}`)).status).toBe(404);
     expect((await request(root(b.id) + `/looks/${look.id}`, {}, 'DELETE')).status).toBe(404);

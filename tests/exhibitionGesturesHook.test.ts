@@ -344,6 +344,135 @@ describe('exhibition gesture stream ownership and lifecycle', () => {
   });
 });
 
+describe('completion-driven gesture frame scheduling', () => {
+  async function advance(milliseconds: number) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(milliseconds); });
+  }
+  const frames = () => TestWorker.instances.at(-1)!.postMessage.mock.calls
+    .filter(([data]) => data.type === 'detect').map(([data]) => data);
+
+  it('samples immediately after 70–90 ms inference instead of waiting for another 67 ms polling boundary', async () => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    await advance(67);
+    let pending = frames().at(-1)!;
+    for (const inferenceDuration of [70, 90, 70, 90]) {
+      f.video.currentTime += 0.1;
+      const count = frames().length;
+      await advance(inferenceDuration);
+      expect(frames()).toHaveLength(count);
+      await f.replyCombined(pending);
+      await advance(0);
+      expect(frames()).toHaveLength(count + 1);
+      const next = frames().at(-1)!;
+      expect(next.timestamp - pending.timestamp).toBe(inferenceDuration);
+      expect(next.frameId).toBe(pending.frameId + 1);
+      pending = next;
+    }
+    expect(f.createBitmap).toHaveBeenCalledTimes(5);
+    expect(TestWorker.instances).toHaveLength(1);
+  });
+
+  it.each([5, 15, 30])('waits for the configured %s FPS limit when inference completes early', async maxFps => {
+    const f = await fixture({ mode: 'palm_wave', recognitionSettings: { ...DEFAULT_EXHIBITION_GESTURE_SETTINGS, maxFps } });
+    const interval = Math.ceil(1000 / maxFps);
+    await f.ready();
+    await advance(interval);
+    let pending = frames().at(-1)!;
+    for (let index = 0; index < 3; index += 1) {
+      f.video.currentTime += 0.1;
+      const count = frames().length;
+      await advance(8);
+      await f.replyCombined(pending);
+      await advance(interval - 9);
+      expect(frames()).toHaveLength(count);
+      await advance(1);
+      expect(frames()).toHaveLength(count + 1);
+      const next = frames().at(-1)!;
+      expect(next.timestamp - pending.timestamp).toBe(interval);
+      pending = next;
+    }
+  });
+
+  it('rounds up a fractional deadline and reschedules only the remainder after an early timer wakeup', async () => {
+    const clockNow = performance.now.bind(performance);
+    let submillisecond = 0.5;
+    vi.spyOn(performance, 'now').mockImplementation(() => clockNow() + submillisecond);
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    await advance(67);
+    const pending = frames()[0];
+    expect(pending.timestamp).toBe(67.5);
+    f.video.currentTime += 0.1;
+    await advance(8);
+    submillisecond = 0.7;
+    await f.replyCombined(pending); // Remaining 58.8 ms must round up to 59 ms.
+    await advance(58);
+    expect(frames()).toHaveLength(1);
+    // Simulate a timer arriving slightly before performance.now()'s deadline.
+    submillisecond = 0;
+    await advance(1);
+    expect(frames()).toHaveLength(1);
+    await advance(1);
+    expect(frames()).toHaveLength(2);
+    expect(frames()[1].timestamp - pending.timestamp).toBe(67.5);
+  });
+
+  it.each(['hidden', 'muted', 'disabled'] as const)('checks %s capture before immediately resampling a completed frame', async pause => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    await advance(67);
+    const pending = frames()[0];
+    f.video.currentTime += 0.1;
+    await advance(90);
+    if (pause === 'hidden') Object.assign(document, { hidden: true });
+    else if (pause === 'muted') f.track.muted = true;
+    else f.track.enabled = false;
+    await f.replyCombined(pending);
+    await advance(0);
+    expect(frames()).toHaveLength(1);
+    expect(f.result.captureStatus).toBe(pause);
+    expect(mirrorMotion.update).not.toHaveBeenCalled();
+    Object.assign(document, { hidden: false });
+    f.track.muted = false; f.track.enabled = true;
+    await advance(67);
+    expect(frames()).toHaveLength(2);
+    expect(f.track.stop).not.toHaveBeenCalled();
+  });
+
+  it('cancels the immediate follow-up on unmount and rejects duplicate completed results', async () => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    await advance(67);
+    const pending = frames()[0];
+    f.video.currentTime += 0.1;
+    await advance(90);
+    await f.replyCombined(pending);
+    await f.replyCombined(pending);
+    expect(mirrorMotion.update).toHaveBeenCalledTimes(1);
+    await host!.close(); host = undefined;
+    await advance(500);
+    expect(frames()).toHaveLength(1);
+    expect(TestWorker.instances[0].terminate).toHaveBeenCalledOnce();
+    expect(f.track.stop).not.toHaveBeenCalled();
+  });
+
+  it('still times out a stuck inference after 15 seconds without queuing another frame', async () => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    await advance(67);
+    f.video.currentTime += 0.1;
+    await advance(14_999);
+    expect(f.result.status).toBe('ready');
+    expect(frames()).toHaveLength(1);
+    await advance(1);
+    expect(f.result).toMatchObject({ status: 'error', error: '手势识别超时，请重试。' });
+    await advance(500);
+    expect(frames()).toHaveLength(1);
+    expect(TestWorker.instances[0].terminate).toHaveBeenCalledOnce();
+  });
+});
+
 describe('body-relative raise recognition integration', () => {
   it('loads only the pose worker and forwards all poses with visibility and mirrored coordinates', async () => {
     const f = await fixture({ mode: 'raise' });
@@ -776,6 +905,27 @@ describe('live mirror recognition configuration', () => {
     await f.ready();
     await f.replyCombined(await f.frame());
     expect(mirrorMotion.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies only lowering and tracking-grace changes without restarting the camera or worker', async () => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    const pending = await f.frame();
+    mirrorMotion.needsRelease = true;
+    const next = config({ palmLowerMs: 700, lowerTrackingGraceMs: 800 });
+    await f.render({ recognitionSettings: next });
+    expect(mirrorMotion.configure).toHaveBeenLastCalledWith(next);
+    expect(mirrorMotion.needsRelease).toBe(true);
+    await f.replyCombined(pending);
+    expect(mirrorMotion.update).not.toHaveBeenCalled();
+    await f.replyCombined(await f.frame());
+    expect(mirrorMotion.update).toHaveBeenCalledTimes(1);
+    const configured = mirrorMotion.configure.mock.calls.length;
+    await f.render({ recognitionSettings: { ...next } });
+    expect(mirrorMotion.configure).toHaveBeenCalledTimes(configured);
+    expect(TestWorker.instances).toHaveLength(1);
+    expect(f.track.stop).not.toHaveBeenCalled();
+    expect(f.getUserMedia).not.toHaveBeenCalled();
   });
 
   it('applies input resolution and maximum sample rate to actual captured frames without another worker', async () => {

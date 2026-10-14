@@ -1,9 +1,12 @@
 import { useState, useSyncExternalStore } from 'react';
 import { ChevronDown, ChevronUp, Download, Trash2, X } from 'lucide-react';
 import type { DiagnosticEventType, DiagnosticMetrics, ExhibitionDiagnostics } from './diagnostics';
+import { DEFAULT_EXHIBITION_GESTURE_SETTINGS } from '../../shared/exhibitionGestures';
 import './diagnostics.css';
 
 const stageLabels: Record<DiagnosticEventType, string> = {
+  experience_started: '开始连接体验', credential_started: '申请临时凭证', credential_ready: '凭证就绪',
+  rtc_started: '建立实时连接', rtc_ready: '实时连接就绪', reference_cache_hit: '复用已准备素材',
   gesture_threshold: '越过抬手阈值', gesture_confirmed: '动作确认', gesture_ignored: '动作未提交',
   command_sent: '命令提交', command_accepted: '命令接受', command_rejected: '命令失败', command_cancelled: '命令已取消',
   reference_started: '准备素材', reference_ready: '素材就绪', upload_started: '上传素材', upload_ready: '上传完成',
@@ -15,13 +18,17 @@ const ms = (value: number | undefined) => value === undefined ? '—' : `${Math.
 const confirmationLabels: Record<NonNullable<DiagnosticMetrics['confirmationState']>, string> = {
   no_hand: '未检测到手', unmatched_hand: '手与操作者未匹配', settling: '正在锁定手掌', ambiguous: '手归属不明确',
   incomplete: '手掌未完整入镜', too_small: '手掌过小', fingers_folded: '掌形未确认', holding: '展掌确认中',
-  already_triggered: '本次展掌已触发', release_required: '已触发 · 请收手',
+  already_triggered: '本次展掌已触发', release_required: '已触发 · 请放下手',
+  lowering: '下放确认中', raise_required: '已复位 · 请抬手',
 };
 
 function confirmationLabel(sample: DiagnosticMetrics | undefined) {
   if (sample?.captureStatus !== 'active') return '暂停取景';
   if (sample.confirmationState) {
-    if (sample.confirmationState === 'holding') return `展掌确认 ${sample.palmHoldMs === undefined ? '—' : Math.min(300, Math.round(sample.palmHoldMs))} / 300 ms`;
+    if (sample.confirmationState === 'holding') {
+      const targetMs = sample.palmConfirmMs ?? DEFAULT_EXHIBITION_GESTURE_SETTINGS.palmConfirmMs;
+      return `展掌确认 ${sample.palmHoldMs === undefined ? '—' : Math.min(targetMs, Math.round(sample.palmHoldMs))} / ${targetMs} ms`;
+    }
     return confirmationLabels[sample.confirmationState];
   }
   return sample.operatorStatus !== 'locked' ? '未锁定' : !sample.handDetected ? '手未入镜'

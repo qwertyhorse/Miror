@@ -1,3 +1,5 @@
+import { ReferenceAssets } from './referenceAssets.ts';
+import { ReferencePreparationQueue } from './referencePreparationQueue.ts';
 import { chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -21,6 +23,7 @@ const provider = new XmaxProvider(process.env.XMAX_API_KEY ?? '');
 if (provider.configured) store.activateApiKeyBudget(process.env.XMAX_API_KEY!);
 const service = new TryOnService({
   provider, store, secrets, resolveHost: resolveMediaHost,
+  referenceAssets: new ReferenceAssets(dataDirectory),
   mirrorCredentials: new MirrorCredentialStore(dataDirectory, secrets),
   perSessionLimit: Number(process.env.XMAX_SESSION_CREDITS ?? 30),
   expireSeconds: Number(process.env.XMAX_TOKEN_EXPIRE_SECONDS ?? 120),
@@ -36,16 +39,30 @@ const server = createApiServer(service, origins, undefined, exhibition);
 server.prependListener('request', (_request, response) => {
   response.setHeader('X-OpenBuy-Version', '1.1');
 });
+// Persisted temporary test credentials use their frozen signing snapshot during recovery.
 await service.recover();
+await exhibition.browserTests.sweep();
 server.listen(port, '127.0.0.1', () => {
   console.log(`Mirror internal API listening on port ${port} (XMAX ${provider.configured ? 'configured' : 'not configured'})`);
 });
+// One background upload at a time; selected and enabled materials take priority.
+// No RTC or temporary generation credential is allocated by preparation.
+const preparationQueue = new ReferencePreparationQueue(() => exhibition.list().mirrors.map(mirror => {
+  const current = exhibition.getMirror(mirror.id);
+  return { id: mirror.id, state: current.get(), configured: service.status(mirror.id).configured,
+    status: (lookId: string) => current.referencePreparationStatus(lookId),
+    prepare: (lookId: string) => current.prepareReference(lookId) };
+}));
+const preparationInterval = setInterval(() => {
+  if (!closing) void preparationQueue.runOnce().catch(() => { console.warn('Reference preparation queue could not read the material catalog.'); });
+}, 1_000);
+preparationInterval.unref();
 let sweeping = false;
 const interval = setInterval(async () => {
   if (sweeping) return;
   sweeping = true;
   try {
-    for (const row of store.list()) {
+    for (const row of store.unclosed()) {
       if (!row.tokenCipher || !['active', 'stopping'].includes(row.status)) continue;
       try {
         const updated = await service.get(row.id);
@@ -61,8 +78,10 @@ async function shutdown() {
   if (closing) return;
   closing = true;
   clearInterval(interval);
+  clearInterval(preparationInterval);
   server.close();
-  await Promise.allSettled(store.list().filter(row => row.tokenCipher && row.status !== 'stopped').map(row => service.stop(row.id)));
+  await exhibition.browserTests.destroy();
+  await Promise.allSettled(store.unclosed().filter(row => row.tokenCipher).map(row => service.stop(row.id)));
   store.close();
   process.exit(0);
 }

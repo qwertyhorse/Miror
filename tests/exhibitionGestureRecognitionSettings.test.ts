@@ -52,6 +52,11 @@ describe('per-mirror gesture recognition settings', () => {
     expect(f.checkbox('手掌识别').checked).toBe(true);
     expect(f.checkbox('左右挥手').checked).toBe(false);
     expect(f.input('palmConfirmMs').value).toBe('300');
+    expect(f.input('palmLowerMs')).toMatchObject({ value: '350', min: 150, max: 1500, step: 1 });
+    expect(f.input('lowerTrackingGraceMs')).toMatchObject({ value: '500', min: 100, max: 1000, step: 1 });
+    for (const label of ['放手复位时长（毫秒）', '跟踪丢失容错（毫秒）', '握拳/撤手复位（毫秒）']) {
+      expect(host!.find(node => node.nodeName === 'label' && node.textContent === label)).toBeDefined();
+    }
     expect(f.input('minHandDetectionConfidence').value).toBe('0.35');
     expect(f.resolution().getReactProps()['data-value']).toBe('720');
     expect(host!.find(node => node.nodeName === 'select')).toBeUndefined();
@@ -62,6 +67,7 @@ describe('per-mirror gesture recognition settings', () => {
     const f = await fixture();
     await f.toggle('左右挥手', true);
     await f.change('palmConfirmMs', '450'); await f.change('maxFps', '10');
+    await f.change('palmLowerMs', '400'); await f.change('lowerTrackingGraceMs', '600');
     await f.resolutionKey('ArrowDown');
     expect(f.resolution().getReactProps()['aria-expanded']).toBe(true);
     await f.resolutionKey('Home'); await f.resolutionKey('Enter');
@@ -71,32 +77,49 @@ describe('per-mirror gesture recognition settings', () => {
     f.state.revision = 10; await f.render();
     await f.submit();
     expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'configure', expectedRevision: 10,
-      gestureRecognition: { ...resolveExhibitionGestureSettings(), gestures: ['open_palm', 'wave'], palmConfirmMs: 450, maxFps: 10, inputLongEdge: 480 } });
+      gestureRecognition: { ...resolveExhibitionGestureSettings(), gestures: ['open_palm', 'wave'], palmConfirmMs: 450,
+        palmLowerMs: 400, lowerTrackingGraceMs: 600, maxFps: 10, inputLongEdge: 480 } });
     expect(f.checkbox('左右挥手').checked).toBe(true);
     expect(f.button('保存识别设置').disabled).toBe(true);
   });
   it('allows clearing all gestures and restores defaults as a reviewable draft', async () => {
-    const f = await fixture(); await f.toggle('手掌识别', false); await f.submit();
+    const f = await fixture(); await f.toggle('手掌识别', false);
+    await f.change('palmLowerMs', '700'); await f.change('lowerTrackingGraceMs', '800'); await f.submit();
     expect(f.state.settings.gestureRecognition?.gestures).toEqual([]);
     await act(async () => f.button('恢复默认').onClick());
     expect(f.checkbox('手掌识别').checked).toBe(true);
+    expect(f.input('palmLowerMs').value).toBe('350'); expect(f.input('lowerTrackingGraceMs').value).toBe('500');
     expect(f.send).toHaveBeenCalledTimes(1);
     await f.submit();
     expect(f.send.mock.calls[1][0].gestureRecognition).toEqual(resolveExhibitionGestureSettings());
   });
-  it.each([['palmConfirmMs', '149'], ['palmReleaseMs', '1501'], ['maxFps', '4'], ['maxFps', '7.5'], ['minHandDetectionConfidence', '0.01'], ['minHandPresenceConfidence', ''], ['minTrackingConfidence', 'Infinity']])('rejects invalid %s=%s without a request', async (name, value) => {
+  it.each([['palmConfirmMs', '149'], ['palmReleaseMs', '1501'], ['palmLowerMs', '149'], ['palmLowerMs', '1501'],
+    ['palmLowerMs', '350.5'], ['palmLowerMs', ''], ['lowerTrackingGraceMs', '99'], ['lowerTrackingGraceMs', '1001'],
+    ['lowerTrackingGraceMs', '500.5'], ['lowerTrackingGraceMs', 'Infinity'], ['maxFps', '4'], ['maxFps', '7.5'],
+    ['minHandDetectionConfidence', '0.01'], ['minHandPresenceConfidence', ''], ['minTrackingConfidence', 'Infinity']])('rejects invalid %s=%s without a request', async (name, value) => {
     const f = await fixture(); await f.change(name, value);
     expect(f.button('保存识别设置').disabled).toBe(true);
     await f.submit(); expect(f.send).not.toHaveBeenCalled();
   });
+  it.each([{ palmLowerMs: 150, lowerTrackingGraceMs: 100 }, { palmLowerMs: 1500, lowerTrackingGraceMs: 1000 }])('saves exact supported duration boundaries: %j', async values => {
+    const f = await fixture();
+    await f.change('palmLowerMs', String(values.palmLowerMs));
+    await f.change('lowerTrackingGraceMs', String(values.lowerTrackingGraceMs));
+    expect(f.button('保存识别设置').disabled).toBe(false);
+    await f.submit();
+    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'configure', expectedRevision: 7,
+      gestureRecognition: { ...resolveExhibitionGestureSettings(), ...values } });
+  });
   it('preserves unsaved edits during polling and detects conflicting remote settings', async () => {
-    const f = await fixture(); await f.change('maxFps', '10');
-    f.state.revision++; await f.render(); expect(f.input('maxFps').value).toBe('10');
-    f.state.settings.gestureRecognition = { ...resolveExhibitionGestureSettings(), maxFps: 20 }; await f.render();
-    expect(f.input('maxFps').value).toBe('10'); expect(f.button('保存识别设置').disabled).toBe(true);
+    const f = await fixture(); await f.change('palmLowerMs', '450'); await f.change('lowerTrackingGraceMs', '700');
+    f.state.revision++; await f.render(); expect(f.input('palmLowerMs').value).toBe('450');
+    expect(f.input('lowerTrackingGraceMs').value).toBe('700');
+    f.state.settings.gestureRecognition = { ...resolveExhibitionGestureSettings(), palmLowerMs: 600, lowerTrackingGraceMs: 900 }; await f.render();
+    expect(f.input('palmLowerMs').value).toBe('450'); expect(f.input('lowerTrackingGraceMs').value).toBe('700');
+    expect(f.button('保存识别设置').disabled).toBe(true);
     await f.submit(); expect(f.send).not.toHaveBeenCalled();
     await act(async () => f.button('取消修改').onClick());
-    expect(f.input('maxFps').value).toBe('20');
+    expect(f.input('palmLowerMs').value).toBe('600'); expect(f.input('lowerTrackingGraceMs').value).toBe('900');
   });
   it.each(['pending', 'stopPending', 'disconnected', 'generating', 'showcase', 'paused', 'live'] as const)('blocks saving and direct checkbox handlers while %s', async reason => {
     const f = await fixture(); await f.change('maxFps', '10');
@@ -109,15 +132,20 @@ describe('per-mirror gesture recognition settings', () => {
     await f.resolutionKey('Home'); await f.resolutionKey('Enter');
     expect(f.resolution().getReactProps()['data-value']).toBe('720');
     await f.toggle('左右挥手', true); expect(f.checkbox('左右挥手').checked).toBe(false);
+    expect(f.input('palmLowerMs').disabled).toBe(true); expect(f.input('lowerTrackingGraceMs').disabled).toBe(true);
+    await f.change('palmLowerMs', '600'); await f.change('lowerTrackingGraceMs', '800');
+    expect(f.input('palmLowerMs').value).toBe('350'); expect(f.input('lowerTrackingGraceMs').value).toBe('500');
     await f.submit(); expect(f.send).not.toHaveBeenCalled();
   });
   it('blocks double submission before pending props update and retains a failed draft', async () => {
-    const f = await fixture(); await f.change('maxFps', '10');
+    const f = await fixture(); await f.change('palmLowerMs', '450'); await f.change('lowerTrackingGraceMs', '700');
     let finish!: (saved: boolean) => void;
     f.send.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     await f.submit(); await f.submit(); expect(f.send).toHaveBeenCalledTimes(1);
+    await f.change('palmLowerMs', '800'); await f.change('lowerTrackingGraceMs', '900');
     await act(async () => finish(false));
-    expect(f.input('maxFps').value).toBe('10'); expect(f.button('保存识别设置').disabled).toBe(false);
+    expect(f.input('palmLowerMs').value).toBe('450'); expect(f.input('lowerTrackingGraceMs').value).toBe('700');
+    expect(f.button('保存识别设置').disabled).toBe(false);
     expect(host!.find(node => node.getReactProps().role === 'alert' && node.textContent.includes('未保存'))).toBeDefined();
   });
 });

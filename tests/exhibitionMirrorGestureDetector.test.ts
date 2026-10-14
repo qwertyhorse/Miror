@@ -115,6 +115,75 @@ describe('configurable mirror gesture selection and timing', () => {
     expect(run(detector, 4_900, 6_000, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
   });
 
+  it.each(['close', 'withdraw'] as const)('releases at the exact configured 500 ms %s boundary', release => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmReleaseMs: 500 });
+    presentPalm(detector);
+    run(detector, 1_700, 2_200, () => ({ poses: [pose()], hands: release === 'close' ? [hand(0.30, 0.42, 0, 'fist')] : [] }));
+    expect(run(detector, 2_300, 3_000, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+  });
+
+  it.each([150, 750, 1_500])('uses the exact configured %i ms natural lowering duration', palmLowerMs => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmLowerMs });
+    presentPalm(detector);
+    run(detector, 1_700, 1_700 + palmLowerMs - 50, () => scene(hand(0.30, 0.80)), 20);
+    expect(detector.confirmationState).toBe('lowering');
+    const low = scene(hand(0.30, 0.80));
+    expect(detector.update(low.poses, low.hands, 1_700 + palmLowerMs)).toBeNull();
+    expect(detector.confirmationState).toBe('raise_required');
+    const rise = 1_800 + palmLowerMs;
+    expect(run(detector, rise, rise + 1_000, () => scene(hand(0.30)))).toEqual([{ gesture: 'open_palm', time: rise + 300 }]);
+  });
+
+  it.each([100, 300, 1_000])('uses the %i ms tracking grace boundary without releasing on uncertain frames', lowerTrackingGraceMs => {
+    for (const overdue of [false, true]) {
+      const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmLowerMs: 150,
+        palmReleaseMs: 2_000, lowerTrackingGraceMs });
+      presentPalm(detector);
+      run(detector, 1_700, 1_800, () => scene(hand(0.30, 0.80)), 20);
+      const resume = 1_800 + lowerTrackingGraceMs + (overdue ? 50 : 0);
+      run(detector, 1_850, resume - 50, () => ({ poses: [pose({ left: { x: 0.30, y: 0.85 }, hidden: [15] })], hands: [] }), 20);
+      const low = scene(hand(0.30, 0.80));
+      expect(detector.update(low.poses, low.hands, resume)).toBeNull();
+      expect(detector.confirmationState).toBe(overdue ? 'lowering' : 'raise_required');
+      const events = run(detector, resume + 100, resume + 900, () => scene(hand(0.30)));
+      expect(events).toEqual(overdue ? [] : [{ gesture: 'open_palm', time: resume + 400 }]);
+    }
+  });
+
+  it('does not mistake continuous 8 FPS trustworthy wrists for a loss when the tracking grace is 100 ms', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmLowerMs: 350, lowerTrackingGraceMs: 100 });
+    presentPalm(detector, 8);
+    run(detector, 1_750, 2_125, () => scene(hand(0.30, 0.80)), 8);
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(run(detector, 2_250, 3_000, () => scene(hand(0.30)), 8)).toEqual([{ gesture: 'open_palm', time: 2_625 }]);
+  });
+
+  it('keeps the legacy allowRaise latch release at 350 ms independently of palmLowerMs', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ allowRaise: true, gestures: ['open_palm'], palmLowerMs: 1_500 });
+    expect(run(detector, 0, 700, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+    run(detector, 800, 1_100, () => scene(hand(0.30, 0.80)), 20);
+    expect(detector.needsRelease).toBe(true);
+    const low = scene(hand(0.30, 0.80));
+    expect(detector.update(low.poses, low.hands, 1_150)).toBeNull();
+    expect(detector.needsRelease).toBe(false);
+    expect(detector.confirmationState).toBe('lowering');
+  });
+
+  it.each(['reset', 'configure'] as const)('does not turn a partial configurable drop into a fresh palm across %s', boundary => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmLowerMs: 1_500, lowerTrackingGraceMs: 1_000 });
+    presentPalm(detector);
+    run(detector, 1_700, 1_900, () => scene(hand(0.30, 0.80)));
+    if (boundary === 'configure') detector.configure({ gestures: ['open_palm'], palmLowerMs: 150, lowerTrackingGraceMs: 100 });
+    else detector.reset(true);
+    expect(run(detector, 2_000, 3_000, () => scene(hand(0.30)))).toEqual([]);
+    // The new timing still applies to a fresh, complete drop after the boundary.
+    run(detector, 3_100, 4_700, () => scene(hand(0.30, 0.80)));
+    expect(detector.confirmationState).toBe('raise_required');
+    detector.configure({ gestures: ['open_palm'], palmLowerMs: 1_500, lowerTrackingGraceMs: 1_000 });
+    expect(run(detector, 4_800, 5_700, () => scene(hand(0.30, 0.80)))).toEqual([]);
+    expect(run(detector, 5_800, 6_700, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+  });
+
   it('reconfiguration and temporarily disabling selection cannot rearm a consumed palm', () => {
     const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
     presentPalm(detector);
@@ -126,6 +195,215 @@ describe('configurable mirror gesture selection and timing', () => {
     expect(run(detector, 4_100, 5_000, () => scene(hand(0.30)))).toEqual([]);
     run(detector, 5_100, 5_600, () => ({ poses: [pose()], hands: [] }));
     expect(run(detector, 5_700, 6_500, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+  });
+});
+
+describe('natural lowering after a consumed palm', () => {
+  it('counts a continuous downward arc despite finger jitter and vertical movement', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    run(detector, 1_750, 2_125, time => {
+      const elapsed = time - 1_750;
+      const sample = hand(0.30 + Math.sin(elapsed / 125) * 0.025, 0.70 + elapsed / 375 * 0.15);
+      for (const index of [8, 12, 16]) sample.landmarks[index].y += Math.sin(elapsed / 125) * 0.04;
+      return scene(sample);
+    }, 8);
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(run(detector, 2_250, 3_000, () => scene(hand(0.30)), 8)).toEqual([{ gesture: 'open_palm', time: 2_625 }]);
+  });
+
+  it('continues a confirmed body-wrist drop while the Hand model loses a small hand', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmReleaseMs: 1_000 });
+    presentPalm(detector);
+    run(detector, 1_700, 1_800, () => scene(hand(0.30, 0.72)));
+    run(detector, 1_900, 2_100, () => ({ poses: [pose({ left: { x: 0.30, y: 0.83 } })], hands: [] }));
+    // 200 ms of no Hand result is not the configured 1,000 ms withdrawal.
+    expect(run(detector, 2_200, 2_900, () => scene(hand(0.30)))).toEqual([{ gesture: 'open_palm', time: 2_500 }]);
+  });
+
+  it('waits for a trusted low wrist after a brief combined Hand and wrist-confidence dropout', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmReleaseMs: 1_000 });
+    expect(run(detector, 0, 700, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+    expect(detector.needsRelease).toBe(true);
+    run(detector, 800, 900, () => scene(hand(0.30, 0.73)));
+    run(detector, 1_000, 1_300, () => ({ poses: [pose({ left: { x: 0.30, y: 0.85 }, hidden: [15] })], hands: [] }));
+    // Uncertain frames preserve an established trajectory but never unlock it.
+    expect(detector.needsRelease).toBe(true);
+    const small = hand(0.30, 0.83);
+    small.landmarks = small.landmarks.map(point => ({ x: 0.30 + (point.x - 0.30) * 0.1, y: 0.83 + (point.y - 0.83) * 0.1 }));
+    const frame = scene(small);
+    expect(detector.update(frame.poses, frame.hands, 1_400)).toBeNull();
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(detector.needsRelease).toBe(false);
+    expect(run(detector, 1_500, 2_200, () => scene(hand(0.30)))).toEqual([{ gesture: 'open_palm', time: 1_800 }]);
+  });
+
+  it.each(['long_loss', 'raised_return', 'cropped', 'unowned'] as const)('cannot complete an interrupted drop with %s', interruption => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmReleaseMs: 2_000 });
+    presentPalm(detector);
+    run(detector, 1_700, 1_800, () => scene(hand(0.30, 0.73)));
+    const end = interruption === 'long_loss' ? 2_500 : 2_100;
+    run(detector, 1_900, end, () => {
+      if (interruption === 'cropped') return scene(hand(0.02, 0.80));
+      if (interruption === 'unowned') return { poses: [pose({ left: { x: 0.30, y: 0.80 } })], hands: [hand(0.60, 0.80)] };
+      return { poses: [pose({ left: { x: 0.30, y: 0.85 }, hidden: [15] })], hands: [] };
+    });
+    if (interruption !== 'raised_return') run(detector, end + 100, end + 200, () => scene(hand(0.30, 0.80)));
+    expect(run(detector, end + 300, end + 1_200, () => scene(hand(0.30)))).toEqual([]);
+    expect(detector.confirmationState).toBe('already_triggered');
+  });
+
+  it('checks the 500 ms wrist-confidence grace again when the trustworthy wrist returns', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmReleaseMs: 2_000 });
+    expect(run(detector, 0, 700, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+    run(detector, 800, 900, () => scene(hand(0.30, 0.73)));
+    run(detector, 1_000, 1_300, () => ({ poses: [pose({ left: { x: 0.30, y: 0.85 }, hidden: [15] })], hands: [] }));
+    const frame = scene(hand(0.30, 0.80));
+    // The frame gap is only 200 ms, but the last trustworthy low wrist was 600 ms ago.
+    expect(detector.update(frame.poses, frame.hands, 1_500)).toBeNull();
+    expect(detector.confirmationState).toBe('lowering');
+    expect(run(detector, 1_600, 2_300, () => scene(hand(0.30)))).toEqual([]);
+  });
+
+  it('keeps a low fixed-wrist palm rotation consumed while it is still waving', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    expect(run(detector, 1_700, 5_000, time => scene(hand(0.30, 0.80, oscillation(time) * Math.PI / 5)))).toEqual([]);
+    expect(run(detector, 5_100, 6_000, () => scene(hand(0.30)))).toEqual([]);
+  });
+
+  it('preserves wave-only gestures performed below the shoulder after a low rest', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['wave'] });
+    expect(run(detector, 0, 1_600, () => scene(hand(0.30)))).toEqual([]);
+    expect(run(detector, 1_700, 2_400, time => scene(wave(time))).map(event => event.gesture)).toEqual(['wave']);
+    expect(run(detector, 2_500, 4_000, () => scene(hand(0.30, 0.80)))).toEqual([]);
+    expect(detector.confirmationState).not.toBe('raise_required');
+    expect(detector.armed).toBe(true);
+    expect(run(detector, 4_100, 6_000, time => scene(hand(0.30 + oscillation(time) * 0.10, 0.80)))
+      .map(event => event.gesture)).toEqual(['wave']);
+  });
+
+  it.each([{ gestures: ['wave'] as const }, { gestures: ['open_palm', 'wave'] as const }])('allows a low wave after palm lowering when configured gestures become $gestures', ({ gestures }) => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    run(detector, 1_700, 2_400, () => scene(hand(0.30, 0.80)));
+    expect(detector.confirmationState).toBe('raise_required');
+    detector.configure({ gestures });
+    expect(run(detector, 2_500, 3_400, () => scene(hand(0.30, 0.80)))).toEqual([]);
+    expect(detector.armed).toBe(true);
+    expect(run(detector, 3_500, 5_400, time => scene(hand(0.30 + oscillation(time) * 0.10, 0.80)))
+      .map(event => event.gesture)).toEqual(['wave']);
+    // Re-enabling palm-only cannot turn the still-low hand into another palm.
+    detector.configure({ gestures: ['open_palm'] });
+    expect(run(detector, 5_500, 6_800, () => scene(hand(0.30, 0.80)))).toEqual([]);
+  });
+
+  it.each([5, 8, 15])('accepts another presentation after resting the hand by the body at %i FPS', fps => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector, fps);
+    // The short shared latch has already cleared, but this palm remains consumed.
+    expect(detector.needsRelease).toBe(false);
+    expect(detector.confirmationState).toBe('already_triggered');
+    expect(run(detector, 1_800, 3_800, () => scene(hand(0.30, 0.80)), fps)).toEqual([]);
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(detector.armed).toBe(false);
+    expect(detector.palmHoldMs).toBe(0);
+    const second = run(detector, 4_000, 5_000, () => scene(hand(0.30)), fps);
+    expect(second).toHaveLength(1);
+    expect(second[0].gesture).toBe('open_palm');
+    expect(second[0].time).toBeGreaterThanOrEqual(4_300);
+    expect(run(detector, 5_200, 6_000, () => scene(hand(0.30, 0.80)), fps)).toEqual([]);
+    expect(run(detector, 6_200, 7_200, () => scene(hand(0.30)), fps).map(event => event.gesture)).toEqual(['open_palm']);
+  });
+
+  it('reports the down-hold and restarts the full confirmation only after the hand rises', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    run(detector, 1_700, 2_000, () => scene(hand(0.30, 0.80)));
+    expect(detector.confirmationState).toBe('lowering');
+    run(detector, 2_100, 2_400, () => scene(hand(0.30, 0.80)));
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(run(detector, 2_500, 2_700, () => scene(hand(0.30)))).toEqual([]);
+    expect(detector.confirmationState).toBe('holding');
+    expect(detector.palmHoldMs).toBe(200);
+    expect(run(detector, 2_800, 3_600, () => scene(hand(0.30)))).toEqual([{ gesture: 'open_palm', time: 2_800 }]);
+  });
+
+  it('accepts a new palm in the shoulder display zone without requiring its previous exact height', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    run(detector, 1_700, 2_400, () => scene(hand(0.30, 0.80)));
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(run(detector, 2_500, 4_000, () => scene(hand(0.30, 0.50))))
+      .toEqual([{ gesture: 'open_palm', time: 2_800 }]);
+  });
+
+  it('does not rearm a brief dip or an open hand still waving below the shoulder', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    expect(run(detector, 1_700, 2_000, () => scene(hand(0.30, 0.80)))).toEqual([]);
+    expect(run(detector, 2_100, 3_000, () => scene(hand(0.30)))).toEqual([]);
+    expect(run(detector, 3_100, 6_000, time => scene(hand(0.30 + oscillation(time) * 0.10, 0.80)))).toEqual([]);
+    expect(run(detector, 6_100, 7_000, () => scene(hand(0.30)))).toEqual([]);
+    expect(detector.confirmationState).toBe('already_triggered');
+  });
+
+  it('keeps the lower-zone gate through a soft reset and a temporary hand-only source', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    run(detector, 1_700, 2_300, () => scene(hand(0.30, 0.80)));
+    expect(detector.confirmationState).toBe('raise_required');
+    detector.reset(true);
+    expect(run(detector, 2_400, 3_400, () => ({ poses: [], hands: [hand(0.30, 0.80)] }))).toEqual([]);
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(run(detector, 3_500, 4_300, () => scene(hand(0.30, 0.80)))).toEqual([]);
+    expect(run(detector, 4_400, 5_300, () => scene(hand(0.30))).map(event => event.gesture)).toEqual(['open_palm']);
+  });
+
+  it.each(['reset', 'gap', 'ambiguous'] as const)('discards a partial down-hold across %s instead of completing it with old evidence', interruption => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    run(detector, 1_700, 1_900, () => scene(hand(0.30, 0.80)));
+    if (interruption === 'reset') detector.reset(true);
+    if (interruption === 'ambiguous') detector.update([pose(), pose({ centerX: 0.64 })], [hand(0.30, 0.80)], 2_000);
+    const resume = interruption === 'gap' ? 2_500 : 2_100;
+    expect(run(detector, resume, resume + 200, () => scene(hand(0.30, 0.80)))).toEqual([]);
+    expect(run(detector, resume + 300, resume + 1_800, () => scene(hand(0.30)))).toEqual([]);
+    expect(detector.confirmationState).toBe('already_triggered');
+  });
+
+  it.each(['cropped', 'untrusted_wrist', 'unowned_hand', 'different_body'] as const)('does not treat a %s as a trustworthy natural drop', uncertainty => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    expect(run(detector, 1_700, 3_500, () => {
+      const sample = hand(uncertainty === 'cropped' ? 0.02 : uncertainty === 'different_body' ? 0.48 : 0.30, 0.80);
+      if (uncertainty === 'unowned_hand') return { poses: [pose()], hands: [sample] };
+      if (uncertainty === 'different_body') return { poses: [pose({ centerX: 0.68, left: { x: 0.30, y: 0.80 } })], hands: [sample] };
+      return scene(sample, undefined, { hidden: uncertainty === 'untrusted_wrist' ? [15] : [] });
+    })).toEqual([]);
+    expect(run(detector, 3_600, 5_000, () => scene(hand(0.30)))).toEqual([]);
+    expect(detector.confirmationState).toBe('already_triggered');
+  });
+
+  it('rearms only the lowered hand when both palms were consumed together', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    const right = hand(0.70, 0.42, 0, 'open', 'Right');
+    expect(run(detector, 0, 1_600, () => scene(hand(0.30), right)).map(event => event.gesture)).toEqual(['open_palm']);
+    expect(run(detector, 1_700, 3_500, () => scene(hand(0.30, 0.80), right))).toEqual([]);
+    // The stationary right palm is still consumed; only the left's new rise acts.
+    expect(run(detector, 3_600, 4_500, () => scene(hand(0.30), right)).map(event => event.gesture)).toEqual(['open_palm']);
+    expect(run(detector, 4_600, 6_000, () => scene(hand(0.30), right))).toEqual([]);
+  });
+
+  it('acquires the correct body wrist for a hand-only right trigger before lowering it', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    const rightAt = (y: number): Frame => { const sample = hand(0.70, y, 0, 'open', 'Right'); return { poses: [pose({ right: sample.landmarks[0] })], hands: [sample] }; };
+    expect(run(detector, 0, 1_600, () => ({ poses: [], hands: [hand(0.70, 0.42, 0, 'open', 'Right')] })).map(event => event.gesture)).toEqual(['open_palm']);
+    detector.reset(true);
+    expect(run(detector, 1_700, 2_500, () => rightAt(0.42))).toEqual([]);
+    expect(run(detector, 2_600, 3_400, () => rightAt(0.80))).toEqual([]);
+    expect(detector.confirmationState).toBe('raise_required');
+    expect(run(detector, 3_500, 4_500, () => rightAt(0.42)).map(event => event.gesture)).toEqual(['open_palm']);
   });
 });
 

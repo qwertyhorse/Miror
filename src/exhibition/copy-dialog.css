@@ -1,0 +1,22 @@
+.ex-copy-dialog{box-sizing:border-box}
+.ex-copy-material{display:flex;align-items:center;gap:14px;padding:12px;background:#f8f5fc;border-radius:8px;margin-bottom:22px;min-width:0}
+.ex-copy-material>img{width:64px;height:80px;object-fit:contain;flex-shrink:0;border-radius:4px;background:#fff}
+.ex-copy-material>div{min-width:0;display:grid;gap:7px}
+.ex-copy-material strong{font-size:14px;overflow-wrap:anywhere}
+.ex-copy-material span{font-size:11px;color:#9480a5;overflow-wrap:anywhere}
+.ex-copy-material-fields{display:grid;gap:20px;margin-top:22px}
+.ex-copy-dialog .ex-mode-choices>legend{position:static;width:auto;height:auto;overflow:visible;clip:auto;font-size:12px;color:#7e6b8f;margin-bottom:9px}
+.ex-copy-dialog .ex-mode-chips{flex-wrap:wrap}
+.ex-copy-dialog .ex-mode-chips input:disabled+span{opacity:.4;cursor:default}
+.ex-copy-dialog textarea{box-sizing:border-box;width:100%;resize:vertical;min-height:100px;padding:10px;border:1px solid #ded6e9;border-radius:6px;background:#fff;color:#4e405c;font:inherit;line-height:1.7}
+.ex-copy-dialog textarea:focus-visible,.ex-copy-dialog select:focus-visible{outline:3px solid #b6a9f2;outline-offset:2px}
+.ex-copy-direction{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:14px;background:#f8f5fc;border-radius:8px;padding:18px 14px;color:#685276}
+.ex-copy-direction strong{font-size:15px;overflow-wrap:anywhere}
+.ex-copy-direction strong:last-child{text-align:right}
+.ex-copy-direction svg{color:#a18aaf}
+.ex-copy-replace{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:22px;color:#8f7b9f;font-size:12px}
+.ex-copy-replace strong{font-size:12px;font-weight:500;background:#f4eefb;color:#795caa;border-radius:5px;padding:6px 10px}
+.ex-copy-feedback{margin-top:17px}
+.ex-copy-feedback .ex-field-error{margin:0}
+.ex-copy-dialog .ex-copy-loading{font-size:12px;color:#9988a7;margin-top:17px}
+@media(max-width:420px){.ex-copy-direction{gap:8px;padding:14px 10px}.ex-copy-direction strong{font-size:13px}.ex-copy-dialog footer{gap:7px}.ex-copy-dialog footer .ex-button{padding:9px 12px}}

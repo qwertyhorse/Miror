@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 *.tsbuildinfo
 .env
@@ -21,6 +21,7 @@ playwright-report/
 *.keystore
 *.apk
 .gradle/
+.kotlin/
 .idea/
 **/build/
 local.properties
@@ -34,3 +35,4 @@ tools/npm/
 
 # Local browser diagnostics and test evidence
 artifacts/
+output/

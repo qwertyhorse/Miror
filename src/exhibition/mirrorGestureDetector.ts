@@ -9,9 +9,12 @@ const MIN_WRIST_MATCH_DISTANCE = 0.035;
 const MAX_WRIST_MATCH_DISTANCE = 0.12;
 const RELEASE_STILL_MS = 600;
 const RELEASE_LOWER_MS = 350;
+const LOWER_WRIST_RADIUS = 0.035;
+const LOWER_TRACK_GRACE_MS = 500;
 const STILL_RADIUS = 0.018;
 const PALM_CONFIRM_MS = 300;
 const PALM_WITHDRAW_MS = 500;
+const PALM_LOWER_MS = 350;
 const MIN_FULL_PALM_SIZE = 0.028;
 // Presentation tolerates one naturally short or gently bent finger; these
 // initial limits do not require finger separation or an abducted thumb.
@@ -26,10 +29,22 @@ const SHOULDERS = [11, 12] as const;
 type Arm = 0 | 1;
 interface BodyAnchor { x: number; y: number; width: number; scale: number; }
 interface PalmPosition { wrist: ExhibitionGestureLandmark; tips: ExhibitionGestureLandmark; }
-interface PalmDisplay { consumed: boolean; since: number | null; absentSince: number | null; }
+interface PalmLowering {
+  body: BodyAnchor;
+  /** Triggering wrist height relative to the same body's shoulder scale. */
+  wristY: number;
+  since: number | null;
+  wristX?: number;
+  tipX?: number;
+  lastAt?: number;
+  trackingLost?: boolean;
+  waitingForRaise: boolean;
+}
+interface PalmDisplay { consumed: boolean; since: number | null; absentSince: number | null; lowering: PalmLowering | null; }
 interface HandTrack { hand: ExhibitionGestureHand; arm: Arm; since: number; lastAt: number; }
 export type ExhibitionGestureConfirmationState = 'no_hand' | 'unmatched_hand' | 'settling' | 'ambiguous'
-  | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required';
+  | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required'
+  | 'lowering' | 'raise_required';
 interface Latch {
   arm: Arm;
   body: BodyAnchor;
@@ -147,12 +162,14 @@ function palmMoved(a: PalmPosition, b: PalmPosition, aspect: number) {
   return Math.max(distance(a.wrist, b.wrist, aspect), distance(a.tips, b.tips, aspect)) > STILL_RADIUS;
 }
 
-const newDisplay = (): PalmDisplay => ({ consumed: false, since: null, absentSince: null });
+const newDisplay = (): PalmDisplay => ({ consumed: false, since: null, absentSince: null, lowering: null });
 interface MirrorGestureOptions {
   allowRaise?: boolean;
   gestures?: readonly ('open_palm' | 'wave')[];
   palmConfirmMs?: number;
   palmReleaseMs?: number;
+  palmLowerMs?: number;
+  lowerTrackingGraceMs?: number;
 }
 
 /** Prefer body-associated hands; a single visible hand can also take control without usable body wrists. */
@@ -169,6 +186,8 @@ export class ExhibitionMirrorGestureDetector {
   private get waveEnabled() { return this.options.gestures?.includes('wave') ?? true; }
   private get palmConfirmMs() { return this.options.palmConfirmMs ?? PALM_CONFIRM_MS; }
   private get palmReleaseMs() { return this.options.palmReleaseMs ?? PALM_WITHDRAW_MS; }
+  private get palmLowerMs() { return this.options.palmLowerMs ?? PALM_LOWER_MS; }
+  private get lowerTrackingGraceMs() { return this.options.lowerTrackingGraceMs ?? LOWER_TRACK_GRACE_MS; }
   private raise = new ExhibitionRaiseGestureDetector();
   private waves = [new ExhibitionGestureDetector({ waveReversals: 1 }), new ExhibitionGestureDetector({ waveReversals: 1 })];
   private palms: [PalmDisplay, PalmDisplay] = [newDisplay(), newDisplay()];
@@ -197,7 +216,9 @@ export class ExhibitionMirrorGestureDetector {
   get ambiguityReason() { return this.ambiguity; }
   get handDetected() { return this.detected; }
   get handRaised() { return this.raised; }
-  get armed() { return (this.palmEnabled || this.waveEnabled || !!this.options.allowRaise) && this.operatorStatus === 'locked' && !this.latch && (this.matched || (!!this.options.allowRaise && this.raise.armed)); }
+  get armed() { return this.operatorStatus === 'locked' && !this.latch && ((this.palmEnabled || this.waveEnabled)
+    && this.palms.some((display, arm) => this.palmIssues[arm] !== 'no_hand' && (this.waveEnabled
+      || (!display.consumed && !display.lowering?.waitingForRaise))) || (!!this.options.allowRaise && this.raise.armed)); }
   get needsRelease() { return this.latch !== null; }
   get lastRaiseStartedAt() { return this.raiseStartedAt; }
   get rawHandCount() { return this.rawCount; }
@@ -207,15 +228,17 @@ export class ExhibitionMirrorGestureDetector {
     if (!this.rawCount) return 'no_hand';
     if (!this.matchedCount) return 'unmatched_hand';
     if (this.status !== 'locked') return 'settling';
+    if (this.palmEnabled && this.palms.some(display => display.lowering?.since != null)) return 'lowering';
     if (this.latch) return 'release_required';
-    if (this.palmIssues.some((issue, arm) => issue === null && !this.palms[arm].consumed)) return 'holding';
+    if (this.palmIssues.some((issue, arm) => issue === null && !this.palms[arm].consumed && !this.palms[arm].lowering?.waitingForRaise)) return 'holding';
+    if (this.palmEnabled && this.palms.some(display => display.lowering?.waitingForRaise)) return 'raise_required';
     if (this.palmIssues.some(issue => issue === null)) return 'already_triggered';
     return this.palmIssues.find(issue => issue !== 'no_hand') ?? 'no_hand';
   }
   /** Current uninterrupted, unconsumed full-palm observation; no landmark data leaves the detector. */
   get palmHoldMs(): number {
     if (!this.palmEnabled) return 0;
-    return Math.max(0, ...this.palms.map((display, arm) => this.palmIssues[arm] === null && !display.consumed
+    return Math.max(0, ...this.palms.map((display, arm) => this.palmIssues[arm] === null && !display.consumed && !display.lowering?.waitingForRaise
       && display.since !== null && this.previousTime !== null ? Math.min(this.palmConfirmMs, this.previousTime - display.since) : 0));
   }
 
@@ -353,7 +376,9 @@ export class ExhibitionMirrorGestureDetector {
         this.handSince[arm] = timestampMs;
         this.palms[arm].since = this.palms[arm].absentSince = null;
         this.waves[arm].reset();
-        if (this.latch?.arm === arm) this.clearReleaseProgress();
+        // A returning Hand result may have changed size while its body wrist
+        // kept the same lowering trajectory. Reset hand-based stillness only.
+        if (this.latch?.arm === arm) this.clearReleaseProgress(!!pose && !bodyChanged);
       }
       this.handLastAt[arm] = timestampMs;
       this.lastHands[arm] = hand;
@@ -366,6 +391,7 @@ export class ExhibitionMirrorGestureDetector {
     this.palmIssues = matches.map(hand => palmIssue(hand, frameAspectRatio)) as typeof this.palmIssues;
     const complete = this.palmIssues.map(issue => issue === null);
     const unknownHand = hands.some(hand => !matches.includes(hand));
+    this.observeLoweredPalms(pose, matches, unknownHand, body, timestampMs, frameAspectRatio);
     this.observeDisplays(matches, complete, unknownHand, body, timestampMs, frameAspectRatio);
     if (this.status !== 'locked') {
       // Track the start of a new hand's wave while ownership settles. The 200 ms
@@ -380,7 +406,7 @@ export class ExhibitionMirrorGestureDetector {
     if (this.latch) {
       // An open hand shown during another action is consumed, never queued for
       // the instant the busy boundary or the shared latch clears.
-      for (const arm of [0, 1] as const) if (complete[arm]) this.palms[arm].consumed = true;
+      for (const arm of [0, 1] as const) if (complete[arm]) this.consumePalm(arm, pose, body);
       this.clearWaves();
       this.observeRelease(pose, matches, body, timestampMs, frameAspectRatio);
       return null;
@@ -392,7 +418,8 @@ export class ExhibitionMirrorGestureDetector {
     }
     for (const arm of [0, 1] as const) {
       const display = this.palms[arm];
-      if (this.palmEnabled && complete[arm] && !display.consumed && display.since !== null && timestampMs - display.since >= this.palmConfirmMs) {
+      if (this.palmEnabled && complete[arm] && !display.consumed && !display.lowering?.waitingForRaise
+        && display.since !== null && timestampMs - display.since >= this.palmConfirmMs) {
         this.lock(arm, pose, body, complete);
         return 'open_palm';
       }
@@ -418,8 +445,105 @@ export class ExhibitionMirrorGestureDetector {
   private lock(arm: Arm, pose: ExhibitionGesturePose | null, body: BodyAnchor, complete: readonly boolean[]) {
     this.latch = { arm, body, wristY: pose ? pose.landmarks[WRISTS[arm]].y - body.y : 0,
       lowerSince: null, stillSince: null, stillAnchor: null };
-    for (const index of [0, 1] as const) if (index === arm || complete[index]) this.palms[index].consumed = true;
+    for (const index of [0, 1] as const) if (index === arm || complete[index]) this.consumePalm(index, pose, body);
     this.clearWaves();
+  }
+
+  private consumePalm(arm: Arm, pose: ExhibitionGesturePose | null, body: BodyAnchor) {
+    const display = this.palms[arm];
+    // A hand already resting in the lowered zone is not a new presentation.
+    if (display.lowering?.waitingForRaise) return;
+    if (!display.consumed) display.lowering = null;
+    display.consumed = true;
+    const wrist = pose?.landmarks[WRISTS[arm]];
+    if (!display.lowering && trusted(wrist)) display.lowering = {
+      body: { ...body }, wristY: (wrist.y - body.y) / body.scale, since: null, waitingForRaise: false,
+    };
+  }
+
+  /** A natural drop belongs to a consumed palm, independently of the short-lived action latch. */
+  private observeLoweredPalms(pose: ExhibitionGesturePose | null, matches: readonly (ExhibitionGestureHand | null)[],
+    unknownHand: boolean, body: BodyAnchor, timestamp: number, aspect: number) {
+    // Natural lowering rearms palm presentation only. Wave recognition retains
+    // its original rest/release rules and accepts deliberate low-level waves.
+    if (!this.palmEnabled) {
+      for (const display of this.palms) if (display.lowering) display.lowering.since = null;
+      return;
+    }
+    for (const arm of [0, 1] as const) {
+      const display = this.palms[arm];
+      if (!display.consumed && !display.lowering?.waitingForRaise) continue;
+      const hand = matches[arm];
+      const wrist = pose?.landmarks[WRISTS[arm]];
+      const shoulder = pose?.landmarks[SHOULDERS[arm]];
+      // The body wrist can remain reliable as the lowering hand stops looking
+      // like a palm. A visible cropped or unowned hand still cannot prove release.
+      const certain = this.status === 'locked' && trusted(wrist) && trusted(shoulder)
+        && (hand ? hand.landmarks.every(point => point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1)
+          : !unknownHand && wrist.x >= 0.025 && wrist.x <= 0.975 && wrist.y <= 0.975);
+      if (!certain) {
+        const lower = display.lowering;
+        // Losing the small Hand result and wrist confidence together during a
+        // demonstrated drop may briefly pause confirmation. Only a subsequent
+        // trusted low wrist can finish it; uncertainty itself never releases.
+        const lowerDistance = trusted(shoulder) ? Math.max(0.04, Math.min(body.scale * 0.4, (1 - shoulder.y) * 0.6)) : Infinity;
+        const continuingDrop = lower?.since != null && lower.lastAt !== undefined && !hand && !unknownHand
+          && this.status === 'locked' && !!pose && trusted(shoulder) && sameBody(lower.body, body)
+          && !!wrist && Number.isFinite(wrist.x) && Number.isFinite(wrist.y)
+          && wrist.x >= 0.025 && wrist.x <= 0.975 && wrist.y <= 0.975
+          && wrist.y >= shoulder.y + lowerDistance
+          && wrist.y >= body.y + lower.wristY * body.scale + Math.max(0.06, body.scale * 0.25)
+          && lower.wristX !== undefined && Math.abs(wrist.x - body.x - lower.wristX) * aspect <= LOWER_WRIST_RADIUS
+          && timestamp - lower.lastAt <= this.lowerTrackingGraceMs;
+        if (lower) {
+          lower.trackingLost = true;
+          if (!continuingDrop) lower.since = null;
+        }
+        continue;
+      }
+      if (!display.lowering) {
+        // A hand-only trigger may acquire trustworthy body ownership later.
+        // Establish a baseline then; that first pose cannot itself prove a drop.
+        display.lowering = { body: { ...body }, wristY: (wrist!.y - body.y) / body.scale, since: null, waitingForRaise: false };
+        continue;
+      }
+      const lower = display.lowering;
+      if (!sameBody(lower.body, body)) { lower.since = null; continue; }
+      lower.body = { ...body };
+      const lowerDistance = Math.max(0.04, Math.min(body.scale * 0.4, (1 - shoulder!.y) * 0.6));
+      const lowerBoundary = shoulder!.y + lowerDistance;
+      const triggerHeight = body.y + lower.wristY * body.scale;
+      if (lower.waitingForRaise) {
+        // Position hysteresis: holding an open hand by the hip must not start a
+        // new confirmation, even after a soft reset or body/hand source switch.
+        if (wrist!.y <= lowerBoundary - Math.max(0.025, lowerDistance * 0.5)) {
+          display.lowering = null;
+          display.since = display.absentSince = null;
+          this.waves[arm].reset();
+        }
+        continue;
+      }
+      const lowered = wrist!.y >= lowerBoundary && wrist!.y >= triggerHeight + Math.max(0.06, body.scale * 0.25);
+      if (!lowered) { lower.since = null; continue; }
+      const wristX = wrist!.x - body.x;
+      const tipX = hand ? [8, 12, 16].reduce((sum, index) => sum + hand.landmarks[index].x, 0) / 3 - hand.landmarks[0].x : undefined;
+      // Vertical movement and changing fingers are part of lowering the hand.
+      // A sustained horizontal wave or fixed-wrist palm rotation must still not
+      // rearm its own presentation; allow small fingertip tracking jitter.
+      if (lower.since === null || lower.wristX === undefined || Math.abs(wristX - lower.wristX) * aspect > LOWER_WRIST_RADIUS
+        || (lower.trackingLost && lower.lastAt !== undefined && timestamp - lower.lastAt > this.lowerTrackingGraceMs)
+        || (tipX !== undefined && lower.tipX !== undefined && Math.abs(tipX - lower.tipX) * aspect > 0.05)) {
+        lower.since = timestamp; lower.wristX = wristX; lower.tipX = tipX;
+      }
+      lower.lastAt = timestamp;
+      lower.trackingLost = false;
+      if (timestamp - lower.since < this.palmLowerMs) continue;
+      display.consumed = false;
+      display.since = display.absentSince = null;
+      lower.since = null; lower.waitingForRaise = true;
+      if (this.latch?.arm === arm) this.latch = null;
+      this.waves[arm].reset();
+    }
   }
 
   private observeDisplays(matches: readonly (ExhibitionGestureHand | null)[], complete: readonly boolean[], unknownHand: boolean,
@@ -437,14 +561,16 @@ export class ExhibitionMirrorGestureDetector {
         // hand; otherwise a wide continuous wave could unlock itself at an edge.
         if (hand ? clearlyClosedPalm(hand, aspect) : !unknownHand) {
           display.absentSince ??= timestamp;
-          if (timestamp - display.absentSince > this.palmReleaseMs) {
+          if (timestamp - display.absentSince >= this.palmReleaseMs) {
             display.consumed = false;
+            display.lowering = null;
             if (this.latch?.arm === arm) { this.latch = null; this.clearWaves(); }
           }
         } else display.absentSince = null;
         continue;
       }
       display.absentSince = null;
+      if (display.lowering?.waitingForRaise) { display.since = null; continue; }
       // Presentation is visibility, not a stillness gesture. Motion only matters
       // when releasing an already-triggered wave in observeRelease.
       display.since ??= timestamp;
@@ -478,8 +604,9 @@ export class ExhibitionMirrorGestureDetector {
     }
   }
 
-  private clearReleaseProgress() {
+  private clearReleaseProgress(preserveBodyLowering = false) {
     if (this.latch) { this.latch.lowerSince = null; this.latch.stillSince = null; this.latch.stillAnchor = null; }
+    if (!preserveBodyLowering) for (const display of this.palms) if (display.lowering) display.lowering.since = null;
   }
 
   private clearDisplayProgress() {

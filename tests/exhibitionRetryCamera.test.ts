@@ -141,6 +141,38 @@ describe('exhibition retry keeps the local camera independent of cloud failures'
     expect(f.getUserMedia).toHaveBeenCalledTimes(1); expect(f.allocationCount()).toBe(1);
   });
 
+  it('blocks a newer generation while retry is still confirming the previous stop', async () => {
+    const f = await fixture(snapshot({ phase: 'generating' }));
+    const stopping = deferred<{ status: string }>(); f.stop.mockImplementationOnce(() => stopping.promise);
+    let retry!: Promise<boolean>;
+    await act(async () => { retry = f.live.retry(); await Promise.resolve(); });
+
+    await act(async () => f.update(snapshot({ phase: 'generating', generationNumber: 2, revision: 2 }))); await flushReact();
+    expect(f.allocationCount()).toBe(1);
+    expect(mocks.connect).toHaveBeenCalledOnce();
+
+    await act(async () => { stopping.resolve({ status: 'stopped' }); await retry; }); await flushReact();
+    expect(f.allocationCount()).toBe(2);
+    expect(f.getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains an unconfirmed stop across generation updates and retries that stop before allocating again', async () => {
+    const f = await fixture(snapshot({ phase: 'generating' }));
+    f.stop.mockResolvedValueOnce({ status: 'active' });
+    await act(async () => { await f.live.retry(); }); await flushReact();
+
+    await act(async () => f.update(snapshot({ phase: 'generating', generationNumber: 2, revision: 2 }))); await flushReact();
+    expect(f.allocationCount()).toBe(1);
+    expect(f.stop).toHaveBeenCalledOnce();
+
+    let result: boolean | undefined;
+    await act(async () => { result = await f.live.retry(); }); await flushReact();
+    expect(result).toBe(true);
+    expect(f.stop).toHaveBeenCalledTimes(2);
+    expect(f.allocationCount()).toBe(2);
+    expect(f.getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['leave', 'stop-camera', 'end-round'] as const)('does not revive a retry cancelled by %s while refreshing', async cancellation => {
     const f = await fixture(); const refreshing = deferred<void>();
     f.refresh.mockImplementationOnce(() => refreshing.promise);

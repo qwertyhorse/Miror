@@ -1,10 +1,13 @@
+import { STOP_REASONS } from '../../shared/exhibitionLifecycle';
 export const DIAGNOSTIC_EVENT_TYPES = [
+  'experience_started', 'credential_started', 'credential_ready', 'rtc_started', 'rtc_ready', 'reference_cache_hit',
   'gesture_threshold', 'gesture_confirmed', 'gesture_ignored', 'command_sent', 'command_accepted', 'command_rejected', 'command_cancelled',
   'reference_started', 'reference_ready', 'upload_started', 'upload_ready', 'bind_started', 'bind_ready',
   'sdk_set_started', 'sdk_set_resolved', 'condition_committed', 'session_first_frame', 'failed', 'stopped', 'manual_visible', 'sample',
 ] as const;
 export type DiagnosticEventType = typeof DIAGNOSTIC_EVENT_TYPES[number];
 export const DIAGNOSTIC_REASONS = [
+  ...STOP_REASONS,
   'blocked', 'unavailable', 'insufficient_materials', 'rejected', 'provider_error', 'update_error', 'stopped',
   'inactive', 'stale_context', 'busy', 'not_ready', 'invalid_input', 'command_error', 'tracking_lost',
   'multiple_people', 'expired', 'cancelled',
@@ -38,8 +41,9 @@ export interface DiagnosticMetrics {
   handDetected?: boolean;
   handRaised?: boolean;
   needsRelease?: boolean;
-  confirmationState?: 'no_hand' | 'unmatched_hand' | 'settling' | 'ambiguous' | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required';
+  confirmationState?: 'no_hand' | 'unmatched_hand' | 'settling' | 'ambiguous' | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required' | 'lowering' | 'raise_required';
   palmHoldMs?: number;
+  palmConfirmMs?: number;
   rawHandCount?: number;
   matchedHandCount?: number;
   controlSource?: 'body' | 'hand' | 'none';
@@ -87,7 +91,7 @@ export interface DiagnosticSnapshot {
 }
 
 const NUMERIC_METRICS = ['durationMs', 'inferenceMs', 'recognitionMs', 'fps', 'width', 'height', 'packetLoss', 'rttMs',
-  'actualKbps', 'targetKbps', 'queuedMs', 'frameId', 'raiseLatencyMs', 'palmHoldMs', 'rawHandCount', 'matchedHandCount'] as const;
+  'actualKbps', 'targetKbps', 'queuedMs', 'frameId', 'raiseLatencyMs', 'palmHoldMs', 'palmConfirmMs', 'rawHandCount', 'matchedHandCount'] as const;
 const BOOLEAN_METRICS = ['accepted', 'armed', 'handDetected', 'handRaised', 'needsRelease'] as const;
 const ENUM_METRICS = {
   operatorStatus: ['searching', 'locked', 'ambiguous'], captureStatus: ['waiting', 'active', 'disabled', 'muted', 'stalled', 'hidden'],
@@ -95,9 +99,9 @@ const ENUM_METRICS = {
   gesture: ['wave', 'raise_hand', 'open_palm'],
   controlSource: ['body', 'hand', 'none'],
   ambiguityReason: ['people', 'hands'],
-  confirmationState: ['no_hand', 'unmatched_hand', 'settling', 'ambiguous', 'incomplete', 'too_small', 'fingers_folded', 'holding', 'already_triggered', 'release_required'],
+  confirmationState: ['no_hand', 'unmatched_hand', 'settling', 'ambiguous', 'incomplete', 'too_small', 'fingers_folded', 'holding', 'already_triggered', 'release_required', 'lowering', 'raise_required'],
 } as const;
-const OPERATION_TYPES = new Set<DiagnosticEventType>(['reference_started', 'reference_ready', 'upload_started', 'upload_ready',
+const OPERATION_TYPES = new Set<DiagnosticEventType>(['experience_started', 'credential_started', 'credential_ready', 'rtc_started', 'rtc_ready', 'reference_cache_hit', 'reference_started', 'reference_ready', 'upload_started', 'upload_ready',
   'bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'condition_committed', 'session_first_frame', 'failed', 'stopped']);
 const COMMAND_TYPES = new Set<DiagnosticEventType>(['command_sent', 'command_accepted', 'command_rejected', 'command_cancelled']);
 const STAGE_ORDER: Partial<Record<DiagnosticEventType, number>> = {

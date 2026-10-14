@@ -7,6 +7,7 @@ export function useMirrors() {
   const [error, setError] = useState('');
   const generation = useRef(0);
   const listSequence = useRef(0);
+  const mutating = useRef(false);
   const requests = useRef(new Set<AbortController>());
   const request = useCallback(async <T,>(path = '', init: RequestInit = {}): Promise<T> => {
     const abort = new AbortController();
@@ -22,6 +23,7 @@ export function useMirrors() {
     } finally { clearTimeout(timer); requests.current.delete(abort); }
   }, []);
   const refresh = useCallback(async () => {
+    if (mutating.current) return;
     const epoch = generation.current;
     const sequence = ++listSequence.current;
     try {
@@ -41,17 +43,33 @@ export function useMirrors() {
     return () => { stopped = true; generation.current++; clearTimeout(timer); for (const item of activeRequests) item.abort(); };
   }, [refresh]);
   const save = useCallback(async (name: string, id?: string) => {
+    if (mutating.current) throw new Error('设备列表正在更新，请稍后重试。');
+    mutating.current = true;
     ++listSequence.current;
-    const result = await request<ExhibitionMirrorSummary>(id ? `/${encodeURIComponent(id)}` : '', {
-      method: id ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
-    });
-    ++listSequence.current;
-    setData(previous => previous ? { ...previous, mirrors: previous.mirrors.some(item => item.id === result.id)
-      ? previous.mirrors.map(item => item.id === result.id ? result : item)
-      : [...previous.mirrors, result] } : { defaultMirrorId: 'default', mirrors: [result] });
+    let result: ExhibitionMirrorSummary;
+    try {
+      result = await request<ExhibitionMirrorSummary>(id ? `/${encodeURIComponent(id)}` : '', {
+        method: id ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      setData(previous => previous ? { ...previous, mirrors: previous.mirrors.some(item => item.id === result.id)
+        ? previous.mirrors.map(item => item.id === result.id ? result : item)
+        : [...previous.mirrors, result] } : { defaultMirrorId: 'default', mirrors: [result] });
+    } finally { ++listSequence.current; mutating.current = false; }
     await refresh();
     return result;
   }, [request, refresh]);
-  return { data, error, refresh, save };
+  const remove = useCallback(async (id: string, expectedRevision: number) => {
+    if (mutating.current) throw new Error('设备列表正在更新，请稍后重试。');
+    mutating.current = true;
+    ++listSequence.current;
+    try {
+      const result = await request<ExhibitionMirrorList>(`/${encodeURIComponent(id)}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision }),
+      });
+      setData(result); setError('');
+      return result;
+    } finally { ++listSequence.current; mutating.current = false; }
+  }, [request]);
+  return { data, error, refresh, save, remove };
 }
 export type MirrorRegistry = ReturnType<typeof useMirrors>;

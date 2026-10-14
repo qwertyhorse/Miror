@@ -87,4 +87,30 @@ describe('continuous material selection', () => {
     expect(await client.send({ action: 'switch', lookId: 'c' })).toBe(false);
     await stop;
   });
+  it('adopts a change notification immediately and aborts the wait when leaving the screen', async () => {
+    let notice = deferred<Response>(); const signals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes('/changes?')) { signals.push(init!.signal as AbortSignal); return notice.promise; }
+      return response(state());
+    }));
+    const client = create(); await flush(); await vi.advanceTimersByTimeAsync(850);
+    expect(signals).toHaveLength(1);
+    notice.resolve(response(state(2, 'b'))); await flush();
+    expect(client.getSnapshot().state?.selectedLookId).toBe('b');
+    notice = deferred<Response>(); await vi.advanceTimersByTimeAsync(25);
+    expect(signals).toHaveLength(2);
+    client.stop(); expect(signals[1].aborted).toBe(true);
+    notice.resolve(response(state(3, 'c'))); await flush();
+    expect(client.getSnapshot().state?.selectedLookId).toBe('b');
+  });
+  it('falls back to ordinary polling when an older backend lacks change notifications', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      urls.push(url); return url.includes('/changes?') ? response({ error: { code: 'NOT_FOUND' } }, 404) : response(state());
+    }));
+    const client = create(); await flush(); await vi.advanceTimersByTimeAsync(1700);
+    expect(client.getSnapshot().connected).toBe(true);
+    expect(urls.filter(url => url.includes('/changes?'))).toHaveLength(1);
+  });
+
 });

@@ -50,6 +50,39 @@ function fixture() {
   return { deps, controller, events, created, sdk, stream, originalStop, cloneStop, cloned, callbacks: () => callbacks };
 }
 describe('exhibition live client lifecycle', () => {
+  it('starts from a prepared account-scoped reference without downloading or uploading the image', async () => {
+    const f = fixture();
+    const input = { deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1,
+      expectedRevision: 3, image: f.created.referenceAsset, stream: f.stream };
+    const controller = new ExhibitionLiveConnection(input, f.events, { ...f.deps,
+      create: async () => ({ ...f.created, referenceScope: 'account-scope' }),
+      preparedReference: async () => ({ url: 'https://reference.example/ready.webp', scope: 'account-scope', freshUntil: Date.now() + 60000 }),
+    });
+    controllers.push(controller);
+    await controller.start();
+    expect(f.deps.reference).not.toHaveBeenCalled();
+    expect(f.deps.upload).not.toHaveBeenCalled();
+    expect(f.sdk.set).toHaveBeenCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.example/ready.webp' }));
+  });
+  it.each(['different-account', 'expired'])('falls back to a scoped upload for %s preparation', async reason => {
+    const f = fixture();
+    const controller = new ExhibitionLiveConnection({ deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1,
+      expectedRevision: 3, image: f.created.referenceAsset, stream: f.stream }, f.events, { ...f.deps,
+      create: async () => ({ ...f.created, referenceScope: 'current-account' }),
+      preparedReference: async () => ({ url: 'https://reference.example/stale.png', scope: reason === 'expired' ? 'current-account' : 'old-account',
+        freshUntil: Date.now() + (reason === 'expired' ? -1 : 60000) }),
+    });
+    controllers.push(controller); await controller.start();
+    expect(f.deps.reference).toHaveBeenCalledOnce(); expect(f.deps.upload).toHaveBeenCalledOnce();
+    expect(f.sdk.set).toHaveBeenCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.example/garment.png' }));
+  });
+  it('measures first-frame latency from preparation before credential allocation', async () => {
+    const f = fixture(); let now = 1000; f.deps.now.mockImplementation(() => now);
+    f.deps.reference.mockImplementationOnce(async () => { now += 700; return new File(['image'], 'a.png'); });
+    await f.controller.start(); now += 300;
+    f.controller.reportFirstFrame(); await flush();
+    expect(f.deps.firstFrame).toHaveBeenCalledWith('local-1', 1000);
+  });
   it('preflights before allocating, binds/links before one generation, reports only a remote frame', async () => {
     const f = fixture();
     await f.controller.start();
@@ -114,12 +147,31 @@ describe('exhibition live client lifecycle', () => {
     const pending = deferred<string>(); f.deps.upload.mockImplementationOnce(() => pending.promise);
     const starting = f.controller.start(); await flush();
     expect(f.deps.heartbeat).toHaveBeenCalledTimes(1);
-    f.deps.heartbeat.mockRejectedValueOnce(new Error('owner lost'));
+    f.deps.heartbeat.mockRejectedValueOnce(Object.assign(new Error('owner lost'), { code: 'EXHIBITION_OWNER_MISMATCH' }));
     await vi.advanceTimersByTimeAsync(5000);
     expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
     pending.resolve('https://reference.example/late.png'); await starting;
     expect(f.deps.connect).not.toHaveBeenCalled();
     expect(f.deps.create).toHaveBeenCalledTimes(1);
+  });
+  it('keeps healthy video through one transient heartbeat failure and resumes heartbeats', async () => {
+    const f = fixture(); await f.controller.start();
+    f.controller.reportFirstFrame(); await flush();
+    f.deps.heartbeat.mockRejectedValueOnce(new Error('temporary network loss'));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(f.controller.stopped).toBe(false);
+    expect(f.deps.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(f.deps.heartbeat.mock.calls.length).toBeGreaterThan(2);
+    expect(f.deps.connect).toHaveBeenCalledOnce();
+  });
+  it('stops at the lease deadline even when heartbeat requests never finish', async () => {
+    const f = fixture(); await f.controller.start(); f.controller.reportFirstFrame(); await flush();
+    f.deps.heartbeat.mockImplementation(() => new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(20_001);
+    expect(f.controller.stopped).toBe(true);
+    expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
+    expect(f.deps.create).toHaveBeenCalledOnce();
   });
   it('rejects the wrong device/garment metadata without sending camera frames', async () => {
     const f = fixture();
@@ -170,11 +222,27 @@ describe('exhibition live client lifecycle', () => {
     await f.controller.start(); await flush();
     expect(f.deps.reportError).toHaveBeenCalledOnce();
     const report = f.deps.reportError.mock.calls[0][0];
+    expect(report.reason).toBe('rtc_failed');
     expect(report.message).toContain('local_publish_failed'); expect(report.message).toContain('publish');
     expect(report.message).not.toMatch(/tk-secret|sk-secret|example\.test/);
     expect(f.events.status).toHaveBeenCalledWith('error', '摄像头画面未能上传，请检查镜端网络后重试。');
     expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.deps.create).toHaveBeenCalledOnce();
     expect(f.sdk.set).not.toHaveBeenCalled(); expect(f.originalStop).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ code: 'INVALID_API_KEY' }, 'provider_rejected'],
+    [{ code: 'SESSION_ERROR', details: { http_status: 403 } }, 'provider_rejected'],
+    [{ code: 'WEB_RTC_ERROR', details: { reason_code: 'local_outbound_track_ended' } }, 'camera_lost'],
+    [{ code: 'UNKNOWN_ERROR' }, 'rtc_failed'],
+  ])('classifies early connection failure from evidence: %j', async (error, reason) => {
+    const f = fixture();
+    f.deps.connect.mockImplementationOnce(async (_stream, _local, callbacks) => {
+      callbacks.onError('connection failed', error); throw error;
+    });
+    await f.controller.start(); await flush();
+    expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ reason }));
+    expect(f.deps.stop).toHaveBeenCalledOnce();
   });
 
   it('reports a remote output timeout separately from local camera failure without another generation', async () => {

@@ -13,12 +13,16 @@ import { createReactHost, flushReact } from './support/reactHost';
 
 type GestureOptions = Parameters<typeof useExhibitionGestures>[0];
 const capture = vi.hoisted(() => ({ options: null as GestureOptions | null, status: 'ready', error: '',
+  confirmationState: undefined as ReturnType<typeof useExhibitionGestures>['confirmationState'] | undefined,
+  palmHoldMs: 0,
   handDetected: true, handRaised: false, operatorStatus: 'locked', controlSource: 'body', ambiguityReason: null as null | 'people' | 'hands', armed: true, needsRelease: false, captureStatus: 'active', fps: 15, inferenceMs: 20, recognitionMs: 35, retry: vi.fn() }));
 const materialDrawer = vi.hoisted(() => ({ onBusyChange: null as ((busy: boolean) => void) | null }));
 vi.mock('../src/exhibition/useExhibitionGestures', () => ({ useExhibitionGestures: (options: GestureOptions) => {
   capture.options = options;
   return { status: capture.status, error: capture.error, handDetected: capture.handDetected, handRaised: capture.handRaised, captureStatus: capture.captureStatus,
-    operatorStatus: capture.operatorStatus, controlSource: capture.controlSource, ambiguityReason: capture.ambiguityReason, armed: capture.armed, needsRelease: capture.needsRelease, fps: capture.fps, inferenceMs: capture.inferenceMs, recognitionMs: capture.recognitionMs, retry: capture.retry };
+    operatorStatus: capture.operatorStatus, controlSource: capture.controlSource, ambiguityReason: capture.ambiguityReason, armed: capture.armed, needsRelease: capture.needsRelease,
+    confirmationState: capture.confirmationState, palmHoldMs: capture.palmHoldMs,
+    fps: capture.fps, inferenceMs: capture.inferenceMs, recognitionMs: capture.recognitionMs, retry: capture.retry };
 } }));
 vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: () => null }));
 vi.mock('../src/exhibition/MoXDragSurface', () => ({ MoXDragSurface: () => null }));
@@ -27,7 +31,7 @@ vi.mock('../src/exhibition/MirrorMaterialDrawer', () => ({ MirrorMaterialDrawer:
 } }));
 
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
-afterEach(async () => { await host?.close(); host = undefined; capture.options = null; capture.status = 'ready'; capture.error = '';
+afterEach(async () => { await host?.close(); host = undefined; vi.useRealTimers(); capture.options = null; capture.status = 'ready'; capture.error = ''; capture.confirmationState = undefined; capture.palmHoldMs = 0;
   capture.handDetected = true; capture.handRaised = false; capture.operatorStatus = 'locked'; capture.controlSource = 'body'; capture.ambiguityReason = null; capture.armed = true; capture.needsRelease = false; capture.captureStatus = 'active'; capture.retry.mockClear(); materialDrawer.onBusyChange = null; });
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
   return { mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks),
@@ -198,22 +202,72 @@ describe('a revealed palm or wave advances material without beginning an experie
 
   it('shows release after a consumed gesture without treating readiness as another action', async () => {
     const f = await fixture();
+    vi.useFakeTimers();
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
     expect(control().getReactProps()['data-hand-raised']).toBe(false);
     expect(control().textContent).toBe('挥手或展掌换装');
     capture.handDetected = true; capture.handRaised = true; capture.armed = false; capture.needsRelease = true; await f.render();
-    expect(control().textContent).toBe('收手或稍停');
+    expect(control().textContent).toBe('请放下手');
     expect(control().getReactProps()['data-hand-raised']).toBe(true);
     expect(control().getReactProps()['data-armed']).toBe(false);
     expect(f.send).not.toHaveBeenCalled();
     await f.palm();
     expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'select', lookId: 'city' });
-    expect(control().textContent).toBe('切换中');
+    expect(control().textContent).toBe('已选中');
     await f.update({ selectedLookId: 'city', phase: 'select' });
-    expect(control().textContent).toBe('收手或稍停');
+    expect(control().textContent).toBe('已选中');
+    await act(async () => vi.advanceTimersByTime(1200));
+    expect(control().textContent).toBe('请放下手');
     capture.handRaised = false; capture.armed = true; capture.needsRelease = false; await f.render();
-    expect(control().textContent).toBe('挥手或展掌换装');
+    expect(control().textContent).toBe('可以再次抬手');
     expect(control().getReactProps()['data-hand-raised']).toBe(false);
+  });
+
+  it('shows natural lowering and rearming even without an accepted command', async () => {
+    const f = await fixture();
+    const label = () => host!.find(node => node.getReactProps().className === 'ex-mirror-gesture')!.textContent;
+    capture.confirmationState = 'lowering'; capture.needsRelease = true; capture.armed = false;
+    await f.render(); expect(label()).toBe('请放下手');
+    capture.confirmationState = 'raise_required'; capture.needsRelease = false;
+    await f.render(); expect(label()).toBe('可以再次抬手');
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('acknowledges a running switch only after acceptance without claiming a generated result', async () => {
+    const f = await fixture({ phase: 'showcase' });
+    let complete!: (accepted: boolean) => void;
+    f.send.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const label = () => host!.find(node => node.getReactProps().className === 'ex-mirror-gesture')!.textContent;
+    await f.palm(); expect(label()).toBe('切换中');
+    await f.update({ selectedLookId: 'city', generationNumber: 2, phase: 'generating', revision: 2 });
+    await act(async () => complete(true));
+    expect(label()).toBe('换装已提交');
+    expect(label()).not.toMatch(/已换装|已生成|已切换/);
+  });
+
+  it.each(['rejected', 'failed', 'ignored'] as const)('does not show success for %s gestures', async result => {
+    const f = await fixture(result === 'ignored' ? { enabledLookIds: ['commute'] } : {});
+    if (result === 'rejected') f.send.mockResolvedValueOnce(false);
+    else if (result === 'failed') f.send.mockRejectedValueOnce(new Error('request failed'));
+    await f.palm();
+    const label = host!.find(node => node.getReactProps().className === 'ex-mirror-gesture')!.textContent;
+    expect(label).not.toMatch(/已选中|已提交/);
+  });
+
+  it.each(['session', 'mirror', 'superseded', 'stopped', 'disabled'] as const)('ignores late acceptance after %s', async boundary => {
+    const props: Partial<ComponentProps<typeof Kiosk>> = {};
+    const f = await fixture({ phase: 'showcase' }, props);
+    let complete!: (accepted: boolean) => void;
+    f.send.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    await f.palm();
+    if (boundary === 'session') await f.update({ sessionNumber: 2 });
+    else if (boundary === 'mirror') await f.update({ mirrorId: 'second-mirror' });
+    else if (boundary === 'superseded') await f.update({ selectedLookId: 'evening', generationNumber: 3, revision: 3 });
+    else if (boundary === 'disabled') { props.disabled = true; await f.render(); props.disabled = false; await f.render(); }
+    else await act(async () => host!.find(node => node.nodeName === 'button' && node.textContent === '停止生成')!.getReactProps().onClick());
+    await act(async () => complete(true));
+    const label = host!.find(node => node.getReactProps().className === 'ex-mirror-gesture')!.textContent;
+    expect(label).not.toMatch(/已选中|已提交/);
   });
 
   it.each([false, true])('asks a locked operator to reveal their hands when neither is visible (armed %s)', async armed => {

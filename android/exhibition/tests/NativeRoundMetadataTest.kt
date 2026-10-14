@@ -16,6 +16,11 @@ fun main() {
  for((mode,prompt) in prompts) { verify(NativeRoundMetadata.prompt(look(mode))==prompt); NativeRoundMetadata.validateSnapshot(state(mode),look(mode),"default","device-fixture");count++ }
  verify(NativeRoundMetadata.prompt(look("free"))=="测试提示词")
  NativeRoundMetadata.validateSnapshot(state("free"),look("free","none"),"default","device-fixture");count++
+ verify(NativeRoundMetadata.referenceImage(look())=="/assets/exhibition/commute-cutout.png")
+ verify(NativeRoundMetadata.referenceImage(look().put("referenceImage","/assets/exhibition/reference.png"))=="/assets/exhibition/reference.png")
+ verify(NativeRoundMetadata.referenceImage(look("free","none").put("referenceImage","/assets/exhibition/reference.png"))==null)
+ NativeRoundMetadata.validateSnapshot(state(),look().put("referenceImage","/assets/exhibition/reference.png"),"default","device-fixture");count++
+ rejected { NativeRoundMetadata.validateSnapshot(state(),look().put("referenceImage",""),"default","device-fixture") }
  rejected { NativeRoundMetadata.validateSnapshot(state(),look(kind="none"),"default","device-fixture") }
  rejected { NativeRoundMetadata.validateSnapshot(state().put("generationNumber",3.5),look(),"default","device-fixture") }
  rejected { NativeRoundMetadata.validateSnapshot(state().put("revision","4"),look(),"default","device-fixture") }
@@ -40,6 +45,32 @@ fun main() {
  val safe=NativeRoundMetadata.safeMessage("异常 tk-fixture uk-fixture sk-fixture https://fixture.invalid/?secret=value")
  verify(!safe.contains("tk-fixture")&&!safe.contains("uk-fixture")&&!safe.contains("sk-fixture")&&!safe.contains("https://"))
  verify(NativeRoundMetadata.integer(JSONObject().put("n",9007199254740992L),"n")==null)
+ // Real provider format from the failed Android session, plus equivalent timezones.
+ val expiry=1791974706853L
+ for(zone in listOf("UTC","Asia/Shanghai","America/New_York")) {
+  val previous=java.util.TimeZone.getDefault()
+  try {
+   java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(zone))
+   for(value in listOf("2026-10-14T10:45:06.853+00:00","2026-10-14T10:45:06.853Z",
+       "2026-10-14T18:45:06.853+08:00","2026-10-14T05:15:06.853-05:30"))
+    verify(NativeRoundMetadata.expiryMillis(JSONObject().put("expiresAt",value),expiry-1)==expiry)
+  } finally { java.util.TimeZone.setDefault(previous) }
+ }
+ for(fraction in listOf("",".8",".85",".853",".853000",".853000000")) {
+  val value="2026-10-14T10:45:06${fraction}+00:00"
+  val expected=1791974706000L+when(fraction) { ""->0; ".8"->800; ".85"->850; else->853 }
+  verify(NativeRoundMetadata.expiryMillis(JSONObject().put("expiresAt",value),0)==expected)
+ }
+ fun expiryRejected(value:Any?, message:String) {
+  val failure=runCatching { NativeRoundMetadata.expiryMillis(JSONObject().put("expiresAt",value),expiry) }.exceptionOrNull()
+  verify(failure?.message==message)
+ }
+ for(value in listOf(null,JSONObject.NULL,123L,"","bad","2026-10-14T10:45:06.853",
+     "2026-02-30T10:45:06Z","2026-13-14T10:45:06Z","2026-10-14T10:45:06+25:00"))
+  expiryRejected(value,"体验有效期无效。")
+ // Equality is already expired; a past offset timestamp must not become a format error.
+ expiryRejected("2026-10-14T10:45:06.853+00:00","本次体验已过期，请重试。")
+ expiryRejected("2026-10-14T10:45:06.852+00:00","本次体验已过期，请重试。")
  println("Native metadata assertions: $count passed")
 }
 

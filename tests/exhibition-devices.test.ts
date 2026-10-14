@@ -21,7 +21,7 @@ describe('terminal registration and pairing', () => {
     const { directory, now, advance } = fixture(); const devices = new ExhibitionDevices(directory, { now }); const input = terminal();
     const result = devices.connect({ ...input, mirrorId: 'default' });
     expect(result).toMatchObject({ terminalId: input.terminalId, mirrorId: null, expiresAt: now() + 600_000 });
-    expect(result.code).toMatch(/^[0-9]{6}$/);
+    expect(result.code).toMatch(/^[0-9]{4}$/);
     const saved = readFileSync(join(directory, 'exhibition-devices.json'), 'utf8');
     expect(saved).not.toContain(input.token); expect(JSON.parse(saved).terminals[0].tokenHash).toMatch(/^[a-f0-9]{64}$/);
     advance(599_999);
@@ -40,7 +40,7 @@ describe('terminal registration and pairing', () => {
     expect(() => devices.connect({ ...input, token: randomBytes(32).toString('hex') })).toThrow(code('EXHIBITION_DEVICE_UNAUTHORIZED'));
     expect(readFileSync(join(directory, 'exhibition-devices.json'), 'utf8')).toBe(before);
     // Native installation tokens consist of two UUIDs and remain valid opaque credentials.
-    expect(devices.connect({ ...terminal('安卓原生'), token: randomUUID() + randomUUID() }).code).toMatch(/^[0-9]{6}$/);
+    expect(devices.connect({ ...terminal('安卓原生'), token: randomUUID() + randomUUID() }).code).toMatch(/^[0-9]{4}$/);
   });
 
   it('keeps a single terminal per mirror and a single mirror per terminal; consumed codes cannot be reused', () => {
@@ -56,28 +56,72 @@ describe('terminal registration and pairing', () => {
   });
 
   it('expires old codes at ten minutes and replaces them only after an authenticated terminal reconnect', () => {
-    const { directory, now, advance } = fixture(); const values = ['123456', '123456', '234567'];
+    const { directory, now, advance } = fixture(); const values = ['1234', '1234', '2345'];
     const devices = new ExhibitionDevices(directory, { now, generateCode: () => values.shift()! }); const input = terminal();
     const first = devices.connect(input); advance(600_000);
     expect(() => devices.bind('default', { code: first.code })).toThrow(code('EXHIBITION_PAIRING_CODE_EXPIRED'));
     const second = devices.connect(input);
-    expect(second.code).toBe('234567'); expect(second.expiresAt).toBe(now() + 600_000);
+    expect(second.code).toBe('2345'); expect(second.expiresAt).toBe(now() + 600_000);
     expect(() => devices.bind('default', { code: first.code })).toThrow(code('EXHIBITION_PAIRING_CODE_INVALID'));
     expect(devices.bind('default', { code: second.code }).terminalId).toBe(input.terminalId);
   });
 
-  it('handles code collisions and never reissues a retired code after restart or unbinding', () => {
-    const { directory, now } = fixture(); const values = ['111111', '111111', '222222'];
+  it('handles code collisions and preserves the retired-code cooldown after restart or unbinding', () => {
+    const { directory, now } = fixture(); const values = ['1111', '1111', '2222'];
     const devices = new ExhibitionDevices(directory, { now, generateCode: () => values.shift()! }); const a = terminal('A'); const b = terminal('B');
-    expect(devices.connect(a).code).toBe('111111'); expect(devices.connect(b).code).toBe('222222');
-    devices.bind('default', { code: '111111' }); devices.unbind('default', { terminalId: a.terminalId });
-    const next = ['111111', '222222', '333333']; const restarted = new ExhibitionDevices(directory, { now, generateCode: () => next.shift()! });
-    expect(restarted.connect(a).code).toBe('333333');
-    expect(() => restarted.bind('default', { code: '111111' })).toThrow(code('EXHIBITION_PAIRING_CODE_INVALID'));
+    expect(devices.connect(a).code).toBe('1111'); expect(devices.connect(b).code).toBe('2222');
+    devices.bind('default', { code: '1111' }); devices.unbind('default', { terminalId: a.terminalId });
+    const next = ['1111', '2222', '3333']; const restarted = new ExhibitionDevices(directory, { now, generateCode: () => next.shift()! });
+    expect(restarted.connect(a).code).toBe('3333');
+    expect(() => restarted.bind('default', { code: '1111' })).toThrow(code('EXHIBITION_PAIRING_CODE_INVALID'));
+  });
+
+  it('accepts leading-zero four-digit codes and rejects shorter, longer and non-numeric input', () => {
+    const { directory, now } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '0042' }); const input = terminal();
+    expect(devices.connect(input).code).toBe('0042');
+    for (const invalid of ['042', '00042', '000042', 'abcd', 42]) {
+      expect(() => devices.bind('default', { code: invalid })).toThrow(expect.objectContaining({ code: 'EXHIBITION_PAIRING_CODE_INVALID', statusCode: 400 }));
+    }
+    expect(devices.bind('default', { code: '0042' }).terminalId).toBe(input.terminalId);
+  });
+
+  it('reuses consumed codes after the persisted cooldown instead of exhausting all four-digit values', () => {
+    const { directory, now, advance } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '0042' }); const a = terminal();
+    devices.connect(a); devices.bind('default', { code: '0042' }); devices.unbind('default', { terminalId: a.terminalId });
+    advance(599_999);
+    const restarted = new ExhibitionDevices(directory, { now, generateCode: () => '0042' });
+    expect(() => restarted.connect(a)).toThrow(code('EXHIBITION_PAIRING_CODE_BUSY'));
+    advance(1);
+    expect(restarted.connect(a).code).toBe('0042');
+    expect(JSON.parse(readFileSync(join(directory, 'exhibition-devices.json'), 'utf8')).retiredCodes).toEqual([]);
+  });
+
+  it('releases expired codes from offline terminals after cooldown without assigning the wrong terminal', () => {
+    const { directory, now, advance } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '0042' }); const a = terminal(); const b = terminal();
+    devices.connect(a); advance(1_200_000);
+    expect(devices.connect(b).code).toBe('0042');
+    expect(devices.bind('default', { code: '0042' }).terminalId).toBe(b.terminalId);
+    expect(new ExhibitionDevices(directory, { now }).binding('default')?.terminalId).toBe(b.terminalId);
+  });
+
+  it('migrates six-digit pending codes while retaining existing bindings and terminal credentials', () => {
+    const { directory, now } = fixture(); const values = ['0020', '0021']; const devices = new ExhibitionDevices(directory, { now, generateCode: () => values.shift()! }); const bound = terminal(); const waiting = terminal();
+    devices.bind('default', { code: devices.connect(bound).code }); devices.connect(waiting);
+    const file = join(directory, 'exhibition-devices.json'); const saved = JSON.parse(readFileSync(file, 'utf8'));
+    const boundRecord = structuredClone(saved.terminals[0]);
+    saved.schemaVersion = 1; saved.retiredCodeHashes = saved.retiredCodes.map((item: { hash: string }) => item.hash); delete saved.retiredCodes;
+    saved.terminals[1].pairing.code = '123456'; writeFileSync(file, JSON.stringify(saved));
+    const restarted = new ExhibitionDevices(directory, { now, generateCode: () => '0042' });
+    expect(restarted.binding('default')).toMatchObject({ terminalId: bound.terminalId, online: false });
+    expect(restarted.connect(bound)).toEqual({ terminalId: bound.terminalId, mirrorId: 'default' });
+    expect(() => restarted.bind('second', { code: '123456' })).toThrow(code('EXHIBITION_PAIRING_CODE_INVALID'));
+    expect(restarted.connect(waiting).code).toBe('0042');
+    const migrated = JSON.parse(readFileSync(file, 'utf8')); expect(migrated.schemaVersion).toBe(2); expect(migrated.terminals[0]).toEqual(boundRecord);
+    expect(new ExhibitionDevices(directory, { now }).connect(waiting).code).toBe('0042');
   });
 
   it('bounds collision retries without registering a partial second terminal', () => {
-    const { directory, now } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '123456' });
+    const { directory, now } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '1234' });
     devices.connect(terminal('A')); const file = join(directory, 'exhibition-devices.json'); const before = readFileSync(file, 'utf8');
     expect(() => devices.connect(terminal('B'))).toThrow(code('EXHIBITION_PAIRING_CODE_BUSY'));
     expect(readFileSync(file, 'utf8')).toBe(before);
@@ -132,9 +176,9 @@ describe('terminal registration and pairing', () => {
   });
 
   it('limits failed pairing attempts across mirrors and permits retry after the minute window', () => {
-    const { directory, now, advance } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '654321' });
+    const { directory, now, advance } = fixture(); const devices = new ExhibitionDevices(directory, { now, generateCode: () => '6543' });
     const pairing = devices.connect(terminal());
-    for (let attempt = 0; attempt < 30; attempt++) expect(() => devices.bind(`mirror-${attempt}`, { code: '000000' })).toThrow(code('EXHIBITION_PAIRING_CODE_INVALID'));
+    for (let attempt = 0; attempt < 30; attempt++) expect(() => devices.bind(`mirror-${attempt}`, { code: '0000' })).toThrow(code('EXHIBITION_PAIRING_CODE_INVALID'));
     expect(() => devices.bind('default', { code: pairing.code })).toThrow(code('EXHIBITION_PAIRING_RATE_LIMITED'));
     advance(60_000);
     expect(devices.bind('default', { code: pairing.code })).toMatchObject({ online: false });
@@ -151,7 +195,7 @@ describe('terminal registration and pairing', () => {
 });
 
 describe('mirror binding integration', () => {
-  it('blocks active mirror changes, exposes safe binding summaries and follows renamed mirror names on reconnect', () => {
+  it('blocks active binding, allows staff unbinding, and exposes safe renamed mirror summaries', () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now }); const input = terminal();
     const pairing = manager.connectDevice(input); const mirror = manager.getMirror(); mirror.command({ action: 'begin' });
     expect(() => manager.bindDevice('default', { code: pairing.code })).toThrow(code('EXHIBITION_MIRROR_BUSY'));
@@ -161,10 +205,32 @@ describe('mirror binding integration', () => {
     const summary = manager.list().mirrors[0]; expect(summary.binding).toMatchObject({ terminalId: input.terminalId, online: true });
     expect(JSON.stringify(summary)).not.toContain(input.token); expect(JSON.stringify(summary)).not.toContain(pairing.code);
     mirror.command({ action: 'begin' });
-    expect(() => manager.unbindDevice('default', { terminalId: input.terminalId })).toThrow(code('EXHIBITION_MIRROR_BUSY'));
-    mirror.command({ action: 'end' }); expect(manager.unbindDevice('default', { terminalId: input.terminalId })).toBeNull();
+    expect(manager.unbindDevice('default', { terminalId: input.terminalId })).toBeNull();
+    expect(mirror.get()).toMatchObject({ phase: 'idle', live: null });
     expect(manager.list().mirrors[0].binding).toBeNull();
     expect(() => manager.bindDevice('missing', { code: pairing.code })).toThrow(code('EXHIBITION_MIRROR_NOT_FOUND'));
+  });
+
+
+  it('rejects a stale terminal confirmation before changing the active experience', () => {
+    const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now }); const input = terminal();
+    manager.bindDevice('default', { code: manager.connectDevice(input).code });
+    const mirror = manager.getMirror(); mirror.command({ action: 'begin' }); mirror.command({ action: 'pause' });
+    const before = mirror.get(); const binding = manager.devices.binding('default');
+    expect(() => manager.unbindDevice('default', { terminalId: terminal().terminalId })).toThrow(code('EXHIBITION_DEVICE_BINDING_CHANGED'));
+    expect(mirror.get()).toEqual(before); expect(manager.devices.binding('default')).toEqual(binding);
+  });
+
+  it('retains binding on registry write failure while leaving the local experience safely ended', () => {
+    const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now }); const input = terminal();
+    manager.bindDevice('default', { code: manager.connectDevice(input).code });
+    const mirror = manager.getMirror(); mirror.command({ action: 'begin' });
+    const file = join(directory, 'exhibition-devices.json'); renameSync(file, `${file}.saved`); mkdirSync(file);
+    expect(() => manager.unbindDevice('default', { terminalId: input.terminalId })).toThrow();
+    expect(manager.devices.binding('default')?.terminalId).toBe(input.terminalId);
+    expect(mirror.get()).toMatchObject({ phase: 'idle', live: null });
+    rmSync(file, { recursive: true }); renameSync(`${file}.saved`, file);
+    expect(new ExhibitionMirrors(directory, { now }).devices.binding('default')?.terminalId).toBe(input.terminalId);
   });
 
   it('does not transfer or overwrite terminal bindings when copying mirror content', () => {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { appUrl, scopedLocalStorage } from '../versionScope';
 import type { ExhibitionDeviceConnectInput, ExhibitionDeviceConnection } from '../../shared/exhibition';
+import type { ExhibitionCameraReport, ExhibitionCameraRequest, ExhibitionCameraStatus } from '../../shared/exhibitionCamera';
 
 export type TerminalIdentity = ExhibitionDeviceConnectInput;
 export type TerminalConnection = ExhibitionDeviceConnection;
@@ -9,6 +10,7 @@ export interface TerminalDependencies {
   identity: (signal: AbortSignal) => Promise<TerminalIdentity | null>;
   create: () => TerminalIdentity;
   connect: (identity: TerminalIdentity, signal: AbortSignal) => Promise<TerminalConnection>;
+  openCamera?: (mirrorId: string, terminalId: string, bindingId: string, signal: AbortSignal) => Promise<ExhibitionCameraStatus>;
 }
 const STORAGE_KEY = 'exhibition-terminal-identity';
 function validIdentity(value: unknown): value is TerminalIdentity {
@@ -58,6 +60,8 @@ const defaults: TerminalDependencies = {
   },
   create: createBrowserTerminal,
   connect: (identity, signal) => request<TerminalConnection>('terminals/connect', signal, identity),
+  openCamera: (mirrorId, terminalId, bindingId, signal) => request<ExhibitionCameraStatus>(`mirrors/${encodeURIComponent(mirrorId)}/camera`, signal,
+    { terminalId, bindingId, action: 'open' }),
 };
 
 /** The terminal identity outlives page leases; stopped epochs never claim a new screen. */
@@ -68,6 +72,9 @@ export class TerminalBindingClient {
   private timer?: ReturnType<typeof setTimeout>;
   private booting = false;
   private polling = false;
+  private cameraReport: ExhibitionCameraReport | undefined;
+  private deferredCameraMetadata: ExhibitionCameraReport | undefined;
+  private pollAgain = false;
   constructor(private deps: TerminalDependencies = defaults) {}
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -76,7 +83,7 @@ export class TerminalBindingClient {
   start() {
     if (this.scope) return;
     const scope = new AbortController(); this.scope = scope;
-    this.booting = false; this.polling = false;
+    this.booting = false; this.polling = false; this.cameraReport = undefined; this.deferredCameraMetadata = undefined; this.pollAgain = false;
     this.publish({ ready: false, identity: null, connection: null, connected: false, error: '' });
     void this.boot(scope);
   }
@@ -97,17 +104,74 @@ export class TerminalBindingClient {
     if (!this.current(scope) || !this.snapshot.identity || this.polling) return;
     clearTimeout(this.timer); this.polling = true;
     try {
-      const result = await this.deps.connect(this.snapshot.identity, scope.signal);
+      const identity = this.snapshot.identity;
+      const sentCameraReport = this.cameraReport;
+      const result = await this.deps.connect(identity.platform === 'browser'
+        ? { ...identity, cameraCapabilities: { version: 1 }, ...(sentCameraReport ? { cameraReport: sentCameraReport } : {}) }
+        : identity, scope.signal);
       if (!this.current(scope)) return;
       if (result.terminalId !== this.snapshot.identity.terminalId) throw new Error('返回的设备身份不匹配，请重新连接。');
+      if (this.cameraReport && (result.mirrorId !== this.cameraReport.mirrorId || result.cameraBindingId !== this.cameraReport.bindingId)) {
+        this.cameraReport = undefined; this.deferredCameraMetadata = undefined;
+      } else if (sentCameraReport && this.cameraReport === sentCameraReport && result.cameraReportAccepted !== undefined
+        && sentCameraReport.requestId && ['closed', 'error', 'busy'].includes(sentCameraReport.status)) {
+        this.cameraReport = this.deferredCameraMetadata; this.deferredCameraMetadata = undefined;
+        if (this.cameraReport) this.pollAgain = true;
+      }
       this.publish({ connection: result, connected: true, error: '' });
     } catch (cause) {
       if (this.current(scope)) this.publish({ connected: false, error: cause instanceof Error ? cause.message : '镜端连接中断，正在重试。' });
     } finally {
-      if (this.current(scope)) { this.polling = false; this.timer = setTimeout(() => void this.poll(scope), 10000); }
+      if (this.current(scope)) {
+        this.polling = false;
+        const delay = this.pollAgain ? 0 : 10000; this.pollAgain = false;
+        this.timer = setTimeout(() => void this.poll(scope), delay);
+      }
     }
   }
   retry = async () => { if (this.scope) { if (this.snapshot.identity) await this.poll(this.scope); else await this.boot(this.scope); } };
+  openCamera = async (mirrorId: string, signal?: AbortSignal): Promise<ExhibitionCameraRequest> => {
+    const scope = this.scope;
+    const identity = this.snapshot.identity;
+    const binding = this.snapshot.connection;
+    if (!scope || !this.snapshot.connected || identity?.platform !== 'browser' || !binding?.cameraBindingId
+      || binding.mirrorId !== mirrorId || binding.terminalId !== identity.terminalId) throw new Error('请从已绑定的镜端切换摄像头。');
+    const operation = new AbortController();
+    const abort = () => operation.abort();
+    scope.signal.addEventListener('abort', abort, { once: true });
+    signal?.addEventListener('abort', abort, { once: true });
+    if (scope.signal.aborted || signal?.aborted) abort();
+    try {
+      if (operation.signal.aborted) throw new DOMException('已取消摄像头设置。', 'AbortError');
+      const result = await (this.deps.openCamera ?? defaults.openCamera!)(mirrorId, identity.terminalId, binding.cameraBindingId, operation.signal);
+      const current = this.snapshot.connection;
+      if (operation.signal.aborted || !this.current(scope) || !this.snapshot.connected || this.snapshot.identity !== identity
+        || current?.mirrorId !== mirrorId || current?.cameraBindingId !== binding.cameraBindingId || current.terminalId !== identity.terminalId)
+        throw new DOMException('镜端绑定已变化，请重试。', 'AbortError');
+      const cameraRequest = result.request;
+      if (!cameraRequest || cameraRequest.action !== 'open' || cameraRequest.mirrorId !== mirrorId || cameraRequest.terminalId !== identity.terminalId
+        || cameraRequest.bindingId !== binding.cameraBindingId || cameraRequest.createdAt > Date.now() || cameraRequest.expiresAt <= Date.now())
+        throw new Error('摄像头请求已失效，请重试。');
+      return cameraRequest;
+    } finally {
+      scope.signal.removeEventListener('abort', abort);
+      signal?.removeEventListener('abort', abort);
+    }
+  };
+  reportCamera = (report: ExhibitionCameraReport) => {
+    const connection = this.snapshot.connection;
+    if (!this.scope || !this.snapshot.connected || this.snapshot.identity?.platform !== 'browser'
+      || connection?.mirrorId !== report.mirrorId || connection.cameraBindingId !== report.bindingId) return;
+    if (!report.requestId && this.cameraReport?.requestId && ['closed', 'error', 'busy'].includes(this.cameraReport.status)) {
+      // Closing a dialog releases a server gate. Never let a routine camera
+      // update replace that completion before the server acknowledges it.
+      this.deferredCameraMetadata = report; return;
+    }
+    if (JSON.stringify(this.cameraReport) === JSON.stringify(report)) return;
+    this.cameraReport = report;
+    if (this.polling) this.pollAgain = true;
+    else void this.poll(this.scope);
+  };
   beginPairing = () => {
     if (!this.scope || this.snapshot.identity) return;
     try {
@@ -121,6 +185,8 @@ export function useTerminalBinding(active: boolean) {
   const client = useMemo(() => new TerminalBindingClient(), []);
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   useEffect(() => { if (active) client.start(); return () => client.stop(); }, [client, active]);
-  return { ...state, retry: client.retry, beginPairing: client.beginPairing };
+  return { ...state, retry: client.retry, beginPairing: client.beginPairing,
+    openCamera: client.openCamera as ((mirrorId: string, signal?: AbortSignal) => Promise<ExhibitionCameraRequest>) | undefined,
+    reportCamera: client.reportCamera as ((report: ExhibitionCameraReport) => void) | undefined };
 }
 export type TerminalBinding = ReturnType<typeof useTerminalBinding>;

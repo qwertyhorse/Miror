@@ -27,6 +27,13 @@ async function fixture(overrides: Partial<ExhibitionState> = {}, props: Partial<
   return { snapshot, send, render, button };
 }
 describe('minimal mirror material drawer', () => {
+  it('shows display covers when the generation reference is separate', async () => {
+    const snapshot = state(); snapshot.looks[0].referenceImage = '/generation-reference.png';
+    const f = await fixture(snapshot);
+    const image = f.button('选择轻盈通勤')!.children[0];
+    expect(image.props.src).toBe(snapshot.looks[0].image);
+    expect(host!.find(node => node.nodeName === 'img' && node.getReactProps().src === '/generation-reference.png')).toBeUndefined();
+  });
   it.each(['idle', 'select'] as const)('selects from the drawer in %s without starting an experience', async phase => {
     const f = await fixture({ phase });
     expect(f.button('选择轻盈通勤')!['aria-pressed']).toBe(true);

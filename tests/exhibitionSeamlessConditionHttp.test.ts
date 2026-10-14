@@ -47,7 +47,7 @@ async function fixture(options: { mode?: 'clothx' | 'free' | 'mox' } = {}) {
   const server = createApiServer(service, undefined, undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); resources.push({ directory, server, store });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
-  const postAt = (mirrorId: string, path: string, input: unknown) => fetch(base.replace(/default$/u, mirrorId) + path, { method: 'POST', headers: { origin: 'http://127.0.0.1:5173', 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(3_000) });
+  const postAt = (mirrorId: string, path: string, input: unknown) => fetch(base.replace(/default$/u, mirrorId) + path, { method: 'POST', headers: { origin: 'http://127.0.0.1:5173', 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(3_000) });
   const post = (path: string, input: unknown) => postAt('default', path, input);
   const deviceId = 'isolated-seamless-screen';
   const started = await post('/live/session', { deviceId, lookId: 'commute', generationNumber: mirror.get().generationNumber });
@@ -176,7 +176,7 @@ describe('same-session exhibition material conditions over HTTP', () => {
   it.each(['expiry', 'quota', 'heartbeat'] as const)('pauses a pending material switch on %s without allocating another credential', async reason => {
     const f = await fixture(); await f.post('/command', { action: 'next' });
     if (reason === 'quota') f.store.update(f.session.id, { consumedCredits: f.session.pointsLimit });
-    else f.advance(reason === 'expiry' ? 120_001 : 15_001);
+    else f.advance(reason === 'expiry' ? 120_001 : 20_001);
     await f.mirror.reconcileLive();
     expect(f.mirror.get()).toMatchObject({ phase: 'paused', selectedLookId: 'city', displayedLookId: 'commute', generationNumber: 2, live: null });
     expect((await f.post('/live/session', f.intent())).status).toBe(409);

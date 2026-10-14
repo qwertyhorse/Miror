@@ -3,8 +3,9 @@ import { Check, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ExhibitionLook } from '../../shared/exhibition';
 import { appUrl } from '../versionScope';
 
-export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, title, onSelect, onBusyChange }: {
+export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, title, columns = 2, onSelect, onBusyChange }: {
   looks: ExhibitionLook[]; selectedId: string | null; disabled: boolean; passive: boolean; title: string;
+  columns?: 1 | 2;
   onSelect: (id: string) => Promise<boolean>; onBusyChange: (busy: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -59,7 +60,7 @@ export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, tit
     }
   }
   const highlightedId = optimisticId ?? selectedId;
-  return <div className={`ex-mirror-drawer${open ? ' is-open' : ''}`} onKeyDown={event => {
+  return <div className={`ex-mirror-drawer${open ? ' is-open' : ''}`} data-columns={columns} onKeyDown={event => {
     if (event.key === 'Escape' && open) { event.preventDefault(); setOpen(false); toggle.current?.focus(); }
   }}>
     {open && <div id={panelId} className="ex-mirror-drawer-panel">

@@ -1,0 +1,20 @@
+.ex-mirror-camera{margin-top:14px;padding-top:14px;border-top:1px solid #e7def1;color:#77618e}
+.ex-mirror-camera-row{display:flex;align-items:center;gap:10px}
+.ex-mirror-camera-row>svg{flex-shrink:0}
+.ex-mirror-camera-current{flex:1;min-width:0;display:grid;gap:3px}
+.ex-mirror-camera-current strong{font-size:12px;font-weight:600;overflow-wrap:anywhere}
+.ex-mirror-camera-current>span{font-size:10px;color:#9687a5}
+.ex-mirror-camera-devices{margin-top:10px;font-size:11px}
+.ex-mirror-camera-devices summary{display:flex;align-items:center;gap:5px;cursor:pointer;width:fit-content;list-style:none;border-radius:4px}
+.ex-mirror-camera-devices summary::-webkit-details-marker{display:none}
+.ex-mirror-camera-devices summary:focus-visible{outline:2px solid #8f74dd;outline-offset:4px}
+.ex-mirror-camera-devices[open] summary>svg{transform:rotate(180deg)}
+.ex-mirror-camera-devices ul{list-style:none;margin:8px 0 0;padding:0}
+.ex-mirror-camera-devices li{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:7px 10px;background:#fff;border-bottom:1px solid #f2edf7}
+.ex-mirror-camera-devices li>span:first-child{min-width:0;overflow-wrap:anywhere}
+.ex-camera-selected{display:inline-flex;align-items:center;gap:3px;color:#7560b6;white-space:nowrap;flex-shrink:0;font-size:10px}
+.ex-mirror-camera-notice{font-size:11px;line-height:1.6;color:#8c789c;margin-top:10px!important}
+.ex-camera-pending{animation:ex-camera-spin 1s linear infinite}
+@keyframes ex-camera-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.ex-camera-pending{animation:none}}
+@media(max-width:480px){.ex-mirror-camera-row{flex-wrap:wrap}.ex-mirror-camera-current{flex-basis:calc(100% - 30px)}.ex-mirror-camera-row .ex-button{width:100%;justify-content:center}}

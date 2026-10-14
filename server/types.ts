@@ -11,9 +11,10 @@ export interface SessionRecord extends SessionRequest {
   /** Permanent signing credential is encrypted and frozen for safe revocation. */
   providerKeyCipher?: string;
   providerRegion?: XmaxRegion;
+  referenceScope?: string;
   expiresAt?: string; refImageUrl: string; providerSessionId?: string; consumedCredits: number;
   referenceVersion: number; firstFrameMs?: number; referenceAsset?: string;
-  exhibition?: { mirrorId?: string; lookId: string; deviceId: string; sessionNumber: number; generationNumber: number; mode?: ExhibitionExperienceMode; prompt?: string };
+  exhibition?: { mirrorId?: string; lookId: string; deviceId: string; sessionNumber: number; generationNumber: number; mode?: ExhibitionExperienceMode; prompt?: string; continuous?: boolean };
   resultUrl?: string; resultAvailable: boolean; verification: 'sdk-reported' | 'none';
   errorCode?: string; createdAt: string; updatedAt: string;
 }

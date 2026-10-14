@@ -11,7 +11,9 @@ const fields: { key: NumericField; label: string; min: number; max: number; step
   { key: 'minHandPresenceConfidence', label: '手部存在置信度', min: 0.1, max: 0.9, step: 0.01 },
   { key: 'minTrackingConfidence', label: '框跟踪阈值（IoU）', min: 0.1, max: 0.9, step: 0.01 },
   { key: 'palmConfirmMs', label: '手掌确认时长（毫秒）', min: 150, max: 1000, step: 1 },
-  { key: 'palmReleaseMs', label: '收手间隔（毫秒）', min: 300, max: 1500, step: 1 },
+  { key: 'palmLowerMs', label: '放手复位时长（毫秒）', min: 150, max: 1500, step: 1 },
+  { key: 'lowerTrackingGraceMs', label: '跟踪丢失容错（毫秒）', min: 100, max: 1000, step: 1 },
+  { key: 'palmReleaseMs', label: '握拳/撤手复位（毫秒）', min: 300, max: 1500, step: 1 },
   { key: 'maxFps', label: '识别帧率上限（FPS）', min: 5, max: 30, step: 1 },
 ];
 const choices: { value: ExhibitionGestureKind; label: string }[] = [

@@ -19,6 +19,8 @@ internal interface MediaControlling : InteractionControlling {
 
     val currentVideoFormat: RealtimeVideoFormat?
 
+    suspend fun prepareConnectionVideoFormat(): RealtimeVideoFormat?
+
     val hasAudio: Boolean
 
     val networkVideoReference: RealtimeReferenceVideo?

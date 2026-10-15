@@ -53,7 +53,7 @@ internal fun createVolcRtcEngine(
         isGameScene = false
     }
     val eventListener = AtomicReference<WeakReference<RtcEventListener>?>(null)
-    val cameraPreviewReadyListener = AtomicReference<(() -> Unit)?>(null)
+    val cameraPreviewReadyListener = AtomicReference<((CameraFrameGeometry, Boolean) -> Unit)?>(null)
     val qualityListener = AtomicReference<WeakReference<RtcQualityListener>?>(null)
     val activeRoomId = AtomicReference<String?>(null)
     val localMirrorType = AtomicReference(MirrorType.MIRROR_TYPE_NONE)
@@ -73,7 +73,14 @@ internal fun createVolcRtcEngine(
             videoSource: com.ss.bytertc.engine.IVideoSource,
             frameInfo: com.ss.bytertc.engine.data.VideoFrameInfo,
         ) {
-            cameraPreviewReadyListener.get()?.invoke()
+            cameraPreviewReadyListener.get()?.invoke(CameraFrameGeometry(frameInfo.width, frameInfo.height, frameInfo.rotation.value()), true)
+        }
+
+        override fun onLocalVideoSizeChanged(
+            videoSource: com.ss.bytertc.engine.IVideoSource,
+            frameInfo: com.ss.bytertc.engine.data.VideoFrameInfo,
+        ) {
+            cameraPreviewReadyListener.get()?.invoke(CameraFrameGeometry(frameInfo.width, frameInfo.height, frameInfo.rotation.value()), false)
         }
 
         override fun onSEIMessageReceived(
@@ -157,6 +164,13 @@ internal fun createVolcRtcEngine(
 
         override fun setVideoCaptureRotation(rotationDegrees: Int): Int =
             engine.setVideoCaptureRotation(RtcVideoConverter.convertCaptureRotation(rotationDegrees))
+
+        override fun setVideoOrientation(orientation: CameraVideoOrientation): Int =
+            engine.setVideoOrientation(when (orientation) {
+                CameraVideoOrientation.ADAPTIVE -> com.ss.bytertc.engine.data.VideoOrientation.ADAPTIVE
+                CameraVideoOrientation.PORTRAIT -> com.ss.bytertc.engine.data.VideoOrientation.PORTRAIT
+                CameraVideoOrientation.LANDSCAPE -> com.ss.bytertc.engine.data.VideoOrientation.LANDSCAPE
+            })
 
         override fun startVideoCapture(
             width: Int,
@@ -257,7 +271,7 @@ internal fun createVolcRtcEngine(
             return 0
         }
 
-        override fun setCameraPreviewReadyListener(listener: (() -> Unit)?) {
+        override fun setCameraPreviewReadyListener(listener: ((CameraFrameGeometry, Boolean) -> Unit)?) {
             cameraPreviewReadyListener.set(listener)
         }
 

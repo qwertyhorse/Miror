@@ -269,8 +269,10 @@ internal class XmaxRealtimeManager(
         resetGeneration: Boolean = true,
     ): RealtimeMediaStream {
         requireDisconnected(c)
-        val videoFormat = localStream.videoTrack?.videoFormat
-        if (videoFormat == null || !c.media.owns(localStream)) throw invalid("The local stream must be created and started by this realtime manager")
+        if (!c.media.owns(localStream)) throw invalid("The local stream must be created and started by this realtime manager")
+        val videoFormat = c.media.prepareConnectionVideoFormat()
+            ?: throw invalid("The local stream must have a valid video format")
+        token.ensureCurrent()
         token.setFailureScope(TerminationScope.CONNECTION)
         token.commit(RealtimeState(RealtimeConnectionState.CONNECTING))
         try {

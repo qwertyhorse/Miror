@@ -39,6 +39,34 @@ call ordering, invalid input, failed-configuration retry, reset to the default,
 and preservation of frame rotation and I420 plane data. Physical device testing
 is still required to verify driver-specific capture and generated-video output.
 
+Camera first-frame and size-change callbacks also retain the raw dimensions and
+RTC rotation. Only a captured first frame satisfies readiness. Before preview
+READY, and again before each connection, the camera track resolves its effective
+display dimensions through the model's existing alignment rules. The encoder and
+generation events consume that same format; subsequent callbacks cannot change
+an active connection's generation size. Capture generations and engine leases
+fence stopped-source callbacks and pending readiness notifications. One diagnostic
+line at connection preparation records raw size, rotation, and resolved model
+size without credentials. Tests cover non-square frames at all four rotations,
+already-rotated pixels, size updates, reconnection, and first/change-condition
+payload consistency. Native callbacks do not provide a capture-generation ID,
+so delayed native events still require physical-device verification.
+
+Before configuring the encoder for an internal camera source, the RTC boundary
+sets `VideoOrientation.PORTRAIT` or `LANDSCAPE` to match that resolved format.
+The SDK applies frame rotation before encoding and resets its rotation metadata
+to zero, so model input need not interpret a separate rotation flag. The saved
+installation correction remains owned by `setVideoCaptureRotation`; it is never
+added a second time. Each capture begins in `ADAPTIVE` to measure actual geometry
+without a preceding session's fixed orientation. Switching to external image or
+video input resets both orientation and capture correction before switching the
+source; a failed reset prevents the switch. Pre-encoding configuration failures
+prevent connection rather than silently sending an unadapted camera stream.
+Preview and gesture sinks retain their existing frame-rotation handling.
+This is frame orientation normalization, not automatic recognition of an upright
+person. Driver-specific preview and XMAX output still need physical-device tests.
+See the RTC [video orientation documentation](https://docs.byteplus.com/en/docs/byteplus-rtc/docs-128787).
+
 The optional local video-frame listener exposes bounded CPU I420 samples from
 the existing RTC capture for Android hand inference. Its local sink uses
 `AFTER_PREPROCESS` so sampling and preview receive the camera correction and

@@ -55,6 +55,10 @@ internal class MediaController(
     override val currentVideoFormat: RealtimeVideoFormat?
         get() = currentTrack?.videoFormat
 
+    override suspend fun prepareConnectionVideoFormat(): RealtimeVideoFormat? =
+        if (synchronized(stateLock) { activeSource } == LocalMediaKind.CAMERA) cameraController.prepareConnectionVideoFormat()
+        else currentVideoFormat
+
     override val hasAudio: Boolean
         get() = when (synchronized(stateLock) { activeSource }) {
             LocalMediaKind.CAMERA -> cameraController.useMicrophone

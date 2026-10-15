@@ -27,6 +27,8 @@ internal interface RtcPlatformEngine {
 
     fun setVideoCaptureRotation(rotationDegrees: Int): Int
 
+    fun setVideoOrientation(orientation: CameraVideoOrientation): Int
+
     fun startVideoCapture(width: Int, height: Int, frameRate: Int): Int
 
     fun stopVideoCapture(): Int
@@ -45,7 +47,8 @@ internal interface RtcPlatformEngine {
 
     fun unbindRemoteVideo(userId: String): Int
 
-    fun setCameraPreviewReadyListener(listener: (() -> Unit)?)
+    /** Raw geometry updates; the second argument is true only for a captured first frame. */
+    fun setCameraPreviewReadyListener(listener: ((CameraFrameGeometry, Boolean) -> Unit)?)
 
     fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?): Int = 0
 

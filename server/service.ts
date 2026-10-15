@@ -139,7 +139,7 @@ export class TryOnService {
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return { state: 'unconfigured' };
     return this.options.referenceAssets.status({ scope: context.scope, sha256, mime });
   }
-  async prepareReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart') {
+  async prepareReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart', replace = false) {
     const context = this.referenceContext(mirrorId, target);
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return null;
     let provider = this.referenceProviders.get(context.scope);
@@ -148,7 +148,7 @@ export class TryOnService {
       this.referenceProviders.set(context.scope, provider);
       while (this.referenceProviders.size > 16) this.referenceProviders.delete(this.referenceProviders.keys().next().value!);
     }
-    const prepared = await this.options.referenceAssets.prepare({ scope: context.scope, bytes, mime }, provider);
+    const prepared = await this.options.referenceAssets.prepare({ scope: context.scope, bytes, mime }, provider, { replace });
     return this.referenceContext(mirrorId, target).scope === prepared.scope ? prepared : null;
   }
   private sessionProvider(record: SessionRecord): Provider {

@@ -309,7 +309,7 @@ if (!response.ok) throw new Error(next.message);
 
 API 名称 1–40 字；后台不要求填写名称，上传时从展示图文件名生成，编辑时保留。描述最多 120 字，每份素材最多 8 个标签；分类和标签必须已登记。两张图只接受可完整解码的静态 PNG/JPEG/WebP，分别转为 WebP。每镜最多 100 份素材，全服务同时处理最多 2 份上传。新增素材默认禁用，需通过 `configure.enabledLookIds` 启用。上传可在体验中追加，不使用全局版本锁；编辑、删除、分类调整和皮肤更换需先结束体验。
 
-`image` 为展示图，用于素材列表、选衣和待机；`referenceImage` 为模型输入，附有独立的 `referenceImageInfo`（宽高、字节数、MIME）。服务端准备、连续切换与 MoX 操作均使用参考图，实时客户端不再上传参考图。新素材两张图必填；PATCH 未提交的图片保持原样，换图生成新资源 URL 并刷新参考图准备缓存。所有图片校验通过后才保存；处理或保存失败清理本次文件，保留原素材。
+`image` 为展示图，用于素材列表、选衣和待机；`referenceImage` 为模型输入，附有独立的 `referenceImageInfo`（宽高、字节数、MIME）。服务端准备、连续切换与 MoX 操作均使用参考图，实时客户端不再上传参考图。新素材两张图必填；PATCH 未提交的图片保持原样，换图生成新资源 URL，并按新参考图内容自动准备供应商引用。所有图片校验通过后才保存；处理或保存失败清理本次文件，保留原素材。
 
 旧单图素材没有 `referenceImage` 时继续以 `image` 作为生成输入；首次仅更换展示图会把原图固定为参考图。Free 模式必须提交 1–1000 字 `prompt`；旧素材的 `referenceKind: "none"` 继续仅使用提示词，编辑时补充参考图才转为图文生成，转到其他模式须补参考图。新建 Free 素材也必须提交双图。
 
@@ -442,10 +442,10 @@ HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应
 ## 提前准备参考素材
 
 - `GET M/references` 批量返回 `{ references: { [lookId]: { state, message?, retryAt?, updatedAt?, freshUntil?, stage? } } }`，供工作人员后台显示状态。`state` 为 `queued`、`preparing`、`ready`、`failed`、`unconfigured` 或 `not_required`；时间字段为 Unix 毫秒。此接口不返回云端 URL、账号摘要或凭据，也不会触发上传。
-- `POST M/references/{lookId}/retry`，JSON 请求体 `{}`，返回 HTTP 202 和 `{ status }`，异步准备该素材；已有任务复用，有效缓存不重传。失败后冷却期间仅返回当前状态，达到 `retryAt` 后可重试。原有同步准备接口保持兼容。
-- `GET M/references/{lookId}` 只读查询当前发布快照，返回 `{ reference: null }` 或 `{ reference: { bindingId, url, sha256, scope, freshUntil, providerExpiresAt? } }`。`scope` 为账号与区域的不可逆摘要；`freshUntil` 为 Unix 毫秒。查询不会签发临时 key 或发起云端上传。
+- `POST M/references/{lookId}/retry`，JSON 请求体 `{}`，返回 HTTP 202 和 `{ status }`，异步准备该素材；已有任务复用，就绪引用不重传。工作人员显式发送 `{ "replace": true }` 可重新上传当前服务引用；替换成功前保留原引用，失败保留原引用并冷却，进行中的替换请求合并。失败后冷却期间仅返回当前状态，达到 `retryAt` 后可重试。原有同步准备接口保持兼容。
+- `GET M/references/{lookId}` 只读查询当前发布快照，返回 `{ reference: null }` 或 `{ reference: { bindingId, url, sha256, scope, freshUntil, providerExpiresAt? } }`。`scope` 为账号与区域的不可逆摘要；`freshUntil` 为兼容现有 Web/Android 客户端保留的数字字段：有供应商硬到期时为其 Unix 毫秒时间，否则为 `9007199254740991`，不代表本地缓存计时器。查询不会签发临时 key 或发起云端上传。
 - `POST M/references/{lookId}`，JSON 请求体 `{}`，准备指定素材并返回同一结构。仅使用该镜当前永久凭据向对应区域上传规范化后的参考图（旧单图素材回退展示图）并执行 SDK 同等的安全检查，不创建 RTC 或生成任务。图片仍保存在原素材目录。
-- 后台启动后自动串行维护运行中和空闲镜的已发布与草稿素材，同时准备待生效供应商的副本，顺序为当前选中、已启用、其他素材；同优先级在镜子与素材间轮换，新上传或选择变化在下一轮调度生效。失败任务冷却后排在尚待准备的任务之后重试，避免连续超时阻塞正常素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。本地验证窗口最多 1 小时；若供应商声明硬到期则取更早时间，硬到期后重新上传。临近到期检查续期；明确不存在/拒绝立即失效，网络不确定时冷却 60 秒并保留仍有效副本。过期记录重新核验后使用新 bindingId。
+- 后台启动后自动串行准备运行中和空闲镜的已发布与草稿参考图，为所有已配置服务（XMAX、Decart）各保存一份引用，无需先申请切换；未配置服务跳过，后续配置后自动补传，展示图不传给模型，顺序为当前选中、已启用、其他素材；同优先级在镜子与素材间轮换，新上传或选择变化在下一轮调度生效。失败任务冷却后排在尚待准备的任务之后重试，避免连续超时阻塞正常素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。不设置本地一小时有效期，不做周期 DNS/HEAD 可用性检查。Decart 上传显式指定 `ttl_seconds=persistent`，以 `expires_at=null` 确认无到期；缺失或畸形到期信息不能当作永久成功。XMAX 引用无本地到期限制，官方未承诺文件永久保留。只有供应商实际硬到期临近或工作人员显式重新上传时替换；新引用成功落盘后才替换原引用与 bindingId。上传失败冷却 60 秒。旧 schema 2 XMAX 引用去掉人为一小时限制；旧 Decart 引用保留实际到期，缺少到期信息时保留旧窗口，随后上传为 persistent；不把旧 24 小时文件直接改成永久。schema 3 仅持久化供应商到期（如有），不持久化本地 freshUntil。
 - `referenceScope` 绑定当前供应商、账号及区域；使用绑定时同步核对内容哈希、MIME、当前发布版本、会话冻结账号与至少 30 秒剩余有效期。实时 bind/condition 不执行 DNS 或其他网络检查。来源验证放在后端上传和副本刷新阶段，外部资源下载仍保留原安全约束。缺绑定/过期/账号不符返回明确错误，不回退浏览器上传。
 - 同时最多 2 个准备任务（自动任务最多 1 个）；变更等待最多 128 个连接，超额返回 429。断开请求自动清理订阅。
 
@@ -462,7 +462,7 @@ HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应
 
 Decart 终端在创建实时会话时须声明 `X-Miror-Realtime: decart-v1`；缺少该能力声明返回 426，并且不签发任何 Decart token。现有 XMAX 客户端继续使用协议 2。
 
-Decart create 响应包含 `providerId`、固定 model、`releaseKey`，token 为空。后端用账号专属缓存准备 `file_*` 素材，终端绑定参考图后，通过 `POST .../sessions/:id/dial {releaseKey}` 获取一次连接的短 token。此接口校验会话归属、当前业务状态和单次拨号门禁，限制模型、受信 Origin、30 秒准入 TTL 和 120 秒单次连接时长；未知或重复签发不自动重放。永久 key 始终留在后端；短 token 和 releaseKey 不写浏览器持久存储。
+Decart create 响应包含 `providerId`、固定 model、`releaseKey`，token 为空。后端用账号专属持久引用准备 `file_*` 素材，终端绑定参考图后，通过 `POST .../sessions/:id/dial {releaseKey}` 获取一次连接的短 token。此接口校验会话归属、当前业务状态和单次拨号门禁，限制模型、受信 Origin、30 秒准入 TTL 和 120 秒单次连接时长；未知或重复签发不自动重放。永久 key 始终留在后端；短 token 和 releaseKey 不写浏览器持久存储。
 
 SDK 0.2.11 的内部重连被此 Adapter 阻止，应用已有的有界恢复和续接负责新 segment。初始连接携带完整 prompt/reference；后续选择用同一连接的完整 `set()` 条件更新，保留 latest-intent 与旧回调隔离。SDK ack 不代表视觉效果确认。
 

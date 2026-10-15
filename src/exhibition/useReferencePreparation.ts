@@ -41,13 +41,13 @@ export function useReferencePreparation(mirrorId: string, catalogKey: string, en
     const update = (change: (previous: Snapshot) => Snapshot) => {
       if (!stopped) setSnapshot(previous => previous.scope === scope ? change(previous) : previous);
     };
-    const request = async (suffix: string, abort: AbortController, post = false): Promise<unknown> => {
+    const request = async (suffix: string, abort: AbortController, post = false, replace = false): Promise<unknown> => {
       requests.add(abort);
       const timeout = setTimeout(() => abort.abort(), 10000);
       try {
         const response = await fetch(appUrl(`/api${exhibitionApiPath(suffix, mirrorId)}`), {
           cache: 'no-store', signal: abort.signal,
-          ...(post ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' } : {}),
+          ...(post ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(replace ? { replace: true } : {}) } : {}),
         });
         if (!response.ok) throw new Error('Reference preparation request failed');
         return await response.json();
@@ -77,14 +77,14 @@ export function useReferencePreparation(mirrorId: string, catalogKey: string, en
     };
     const retry = async (lookId: string) => {
       const status = references[lookId];
-      if (stopped || !enabled || pendingRetries.has(lookId) || status?.state !== 'failed' || (status.retryAt ?? 0) > Date.now()) return;
+      if (stopped || !enabled || pendingRetries.has(lookId) || (status?.state !== 'failed' && status?.state !== 'ready') || status?.refreshState === 'preparing' || (status.retryAt ?? 0) > Date.now()) return;
       pendingRetries.add(lookId);
       // A list response from before the action must not overwrite the accepted retry.
       cancelList();
       update(previous => ({ ...previous, retrying: new Set(pendingRetries), retryErrors: { ...previous.retryErrors, [lookId]: '' } }));
       const abort = new AbortController();
       try {
-        const result = await request(`references/${encodeURIComponent(lookId)}/retry`, abort, true) as { status?: unknown };
+        const result = await request(`references/${encodeURIComponent(lookId)}/retry`, abort, true, status?.state === 'ready') as { status?: unknown };
         if (stopped || abort.signal.aborted) return;
         if (!isStatus(result?.status)) throw new Error('Invalid reference preparation status');
         cancelList();

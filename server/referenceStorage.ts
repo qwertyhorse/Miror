@@ -14,7 +14,6 @@ export type ReplicaFailure =
   | 'not_found'
   | 'denied'
   | 'not_configured';
-export type ReplicaCheck = { ok: true } | { ok: false; error: ReplicaFailure };
 export interface ReferenceReplicaProvider {
   upload(
     bytes: Buffer,
@@ -22,7 +21,6 @@ export interface ReferenceReplicaProvider {
     mime?: string,
     onStage?: (stage: ReferencePreparationStage) => void,
   ): Promise<{ ok: true; url: string } | { ok: false; error: ReplicaFailure }>;
-  check(url: string): Promise<ReplicaCheck>;
 }
 const encode = (s: string) =>
   encodeURIComponent(s).replace(
@@ -176,32 +174,6 @@ export function createReferenceCosProvider(options: {
       }
       return { ok: false, error: 'denied' };
     },
-    async check(url) {
-      // Only persisted public COS objects, never arbitrary caller-controlled/private URLs.
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        return { ok: false, error: 'malformed' };
-      }
-      if (
-        parsed.protocol !== 'https:' ||
-        !/^[a-z0-9-]+-\d+\.cos\.[a-z0-9-]+\.myqcloud\.com$/.test(parsed.hostname) ||
-        parsed.username ||
-        parsed.password ||
-        parsed.port ||
-        parsed.search ||
-        parsed.hash
-      )
-        return { ok: false, error: 'malformed' };
-      const signal = AbortSignal.timeout(timeout);
-      try {
-        const response = await call(url, { method: 'HEAD', signal, redirect: 'error' });
-        return response.ok ? { ok: true } : { ok: false, error: errorFor(response.status) };
-      } catch {
-        return { ok: false, error: signal.aborted ? 'timeout' : 'network' };
-      }
-    },
   };
 }
 
@@ -259,13 +231,6 @@ export function referenceStorage(apiKey: string, region: 'cn' | 'global', call: 
       if (value?.success !== true || typeof value.data?.url !== 'string' || !safeReferenceUrl(value.data.url)) throw new ReferencePreparationError('check', 'malformed');
       await validateAddress(value.data.url);
       return value.data.url;
-    },
-    async check(url) {
-      await validateAddress(url);
-      const result = await provider.check(url);
-      if (result.ok) return true;
-      if (['not_found', 'denied'].includes(result.error)) return false;
-      throw new ReferencePreparationError('availability', result.error);
     },
   };
 }

@@ -22,7 +22,7 @@ function fixture() {
   const credentials = new MirrorCredentialStore(dir, secrets);
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
     if (String(url).endsWith('/client/tokens')) return Response.json({ apiKey: 'ek_fixture', expiresAt: new Date(Date.now() + 30_000).toISOString(), constraints: JSON.parse(init!.body as string).constraints });
-    if (String(url).endsWith('/files')) return Response.json({ id: 'file_fixture' });
+    if (String(url).endsWith('/files')) return Response.json({ id: 'file_fixture', expires_at: null });
     return Response.json({ limit: null, active: null, remaining: null });
   });
   const xmaxFetch = vi.fn<typeof fetch>(async () => { throw Error('Unexpected XMAX request'); });
@@ -135,4 +135,14 @@ it.each(['expires_at', 'expiresAt'])('respects Decart upload %s hard expiry rath
 it('rejects malformed declared Decart file expiry', async () => {
   const provider = new DecartProvider('dct_fixture', vi.fn(async () => Response.json({ id: 'file_fixture', expires_at: 'invalid' })));
   await expect(provider.references().upload(Buffer.from('fixture'), 'fixture', 'image/png')).rejects.toMatchObject({ code: 'PROVIDER_INVALID_RESPONSE' });
+});
+
+it('requests persistent Decart storage and requires explicit persistence metadata', async () => {
+  const call = vi.fn(async (_url: unknown, init?: RequestInit) => {
+    expect((init!.body as FormData).get('ttl_seconds')).toBe('persistent');
+    return Response.json({ id: 'file_persistent', expires_at: null });
+  });
+  expect(await new DecartProvider('dct_fixture', call).references().upload(Buffer.from('image'), 'hash', 'image/png')).toEqual({ url: 'file_persistent' });
+  const missing = new DecartProvider('dct_fixture', vi.fn(async () => Response.json({ id: 'file_missing' })));
+  await expect(missing.references().upload(Buffer.from('image'), 'hash', 'image/png')).rejects.toMatchObject({ code: 'PROVIDER_INVALID_RESPONSE' });
 });

@@ -20,7 +20,6 @@ import ai.xmax.sdk.XmaxConfiguration
 import ai.xmax.sdk.XmaxEnvironment
 import ai.xmax.sdk.XmaxRealtimeManaging
 import ai.xmax.sdk.XmaxRealtimeVideoView
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
@@ -95,26 +94,6 @@ class NativeXmaxController(
                 }
             }
         }
-
-    suspend fun uploadReference(
-        token: String,
-        region: String,
-        bytes: ByteArray,
-        mime: String,
-    ): String {
-        require(bytes.isNotEmpty() && bytes.size <= 64 * 1024 * 1024) { "参考图不可用" }
-        val suffix = when (mime.lowercase()) {
-            "image/jpeg" -> "jpg"
-            "image/png" -> "png"
-            "image/webp" -> "webp"
-            else -> throw IllegalArgumentException("参考图格式不支持")
-        }
-        return client(token, region).createStorageManager().uploadImageWithSafetyCheck(
-            data = bytes,
-            fileName = "exhibition-${UUID.randomUUID()}.$suffix",
-            contentType = mime.lowercase(),
-        ).url
-    }
 
     /** Connect and return the provider id; generation starts only after generate(). */
     suspend fun connect(

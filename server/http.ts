@@ -181,8 +181,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'GET' && path === '/references') return json(response, 200, { references: current.referencePreparationStatuses() });
         const retryReference = /^\/references\/([^/]+)\/retry$/.exec(path);
         if (request.method === 'POST' && retryReference) {
-          await readBody();
-          return json(response, 202, { status: current.retryReferencePreparation(retryReference[1]) });
+          const input = await readBody();
+          return json(response, 202, { status: current.retryReferencePreparation(retryReference[1], input.replace === true) });
         }
         const preparedReference = /^\/references\/([^/]+)$/.exec(path);
         if (preparedReference && request.method === 'GET') return json(response, 200, { reference: current.readyReference(preparedReference[1], true) });

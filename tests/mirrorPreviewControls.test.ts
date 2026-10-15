@@ -123,7 +123,7 @@ describe('interactive mirror console preview', () => {
   ])('disables real-device start while the controller is unavailable: %j', async controller => {
     const f = await fixture(controller);
     const start = host!.find(node => node.nodeName === 'button' && childText(node.getReactProps().children) === '开始体验');
-    const stop = host!.find(node => node.nodeName === 'button' && childText(node.getReactProps().children) === '正在停止…');
+    const stop = host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '正在停止…');
     expect((start ?? stop)?.getReactProps().disabled).toBe(true);
     expect(f.send).not.toHaveBeenCalled();
     expect(f.stopExperience).not.toHaveBeenCalled();

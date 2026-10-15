@@ -12,10 +12,10 @@ import { createStaticRequestHandler } from './static-web.mjs';
 import { createLanRequestHandler } from './lan-preview.mjs';
 import { createCameraRequestHandler } from './camera-https.mjs';
 import { seedMaterials } from './seed-materials.mjs';
+import { HOSTNAME as hostname, EXHIBITION_PORT } from './gateway-shared.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const script = fileURLToPath(import.meta.url);
-const hostname = 'xuminghong.local';
 const apiPath = '/v1.1/api/exhibition';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -61,7 +61,7 @@ async function close(unit) {
   });
 }
 
-function request(unit, path, { publicPort = 10601, secure = false, ca, method = 'GET', body, origin, headers = {} } = {}) {
+function request(unit, path, { publicPort = EXHIBITION_PORT, secure = false, ca, method = 'GET', body, origin, headers = {} } = {}) {
   const encoded = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   return new Promise((done, fail) => {
     const call = (secure ? https : http).request({
@@ -137,7 +137,7 @@ export async function runPackageSmoke({ distDirectory = resolve(root, 'dist') } 
     const report = { passed: false, temporaryListenersOnly: true, providerCalls: 0, importsChecked,
       httpPorts: [], deepLinks: 0, bundleAssets: 0, materialAssets: 0, securityChecks: 0 };
 
-    for (const publicPort of [10200, 10201, 10601]) {
+    for (const publicPort of [10200, 10201, EXHIBITION_PORT]) {
       const entry = expectStatus(await request(lan, '/?mirror=default', { publicPort }), 302, 'HTTP root');
       assert.equal(entry.headers.location, '/v1.1/exhibition/control?mirror=default');
       const list = expectStatus(await request(lan, `${apiPath}/mirrors`, { publicPort }), 200, 'mirror list').json();
@@ -154,11 +154,11 @@ export async function runPackageSmoke({ distDirectory = resolve(root, 'dist') } 
       assert.match(response.headers['content-type'], /^text\/html/); assert.equal(response.text, html);
       report.deepLinks++;
     }
-    const framePath = '/v1.1/exhibition/control?mirror=default&credentialForm=1&parentOrigin=http%3A%2F%2Fxuminghong.local%3A10601';
+    const framePath = `/v1.1/exhibition/control?mirror=default&credentialForm=1&parentOrigin=${encodeURIComponent(`http://${hostname}:${EXHIBITION_PORT}`)}`;
     const frame = expectStatus(await request(camera, framePath, secureOptions), 200, 'HTTPS credential iframe');
     assert.equal(frame.text, html);
     assert.match(frame.headers['content-security-policy'], /frame-ancestors 'self'/);
-    for (const port of [10200, 10201, 10601]) assert(frame.headers['content-security-policy'].includes(`http://${hostname}:${port}`));
+    for (const port of [10200, 10201, EXHIBITION_PORT]) assert(frame.headers['content-security-policy'].includes(`http://${hostname}:${port}`));
     assert.equal(frame.headers['x-frame-options'], undefined, 'The intended HTTPS iframe must not be blocked');
     assert.equal(frame.headers['permissions-policy'], 'camera=(self), microphone=(), geolocation=()');
 
@@ -198,16 +198,16 @@ export async function runPackageSmoke({ distDirectory = resolve(root, 'dist') } 
     assert.equal(hash(secureAsset.bytes), seedHashes.get(`exhibition-mirrors/default/exhibition-assets/${state.looks[0].id}.webp`));
 
     // A same-origin staff write must survive both proxy layers and reach the API.
-    const write = expectStatus(await request(lan, M, { method: 'PATCH', body: { name: '封装验收镜' }, origin: `http://${hostname}:10601` }), 200, 'HTTP staff write');
+    const write = expectStatus(await request(lan, M, { method: 'PATCH', body: { name: '封装验收镜' }, origin: `http://${hostname}:${EXHIBITION_PORT}` }), 200, 'HTTP staff write');
     assert.equal(write.json().name, '封装验收镜');
-    const command = expectStatus(await request(lan, `${M}/command`, { method: 'POST', body: { action: 'idle', expectedRevision: state.revision }, origin: `http://${hostname}:10601` }), 200, 'HTTP command');
+    const command = expectStatus(await request(lan, `${M}/command`, { method: 'POST', body: { action: 'idle', expectedRevision: state.revision }, origin: `http://${hostname}:${EXHIBITION_PORT}` }), 200, 'HTTP command');
     assert.equal(command.json().phase, 'idle');
-    for (const options of [{}, { origin: 'http://example.invalid:10601' }, { origin: `http://${hostname}:10601`, headers: { 'Sec-Fetch-Site': 'cross-site' } }]) {
+    for (const options of [{}, { origin: `http://example.invalid:${EXHIBITION_PORT}` }, { origin: `http://${hostname}:${EXHIBITION_PORT}`, headers: { 'Sec-Fetch-Site': 'cross-site' } }]) {
       expectStatus(await request(lan, M, { method: 'PATCH', body: { name: '不应保存' }, ...options }), 403, 'Rejected cross-origin/missing-origin write');
       report.securityChecks++;
     }
     const invalidCredential = { apiKey: 'invalid', region: 'global', expectedRevision: 0 };
-    expectStatus(await request(lan, `${M}/credentials`, { method: 'PUT', body: invalidCredential, origin: `http://${hostname}:10601` }), 403, 'HTTP credentials blocked');
+    expectStatus(await request(lan, `${M}/credentials`, { method: 'PUT', body: invalidCredential, origin: `http://${hostname}:${EXHIBITION_PORT}` }), 403, 'HTTP credentials blocked');
     report.securityChecks++;
     const credentialStatus = expectStatus(await request(camera, `${M}/credentials`, secureOptions), 200, 'HTTPS credential status').json();
     assert.equal(credentialStatus.configured, false); assert(!Object.hasOwn(credentialStatus, 'apiKey'));

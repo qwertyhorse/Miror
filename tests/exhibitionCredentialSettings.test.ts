@@ -143,7 +143,7 @@ describe('per-mirror XMAX credential settings', () => {
     expect(f.live.refreshStatus).not.toHaveBeenCalled();
   });
 
-  it.each([10200, 10201, 10601])('embeds a mirror-specific HTTPS form from HTTP %s without collecting a password or opening a page', async httpPort => {
+  it.each([10200, 10201, 10601, 10101])('embeds a mirror-specific HTTPS form from HTTP %s without collecting a password or opening a page', async httpPort => {
     const f = await fixture({ secure: false, httpPort });
     expect(f.input()).toBeUndefined(); expect(f.saveButton()).toBeUndefined();
     const frame = host!.find(node => node.nodeName === 'iframe')!;
@@ -209,7 +209,7 @@ describe('per-mirror XMAX credential settings', () => {
     }
   });
 
-  it.each([10200, 10201, 10601])('notifies the selected trusted HTTP %s parent without including the secret', async port => {
+  it.each([10200, 10201, 10601, 10101])('notifies the selected trusted HTTP %s parent without including the secret', async port => {
     const parentOrigin = `http://xuminghong.local:${port}`;
     const f = await fixture({ embedded: true, parentOrigin });
     const secret = 'uk-isolated-parent-origin-fixture';

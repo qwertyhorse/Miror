@@ -15,6 +15,13 @@
 .ex-mirror-placeholder small{font-size:2.5cqi;color:#a29ab4;line-height:1.5}
 .ex-mirror-footer{position:absolute;left:4.5%;right:4.5%;bottom:.4%;height:3.2%;display:flex;align-items:center;justify-content:center}
 .ex-mirror-footer-tools{display:flex;align-items:center;justify-content:center;gap:1.4cqi}
+.ex-mirror-stop{display:grid;place-items:center;flex-shrink:0;width:5.2cqi;height:5.2cqi;padding:0;border:0;border-radius:1cqi;background:#ffffff80;color:#7966bc;cursor:pointer}
+.ex-mirror-stop>svg{width:2.2cqi;height:2.2cqi}
+.ex-mirror-stop:hover:not(:disabled){background:#ffffffb3}
+.ex-mirror-stop:disabled{opacity:.45;cursor:default}
+.ex-mirror-stop:focus-visible{outline:2px solid #9672e4;outline-offset:2px}
+.ex-mirror-minimal[data-skin="brand"] .ex-mirror-stop{background:#ffffff1f;color:#fff}
+.ex-mirror-minimal[data-skin="brand"] .ex-mirror-stop:hover:not(:disabled){background:#ffffff38}
 .ex-mirror-gesture{display:flex;align-items:center;justify-content:center;gap:.7cqi;padding:.5cqi 1.4cqi;border:0;border-radius:1cqi;background:#ffffff80;color:#7966bc;font:inherit;font-size:1.8cqi;line-height:1.2;cursor:pointer}
 .ex-mirror-gesture>svg{width:2.3cqi;height:2.3cqi}
 .ex-mirror-gesture>i{width:.8cqi;height:.8cqi;border-radius:50%;background:#b7b0c5}
@@ -49,7 +56,9 @@
 .ex-mirror-drawer-item:disabled{cursor:default}
 .ex-mirror-drawer-check{position:absolute;right:.5cqi;bottom:.5cqi;display:grid;place-items:center;width:2.8cqi;height:2.8cqi;border-radius:50%;background:#9672e4;color:#fff}
 .ex-mirror-drawer-check svg{width:1.8cqi;height:1.8cqi;stroke-width:3}
-.ex-mirror-drawer-toggle{position:absolute;left:100%;top:50%;transform:translateY(-50%);width:4.3cqi;height:15cqi;display:grid;place-items:center;padding:0;border:1px solid #e4dcefcc;border-left:0;border-radius:0 1.6cqi 1.6cqi 0;background:rgba(250,248,255,.88);backdrop-filter:blur(12px);color:#8068b1}
+.ex-mirror-drawer-toggle{position:absolute;left:100%;top:50%;transform:translateY(-50%);width:6cqi;min-width:36px;height:15cqi;min-height:48px;display:grid;place-items:center;padding:0;border:1px solid #e4dcefcc;border-left:0;border-radius:0 1.6cqi 1.6cqi 0;background:rgba(250,248,255,.88);backdrop-filter:blur(12px);color:#8068b1;cursor:pointer;touch-action:manipulation}
+.ex-mirror-drawer-toggle:focus-visible{outline:2px solid #9672e4;outline-offset:-3px}
+.ex-mirror-drawer-toggle:disabled{cursor:default}
 .ex-mirror-drawer-toggle svg{width:3.3cqi;height:3.3cqi;stroke-width:1.8}
 .ex-mirror-minimal .ex-visual-status{top:2cqi;left:auto;right:2cqi;justify-content:flex-end;font-size:2.4cqi;gap:1cqi;z-index:10}
 .ex-mirror-minimal .ex-visual-status>span{padding:.8cqi 1.6cqi;box-shadow:none}

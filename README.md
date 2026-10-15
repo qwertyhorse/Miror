@@ -4,6 +4,10 @@
 
 ## 启动
 
+当前项目目录为 `/home/a/文档/ChatGPT/展会`。Ubuntu 桌面已放置 **启动展会局域网** 快捷方式，双击即可启动后台并打开浏览器；本目录保留同名 `.desktop` 启动文件。若首次提示，选择“允许运行”。也可运行 `bash 启动局域网预览.sh`。关闭启动窗口后服务继续运行，重复启动不会创建第二份服务；重启电脑后登录当前用户会自动恢复。
+
+当前 Ubuntu 工作站使用 [http://xuxin.local:10101/](http://xuxin.local:10101/) 作为工作人员后台，镜端使用 `https://xuxin.local:10202/`。本机 `miror-preview.service` 已保存 `MIROR_LAN_HOSTNAME=xuxin.local` 和 `MIROR_EXHIBITION_PORT=10101`，登录后自动运行。Linux 需运行 Avahi 并安装 `avahi-publish-address`；网关会广播当前局域网 IP，网络地址变化时自动更新。初始化证书与启动时应传入同一组环境变量。其他部署未配置这些变量时，沿用下文的原默认地址。
+
 安装 Node.js 22.13 或更新版本（建议 24），本地交付 ZIP 已包含 dist；从 GitHub 获取源码时，先执行 npm ci 和 npm run build。解压整个目录后执行：
 
 ```sh
@@ -66,7 +70,7 @@ npm run test:package
 
 本次交付以当前 V1.1 展会源码为准，包含挥手切换素材、同一实时会话内换装，以及云端失败后的本地取景与重试。详见 `技术交接说明.txt`；本次构建、测试和校验记录见 `docs/verification.json`。
 
-Ubuntu 可使用上述 Node 前台启动流程；Linux 的 systemd 开机自启、进程守护、防闲置睡眠与 Avahi 域名广播需由技术补充，本次未进行 Ubuntu 实机验收。挥手识别在浏览器本地 Worker 中复用当前摄像头，不上传识别帧；模型与 WASM 随源码提供。现场摄像头、光线和距离仍需实机联调。
+当前 Ubuntu 工作站已配置 systemd 登录自启、进程守护、防闲置睡眠与 Avahi 域名广播，并验证后台、API 与 HTTPS 服务响应；使用顶部的 Ubuntu 启动入口。挥手识别在浏览器本地 Worker 中复用当前摄像头，不上传识别帧；模型与 WASM 随源码提供。现场摄像头、光线和距离仍需实机联调。
 
 本次验证结果见 `docs/verification-20261013.json`。验证使用模拟供应商，XMAX 调用为 0；此前交付的生产依赖安装验收保留在 `docs/verification.json`。
 

@@ -103,8 +103,11 @@ async function serve() {
     awake.once('exit', (code, signal) => { if (!closing) stop(new Error(`防睡眠进程已退出 (${code ?? signal})。`)); });
   }
   function broadcast() {
-    if (process.platform !== 'darwin' || closing || registration || !ips.length || Date.now() < retryAt) return;
-    const current = spawn('/usr/bin/dns-sd', ['-P', 'Miror', '_http._tcp', 'local', String(HTTP_PORT), HOSTNAME, ips[0]], { stdio: 'inherit' });
+    if (!['darwin', 'linux'].includes(process.platform) || closing || registration || !ips.length || Date.now() < retryAt) return;
+    const command = process.platform === 'linux'
+      ? ['/usr/bin/avahi-publish-address', ['--no-reverse', '--no-fail', HOSTNAME, ips[0]]]
+      : ['/usr/bin/dns-sd', ['-P', 'Miror', '_http._tcp', 'local', String(HTTP_PORT), HOSTNAME, ips[0]]];
+    const current = spawn(command[0], command[1], { stdio: 'inherit' });
     registration = current;
     const startedAt = Date.now();
     function retry() {

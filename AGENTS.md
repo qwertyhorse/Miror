@@ -1,5 +1,9 @@
 # 项目协作约定
 
+## 当前 Ubuntu 工作站（2026-10-15 更新）
+
+用户指定当前电脑的固定后台入口为 `http://xuxin.local:10101/`，本机预览链接优先使用此地址。摄像头入口为 `https://xuxin.local:10202/`。运行源码为当前仓库，由用户级 `miror-preview.service` 托管；环境配置 `MIROR_LAN_HOSTNAME=xuxin.local`、`MIROR_EXHIBITION_PORT=10101`。Linux 通过 Avahi 自动广播域名并跟随本机 IP 变化。下文 `xuminghong.local` 约定属于原 Mac 部署；不要将本机域名改回原 Mac 的地址。
+
 ## 界面表达
 
 用户明确要求：说明文字能不加就不加。优先通过布局、命名、图标、状态和交互让界面本身清楚易懂；界面难以理解时先改设计，不用额外说明补救。必要的错误反馈和操作确认保持简洁。

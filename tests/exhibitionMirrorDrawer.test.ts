@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ExhibitionState } from '../shared/exhibition';
 import { Kiosk, MirrorPreview } from '../src/exhibition/ExhibitionApp';
+import { MirrorMaterialDrawer } from '../src/exhibition/MirrorMaterialDrawer';
 import { exhibitionLooks } from '../src/exhibition/catalog';
 import { createReactHost, flushReact } from './support/reactHost';
 
@@ -195,5 +196,68 @@ describe('minimal mirror material drawer', () => {
       expect(html).toContain('openbuy-ai-logo-rgb.png');
       expect(html).not.toContain('AI驱动'); expect(html).not.toContain('请工作人员'); expect(html).not.toContain('ex-outfit-carousel');
     }
+  });
+});
+
+describe('material drawer visibility control', () => {
+  async function drawerFixture(open?: boolean) {
+    host = await createReactHost();
+    const props: ComponentProps<typeof MirrorMaterialDrawer> = {
+      looks: exhibitionLooks, selectedId: 'commute', disabled: false, passive: false, title: '选择服装',
+      open, onOpenChange: vi.fn(), onSelect: vi.fn(async () => true), onBusyChange: vi.fn(),
+    };
+    const render = () => host!.render(createElement(MirrorMaterialDrawer, props));
+    const toggle = () => host!.find(node => node.getReactProps().className === 'ex-mirror-drawer-toggle')!;
+    const drawer = () => host!.find(node => String(node.getReactProps().className).split(' ').includes('ex-mirror-drawer'))!;
+    const panel = () => host!.find(node => node.getReactProps().className === 'ex-mirror-drawer-panel');
+    await render();
+    const focus = vi.fn();
+    Object.defineProperty(toggle(), 'focus', { value: focus, configurable: true });
+    const clickToggle = () => act(async () => toggle().getReactProps().onClick());
+    const escape = async () => {
+      const preventDefault = vi.fn();
+      await act(async () => drawer().getReactProps().onKeyDown({ key: 'Escape', preventDefault }));
+      return preventDefault;
+    };
+    return { props, render, toggle, panel, focus, clickToggle, escape };
+  }
+
+  it('requests controlled changes and waits for the parent before changing visibility', async () => {
+    const f = await drawerFixture(false);
+    expect(f.panel()).toBeUndefined();
+    await f.clickToggle();
+    expect(f.props.onOpenChange).toHaveBeenLastCalledWith(true);
+    expect(f.toggle().getReactProps()['aria-expanded']).toBe(false);
+    expect(f.panel()).toBeUndefined();
+
+    f.props.open = true; await f.render();
+    expect(f.toggle().getReactProps()['aria-expanded']).toBe(true);
+    expect(f.panel()).toBeDefined();
+    await f.clickToggle();
+    expect(f.props.onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(f.panel()).toBeDefined();
+
+    const prevented = await f.escape();
+    expect(prevented).toHaveBeenCalledOnce();
+    expect(f.props.onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(f.focus).toHaveBeenCalledOnce();
+    expect(f.panel()).toBeDefined();
+    f.props.open = false; await f.render();
+    expect(f.panel()).toBeUndefined();
+    expect(f.props.onSelect).not.toHaveBeenCalled();
+  });
+
+  it('retains internal visibility and Escape focus when no controlled open value is supplied', async () => {
+    const f = await drawerFixture();
+    f.props.onOpenChange = undefined; await f.render();
+    await f.clickToggle();
+    expect(f.toggle().getReactProps()['aria-expanded']).toBe(true);
+    expect(f.panel()).toBeDefined();
+    const prevented = await f.escape();
+    expect(prevented).toHaveBeenCalledOnce();
+    expect(f.focus).toHaveBeenCalledOnce();
+    expect(f.toggle().getReactProps()['aria-expanded']).toBe(false);
+    expect(f.panel()).toBeUndefined();
+    expect(f.props.onSelect).not.toHaveBeenCalled();
   });
 });

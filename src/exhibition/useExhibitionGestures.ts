@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { resolveExhibitionGestureSettings, type ExhibitionGestureSettings } from '../../shared/exhibitionGestures';
 import {
   ExhibitionGestureDetector,
@@ -77,6 +77,7 @@ function liveVideoTracks(stream: MediaStream | null): MediaStreamTrack[] {
 export function useExhibitionGestures({
   stream,
   enabled,
+  blocked = false,
   mode = 'wave',
   mirrored = true,
   onGesture,
@@ -86,6 +87,8 @@ export function useExhibitionGestures({
 }: {
   stream: MediaStream | null;
   enabled: boolean;
+  /** Keep capture and release tracking alive without accepting new actions. */
+  blocked?: boolean;
   mode?: ExhibitionGestureMode;
   mirrored?: boolean;
   onGesture: (gesture: ExhibitionGesture, metadata?: ExhibitionGestureMetadata) => void;
@@ -100,6 +103,7 @@ export function useExhibitionGestures({
   const settings = useRef({ mode, mirrored });
   const detector = useRef<ExhibitionGestureDetector | ExhibitionRaiseGestureDetector | ExhibitionMirrorGestureDetector | null>(null);
   const resetSequence = useRef(0);
+  const blocking = useRef(blocked);
   // A worker can restart after tuning without rearming the same visible palm.
   const combinedDetector = useRef<{ stream: MediaStream; motion: ExhibitionMirrorGestureDetector } | null>(null);
   const resolved = resolveExhibitionGestureSettings(recognitionSettings);
@@ -115,7 +119,17 @@ export function useExhibitionGestures({
   diagnosticsEnabled.current = diagnostics;
   settings.current = { mode, mirrored };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    blocking.current = blocked;
+    // Invalidate frames sampled on the other side of the busy boundary without
+    // discarding ownership or a release already observed during the operation.
+    resetSequence.current += 1;
+    if (detector.current instanceof ExhibitionMirrorGestureDetector) detector.current.setBlocked(blocked);
+    else detector.current?.reset();
+    setState(previous => ({ ...previous, lastGesture: null, palmHoldMs: 0, armed: blocked ? false : previous.armed }));
+  }, [blocked]);
+
+  useLayoutEffect(() => {
     resetSequence.current += 1;
     if (detector.current instanceof ExhibitionMirrorGestureDetector) detector.current.reset(true);
     else detector.current?.reset();
@@ -150,6 +164,7 @@ export function useExhibitionGestures({
     const combinedMotion = combinedMode ? combinedDetector.current!.motion : null;
     // Pending evidence belongs to the old worker; retain only its consumed latch.
     combinedMotion?.reset(true);
+    combinedMotion?.setBlocked(blocking.current);
     const raiseMotion = combinedMotion ?? (poseMode ? new ExhibitionRaiseGestureDetector() : null);
     const handMotion = poseMode ? null : new ExhibitionGestureDetector();
     const motion = (raiseMotion ?? handMotion)!;
@@ -208,7 +223,7 @@ export function useExhibitionGestures({
       if (captureStatus !== nextCapture && nextCapture !== 'active') resetMotion();
       const nextHandRaised = nextCapture === 'active' && nextHand && motion.handRaised;
       const nextOperator = nextCapture === 'active' && raiseMotion ? raiseMotion.operatorStatus : 'searching';
-      const nextArmed = nextCapture === 'active' && !!raiseMotion?.armed;
+      const nextArmed = !blocking.current && nextCapture === 'active' && !!raiseMotion?.armed;
       const nextNeedsRelease = !!combinedMotion?.needsRelease;
       const nextSource = nextCapture !== 'active' ? 'none' : combinedMotion?.controlSource ?? (nextOperator === 'locked' ? 'body' : 'none');
       const nextAmbiguity = nextCapture !== 'active' ? null : combinedMotion?.ambiguityReason ?? (nextOperator === 'ambiguous' ? 'people' : null);
@@ -387,13 +402,20 @@ export function useExhibitionGestures({
         const hands = (result.hands ?? []).map(hand => ({ ...hand, landmarks: hand.landmarks.map(point => ({
           ...point, x: settings.current.mirrored ? 1 - point.x : point.x,
         })) }));
-        const gesture = combinedMotion ? combinedMotion.update(poses, hands, result.timestamp, canvas.width / canvas.height)
+        combinedMotion?.setBlocked(blocking.current);
+        if (blocking.current && !combinedMotion) motion.reset();
+        const gesture = blocking.current && !combinedMotion ? null
+          : combinedMotion ? combinedMotion.update(poses, hands, result.timestamp, canvas.width / canvas.height)
           : raiseMotion instanceof ExhibitionRaiseGestureDetector ? raiseMotion.update(poses, result.timestamp, canvas.width / canvas.height)
           : handMotion!.update(hand, result.timestamp, settings.current.mode);
         const detected = raiseMotion ? raiseMotion.handDetected : !!hand;
         if (detected) lastHandAt = Date.now();
         report('active', detected);
-        if (!gesture || (combinedMode && !recognition.current.gestures.includes(gesture as 'open_palm' | 'wave'))) return;
+        // The event and its validity belong to this inference result. React's
+        // rendered diagnostic snapshot may still describe the preceding frame.
+        if (!gesture || !ready || blocking.current || captureStatus !== 'active'
+          || (raiseMotion && raiseMotion.operatorStatus !== 'locked')
+          || (combinedMode && !recognition.current.gestures.includes(gesture as 'open_palm' | 'wave'))) return;
         setState(previous => ({ ...previous, status: 'ready', error: '', lastGesture: gesture }));
         if (diagnosticsEnabled.current) {
           const raiseStartedAt = gesture === 'raise_hand' ? raiseMotion?.lastRaiseStartedAt : null;

@@ -12,7 +12,8 @@ vi.mock('../src/exhibition/useExhibitionGestures', () => ({ useExhibitionGesture
 }) }));
 vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: () => null }));
 vi.mock('../src/exhibition/MoXDragSurface', () => ({ MoXDragSurface: () => null }));
-vi.mock('../src/exhibition/MirrorMaterialDrawer', () => ({ MirrorMaterialDrawer: () => null }));
+vi.mock('../src/exhibition/MirrorMaterialDrawer', () => ({ MirrorMaterialDrawer: ({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) =>
+  createElement('button', { 'data-presenter-drawer': true, 'aria-expanded': open, onClick: () => onOpenChange(!open) }) }));
 
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => {
@@ -52,7 +53,7 @@ async function fixture(stateOverrides: Partial<ExhibitionState> = {}, overrides:
   });
   const send = vi.fn(async (_command: ExhibitionCommand) => true);
   const live = { cameraStream: null, outputStream: null, status: 'preview', opening: false, error: '',
-    deviceId: 'presenter-screen', secure: true, mirrored: true } as unknown as ExhibitionLiveController;
+    deviceId: 'presenter-screen', secure: true, mirrored: true, startCamera: vi.fn(async () => true), stopGeneration: vi.fn(async () => true) } as unknown as ExhibitionLiveController;
   const props: ComponentProps<typeof Kiosk> = { state: snapshot(stateOverrides), send, live, ...overrides };
   const render = () => host!.render(createElement(Kiosk, props));
   const update = async (changes: Partial<ExhibitionState>) => { props.state = { ...props.state, ...changes }; await render(); };
@@ -265,5 +266,115 @@ describe('presenter request and acknowledgement boundaries', () => {
     await tap('PageUp');
     expect(f.send).toHaveBeenCalledTimes(3);
     expect(f.send).toHaveBeenLastCalledWith({ action: 'select', lookId: 'city' });
+  });
+});
+
+// Synthetic learned bindings: no physical device mapping is assumed by Kiosk.
+const actionKeys = { experience: { code: 'KeyQ' }, menu: { code: 'KeyW' } };
+const drawer = () => host!.find(node => node.getReactProps()['data-presenter-drawer'])?.getReactProps();
+
+describe('configured presenter experience and menu controls', () => {
+  it('starts on release through the existing camera and begin path', async () => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys });
+    await key('keydown', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled(); expect(f.live.startCamera).not.toHaveBeenCalled();
+    await key('keyup', 'KeyQ');
+    expect(f.live.startCamera).toHaveBeenCalledTimes(1);
+    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'begin' });
+    expect(drawer()['aria-expanded']).toBe(false);
+  });
+
+  it('honors a configured minimum hold and suppresses repeated starts', async () => {
+    const f = await fixture({}, { presenterActionKeys: { ...actionKeys, experience: { code: 'KeyQ', minHoldMs: 800 } } });
+    let now = 0; vi.spyOn(performance, 'now').mockImplementation(() => now);
+    await tap('KeyQ'); expect(f.send).not.toHaveBeenCalled();
+    await key('keydown', 'KeyQ'); now = 900;
+    await key('keydown', 'KeyQ', { repeat: true }); await key('keydown', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled();
+    await key('keyup', 'KeyQ'); await key('keyup', 'KeyQ');
+    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'begin' });
+  });
+
+  it('stops through both existing stop paths while selection is busy', async () => {
+    const stopExperience = vi.fn(async () => true);
+    const f = await fixture({ phase: 'showcase' }, { presenterActionKeys: actionKeys, stopExperience,
+      disabled: true, commandPending: true, selectionPending: true });
+    await key('keydown', 'KeyQ');
+    // A material update within this experience must not consume a stop intent.
+    await f.update({ phase: 'generating', selectedLookId: 'city', generationNumber: 2, revision: 2 });
+    await key('keyup', 'KeyQ');
+    expect(stopExperience).toHaveBeenCalledTimes(1); expect(f.live.stopGeneration).toHaveBeenCalledTimes(1);
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('toggles the controlled drawer and retains the mode-change reset', async () => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys });
+    expect(drawer()['aria-expanded']).toBe(false);
+    await tap('KeyW'); expect(drawer()['aria-expanded']).toBe(true);
+    await act(async () => { drawer().onClick(); }); expect(drawer()['aria-expanded']).toBe(false);
+    f.props.disabled = true; await f.render();
+    await tap('KeyW'); expect(drawer()['aria-expanded']).toBe(true);
+    await f.update({ experienceMode: 'charx', looks: f.props.state.looks.map(look => ({ ...look, mode: 'charx' })) });
+    expect(drawer()['aria-expanded']).toBe(false); expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it.each([{ canControl: false }, { passive: true }, { presentation: 'remote' as const }, { send: undefined }])('disables both new actions without terminal control: %j', async overrides => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys, ...overrides });
+    await tap('KeyQ'); await tap('KeyW');
+    expect(f.send).not.toHaveBeenCalled(); expect(f.live.startCamera).not.toHaveBeenCalled();
+    expect(drawer()['aria-expanded']).toBe(false);
+  });
+
+  it('does not convert a held start into stopping an experience started elsewhere', async () => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys });
+    await key('keydown', 'KeyQ');
+    await f.update({ phase: 'generating', sessionNumber: 2, generationNumber: 2 });
+    await key('keyup', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled(); expect(f.live.stopGeneration).not.toHaveBeenCalled();
+  });
+
+  it('does not convert a held stop into a new start after the experience ends', async () => {
+    const f = await fixture({ phase: 'showcase' }, { presenterActionKeys: actionKeys });
+    await key('keydown', 'KeyQ'); await f.update({ phase: 'select' }); await key('keyup', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled(); expect(f.live.startCamera).not.toHaveBeenCalled();
+  });
+
+  it('does not stop a replacement experience when the key was held across sessions', async () => {
+    const f = await fixture({ phase: 'showcase' }, { presenterActionKeys: actionKeys });
+    await key('keydown', 'KeyQ'); await f.update({ sessionNumber: 2, generationNumber: 2 }); await key('keyup', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled(); expect(f.live.stopGeneration).not.toHaveBeenCalled();
+  });
+
+  it('requires a fresh press after permission is revoked and restored', async () => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys });
+    await key('keydown', 'KeyQ'); f.props.canControl = false; await f.render();
+    f.props.canControl = true; await f.render(); await key('keyup', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled();
+    await tap('KeyQ'); expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'begin' });
+  });
+
+  it.each([{ selectedLookId: 'city' }, { generationNumber: 2 }, { providerMode: 'demo' as const }])('cancels a held start after a material or provider change: %j', async change => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys });
+    await key('keydown', 'KeyQ'); await f.update(change); await key('keyup', 'KeyQ');
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('can cancel a pending camera start without restarting when the camera resolves', async () => {
+    const stopExperience = vi.fn(async () => true);
+    const f = await fixture({}, { presenterActionKeys: actionKeys, stopExperience });
+    const camera = deferred<boolean>(); vi.mocked(f.live.startCamera).mockReturnValueOnce(camera.promise);
+    await tap('KeyQ'); expect(f.live.startCamera).toHaveBeenCalledTimes(1); expect(f.send).not.toHaveBeenCalled();
+    await tap('KeyQ'); expect(stopExperience).toHaveBeenCalledTimes(1);
+    expect(f.live.stopGeneration).toHaveBeenCalledTimes(1);
+    await act(async () => { camera.resolve(true); }); await flushReact();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('rechecks control permission after waiting for camera access', async () => {
+    const f = await fixture({}, { presenterActionKeys: actionKeys });
+    const camera = deferred<boolean>(); vi.mocked(f.live.startCamera).mockReturnValueOnce(camera.promise);
+    await tap('KeyQ'); f.props.canControl = false; await f.render();
+    await act(async () => { camera.resolve(true); }); await flushReact();
+    expect(f.send).not.toHaveBeenCalled();
   });
 });

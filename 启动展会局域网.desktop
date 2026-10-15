@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=启动展会局域网
+Comment=启动展会后台并打开局域网地址
+Exec=/usr/bin/bash "/home/a/文档/ChatGPT/展会/启动局域网预览.sh"
+Path=/home/a/文档/ChatGPT/展会
+Icon=network-workgroup
+Terminal=true
+Categories=Development;
+StartupNotify=false

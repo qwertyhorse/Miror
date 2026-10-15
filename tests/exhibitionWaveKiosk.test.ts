@@ -73,7 +73,7 @@ describe('a revealed palm or wave advances material without beginning an experie
   it('disables all recognition when staff clears the selected gestures', async () => {
     const settings = snapshot().settings;
     settings.gestureRecognition = { ...resolveExhibitionGestureSettings(), gestures: [] };
-    const f = await fixture({ settings });
+    const f = await fixture({ phase: 'showcase', settings });
     expect(capture.options!.enabled).toBe(false);
     await f.palm(); await act(async () => capture.options!.onGesture('wave')); await flushReact();
     expect(f.send).not.toHaveBeenCalled();
@@ -118,23 +118,25 @@ describe('a revealed palm or wave advances material without beginning an experie
     expect(f.send).toHaveBeenLastCalledWith({ action: 'select', lookId: 'evening' });
   });
 
-  it('resets motion across processing, recovery and stop boundaries', async () => {
+  it('blocks motion during processing and resets ownership across stop boundaries', async () => {
     const f = await fixture({ phase: 'showcase' });
     const initialKey = capture.options!.resetKey;
     await f.palm(); await f.update({ selectedLookId: 'city', phase: 'generating', generationNumber: 2 });
-    expect(capture.options!.resetKey).not.toBe(initialKey);
+    expect(capture.options!.blocked).toBe(true);
+    expect(capture.options!.resetKey).toBe(initialKey);
     const processingKey = capture.options!.resetKey;
     await f.update({ phase: 'showcase' });
-    expect(capture.options!.resetKey).not.toBe(processingKey);
+    expect(capture.options!.blocked).toBe(false);
+    expect(capture.options!.resetKey).toBe(processingKey);
     const restoredKey = capture.options!.resetKey;
-    await act(async () => host!.find(node => node.nodeName === 'button' && node.textContent === '停止生成')!.getReactProps().onClick());
+    await act(async () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '停止生成')!.getReactProps().onClick());
     expect(capture.options!.resetKey).not.toBe(restoredKey);
     const afterStop = capture.options!.resetKey;
     await f.update({ phase: 'idle' });
     expect(capture.options!.resetKey).not.toBe(afterStop);
   });
 
-  it.each(['disabled', 'carousel', 'command', 'generation', 'preparing'] as const)('resets incomplete raises on both edges of %s blocking', async blocking => {
+  it.each(['disabled', 'carousel', 'command', 'generation', 'preparing'] as const)('passes both edges of %s blocking without restarting recognition', async blocking => {
     const props: Partial<ComponentProps<typeof Kiosk>> = {};
     const f = await fixture({ phase: 'showcase' }, props);
     const initialKey = capture.options!.resetKey;
@@ -145,12 +147,14 @@ describe('a revealed palm or wave advances material without beginning an experie
     else f.live.status = 'preparing';
     await f.render();
     const blockedKey = capture.options!.resetKey;
-    expect(blockedKey).not.toBe(initialKey);
+    expect(capture.options!.blocked).toBe(true);
+    expect(blockedKey).toBe(initialKey);
     await f.palm(); expect(f.send).not.toHaveBeenCalled();
     props.disabled = false; props.commandPending = false; f.live.status = 'running';
     if (blocking === 'carousel') await act(async () => materialDrawer.onBusyChange!(false));
     await f.update({ phase: 'showcase' });
-    expect(capture.options!.resetKey).not.toBe(blockedKey);
+    expect(capture.options!.blocked).toBe(false);
+    expect(capture.options!.resetKey).toBe(blockedKey);
     expect(f.send).not.toHaveBeenCalled();
   });
 
@@ -176,13 +180,12 @@ describe('a revealed palm or wave advances material without beginning an experie
 
   it('distinguishes a ready model from a locked operator and a stalled camera', async () => {
     capture.operatorStatus = 'searching';
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
     expect(control().textContent).toBe('请露出手掌');
     expect(control().getReactProps()['data-operator']).toBe('searching');
     expect(control().getReactProps()['data-detection']).toBe('waiting');
     capture.handDetected = true; await f.render();
-    await f.palm(); expect(f.send).not.toHaveBeenCalled();
     expect(control().textContent).toBe('请露出手掌');
     capture.operatorStatus = 'locked'; await f.render();
     expect(control().textContent).toBe('挥手或展掌换装');
@@ -192,7 +195,6 @@ describe('a revealed palm or wave advances material without beginning an experie
     capture.captureStatus = 'stalled'; await f.render();
     expect(control().textContent).toBe('取景未更新');
     expect(control().getReactProps()['data-detection']).toBe('waiting');
-    await f.palm(); expect(f.send).not.toHaveBeenCalled();
     capture.captureStatus = 'active';
     await f.update({ phase: 'paused' });
     expect(control().textContent).toBe('手势已暂停');
@@ -201,7 +203,7 @@ describe('a revealed palm or wave advances material without beginning an experie
   });
 
   it('shows release after a consumed gesture without treating readiness as another action', async () => {
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     vi.useFakeTimers();
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
     expect(control().getReactProps()['data-hand-raised']).toBe(false);
@@ -212,10 +214,10 @@ describe('a revealed palm or wave advances material without beginning an experie
     expect(control().getReactProps()['data-armed']).toBe(false);
     expect(f.send).not.toHaveBeenCalled();
     await f.palm();
-    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'select', lookId: 'city' });
-    expect(control().textContent).toBe('已选中');
-    await f.update({ selectedLookId: 'city', phase: 'select' });
-    expect(control().textContent).toBe('已选中');
+    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'switch', lookId: 'city' });
+    expect(control().textContent).toBe('换装已提交');
+    await f.update({ selectedLookId: 'city', generationNumber: 2 });
+    expect(control().textContent).toBe('换装已提交');
     await act(async () => vi.advanceTimersByTime(1200));
     expect(control().textContent).toBe('请放下手');
     capture.handRaised = false; capture.armed = true; capture.needsRelease = false; await f.render();
@@ -224,7 +226,7 @@ describe('a revealed palm or wave advances material without beginning an experie
   });
 
   it('shows natural lowering and rearming even without an accepted command', async () => {
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     const label = () => host!.find(node => node.getReactProps().className === 'ex-mirror-gesture')!.textContent;
     capture.confirmationState = 'lowering'; capture.needsRelease = true; capture.armed = false;
     await f.render(); expect(label()).toBe('请放下手');
@@ -246,7 +248,7 @@ describe('a revealed palm or wave advances material without beginning an experie
   });
 
   it.each(['rejected', 'failed', 'ignored'] as const)('does not show success for %s gestures', async result => {
-    const f = await fixture(result === 'ignored' ? { enabledLookIds: ['commute'] } : {});
+    const f = await fixture({ phase: 'showcase', ...(result === 'ignored' ? { enabledLookIds: ['commute'] } : {}) });
     if (result === 'rejected') f.send.mockResolvedValueOnce(false);
     else if (result === 'failed') f.send.mockRejectedValueOnce(new Error('request failed'));
     await f.palm();
@@ -264,7 +266,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     else if (boundary === 'mirror') await f.update({ mirrorId: 'second-mirror' });
     else if (boundary === 'superseded') await f.update({ selectedLookId: 'evening', generationNumber: 3, revision: 3 });
     else if (boundary === 'disabled') { props.disabled = true; await f.render(); props.disabled = false; await f.render(); }
-    else await act(async () => host!.find(node => node.nodeName === 'button' && node.textContent === '停止生成')!.getReactProps().onClick());
+    else await act(async () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '停止生成')!.getReactProps().onClick());
     await act(async () => complete(true));
     const label = host!.find(node => node.getReactProps().className === 'ex-mirror-gesture')!.textContent;
     expect(label).not.toMatch(/已选中|已提交/);
@@ -272,7 +274,7 @@ describe('a revealed palm or wave advances material without beginning an experie
 
   it.each([false, true])('asks a locked operator to reveal their hands when neither is visible (armed %s)', async armed => {
     capture.handDetected = false; capture.armed = armed;
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
     expect(control().textContent).toBe('请露出手');
     capture.handDetected = true; capture.armed = false; await f.render();
@@ -282,32 +284,41 @@ describe('a revealed palm or wave advances material without beginning an experie
 
   it('accepts a hand-only control target and separately explains competing hands', async () => {
     capture.controlSource = 'hand';
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
     expect(control().getReactProps()['data-control-source']).toBe('hand');
     await f.palm(); expect(f.send).toHaveBeenCalledOnce();
-    await f.update({ selectedLookId: 'city', phase: 'select' });
+    await f.update({ selectedLookId: 'city', generationNumber: 2 });
     f.send.mockClear();
     capture.operatorStatus = 'ambiguous'; capture.ambiguityReason = 'hands';
     await f.render();
     expect(control().textContent).toBe('请只露一只手');
-    await f.palm(); expect(f.send).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
   });
 
-  it('rejects ambiguous operators without queuing a raise for later', async () => {
+  it('updates ambiguity feedback without queuing an action from a rendered status', async () => {
     capture.operatorStatus = 'ambiguous'; capture.handDetected = true;
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
     expect(control().textContent).toBe('请单人体验');
     expect(control().getReactProps()['data-operator']).toBe('ambiguous');
-    await f.palm(); expect(f.send).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
     capture.operatorStatus = 'locked'; await f.render();
     expect(f.send).not.toHaveBeenCalled();
     await f.palm(); expect(f.send).toHaveBeenCalledOnce();
   });
 
+  it.each(['searching', 'ambiguous', 'loading', 'waiting', 'stalled'] as const)('accepts a current-frame confirmation despite the prior rendered %s status', async previous => {
+    if (previous === 'searching' || previous === 'ambiguous') capture.operatorStatus = previous;
+    else if (previous === 'loading') capture.status = previous;
+    else capture.captureStatus = previous;
+    const f = await fixture({ phase: 'showcase' });
+    await f.palm();
+    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'switch', lookId: 'city' });
+  });
+
   it.each(['generating', 'preparing', 'connecting', 'opening'] as const)('discards raises during %s and requires a new raise after processing', async pending => {
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     f.live.outputStream = {} as MediaStream;
     if (pending === 'generating') await f.update({ phase: 'generating' });
     else if (pending === 'opening') f.live.opening = true;
@@ -366,7 +377,7 @@ describe('a revealed palm or wave advances material without beginning an experie
   });
 
   it('lets the local screen turn recognition off and retry a failed model load', async () => {
-    const f = await fixture();
+    const f = await fixture({ phase: 'showcase' });
     await act(async () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!.getReactProps().onClick());
     expect(capture.options?.enabled).toBe(false);
     await act(async () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '开启手势换装')!.getReactProps().onClick());
@@ -411,7 +422,7 @@ describe('optional mirror diagnostics integration', () => {
     let complete!: (accepted: boolean) => void;
     f.send.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
     await f.palm();
-    await act(async () => host!.find(node => node.nodeName === 'button' && node.textContent === '停止生成')!.getReactProps().onClick());
+    await act(async () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '停止生成')!.getReactProps().onClick());
     await act(async () => complete(true));
     expect(store.getSnapshot().events.filter(event => event.type === 'command_accepted')).toHaveLength(0);
     expect(store.getSnapshot().canMarkVisible).toBe(false);

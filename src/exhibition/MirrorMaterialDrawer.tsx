@@ -3,12 +3,17 @@ import { Check, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ExhibitionLook } from '../../shared/exhibition';
 import { appUrl } from '../versionScope';
 
-export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, title, columns = 2, onSelect, onBusyChange }: {
+export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, title, columns = 2, open: controlledOpen, onOpenChange, onSelect, onBusyChange }: {
   looks: ExhibitionLook[]; selectedId: string | null; disabled: boolean; passive: boolean; title: string;
-  columns?: 1 | 2;
+  columns?: 1 | 2; open?: boolean; onOpenChange?: (open: boolean) => void;
   onSelect: (id: string) => Promise<boolean>; onBusyChange: (busy: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = (value: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(value);
+    onOpenChange?.(value);
+  };
   const [busy, setBusy] = useState(false);
   const [optimisticId, setOptimisticId] = useState<string | null>(null);
   const intent = useRef<string | null>(null);
@@ -77,6 +82,6 @@ export function MirrorMaterialDrawer({ looks, selectedId, disabled, passive, tit
     </div>}
     <button ref={toggle} type="button" className="ex-mirror-drawer-toggle" disabled={passive}
       aria-label={open ? '收起素材选择' : title} aria-expanded={open} aria-controls={panelId}
-      onClick={() => setOpen(value => !value)}>{open ? <ChevronLeft /> : <ChevronRight />}</button>
+      onClick={() => setOpen(!open)}>{open ? <ChevronLeft /> : <ChevronRight />}</button>
   </div>;
 }

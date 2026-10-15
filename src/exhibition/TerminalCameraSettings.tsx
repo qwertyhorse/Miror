@@ -120,7 +120,8 @@ export function useTerminalCameraRequest(terminal: TerminalBinding | undefined, 
 export function TerminalCameraEntry({ settings, busy, connected }: {
   settings: ReturnType<typeof useTerminalCameraRequest>; busy: boolean; connected: boolean;
 }) {
-  const reason = !connected ? '镜端连接中断' : busy ? '结束体验后可切换' : '';
+  if (busy) return null;
+  const reason = !connected ? '镜端连接中断' : '';
   return <div className="ex-terminal-camera-entry" title={reason || '摄像头设置'}><button type="button" disabled={!settings.canOpen || !connected} onClick={() => void settings.open()}
     aria-label="摄像头" aria-busy={settings.opening} aria-describedby={reason ? 'terminal-camera-reason' : undefined}><Camera size={18} aria-hidden="true" /><span className="ex-sr-only">{settings.opening ? '正在打开…' : '摄像头'}</span></button>
     {reason && <span className="ex-sr-only" id="terminal-camera-reason">{reason}</span>}

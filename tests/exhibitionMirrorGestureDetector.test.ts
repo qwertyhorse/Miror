@@ -78,6 +78,140 @@ function presentPalm(detector: ExhibitionMirrorGestureDetector, fps = 10, hidden
     .map(event => event.gesture)).toEqual(['open_palm']);
 }
 
+describe('observing gestures while an outfit operation is busy', () => {
+  it('discards even a brief busy palm and requires release after processing ends', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    detector.setBlocked(true);
+    expect(run(detector, 0, 100, () => ({ poses: [], hands: [hand(0.30)] }))).toEqual([]);
+    expect(detector.palmHoldMs).toBe(0);
+    expect(detector.armed).toBe(false);
+    detector.setBlocked(false);
+    expect(run(detector, 200, 1_200, () => ({ poses: [], hands: [hand(0.30)] }))).toEqual([]);
+    expect(detector.confirmationState).toBe('already_triggered');
+    run(detector, 1_300, 1_900, () => ({ poses: [], hands: [] }));
+    expect(run(detector, 2_000, 2_700, () => ({ poses: [], hands: [hand(0.30)] })))
+      .toEqual([{ gesture: 'open_palm', time: 2_300 }]);
+  });
+
+  it('discards a pending palm when blocking begins even if there is no intervening camera frame', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    run(detector, 0, 200, () => ({ poses: [], hands: [hand(0.30)] }));
+    detector.setBlocked(true);
+    detector.setBlocked(false);
+    expect(run(detector, 300, 1_400, () => ({ poses: [], hands: [hand(0.30)] }))).toEqual([]);
+  });
+
+  it.each(['close', 'withdraw', 'lower'] as const)('retains a confirmed %s during busy time for a fresh post-busy presentation', release => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    detector.setBlocked(true);
+    const released = () => release === 'withdraw' ? { poses: [pose()], hands: [] }
+      : scene(release === 'close' ? hand(0.30, 0.42, 0, 'fist') : hand(0.30, 0.80));
+    expect(run(detector, 1_700, 2_500, released)).toEqual([]);
+    detector.setBlocked(false);
+    expect(run(detector, 2_600, 3_400, () => scene(hand(0.30))))
+      .toEqual([{ gesture: 'open_palm', time: 2_900 }]);
+  });
+
+  it('consumes a busy re-raise after a valid release, including when its confirmation would finish after resume', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    presentPalm(detector);
+    detector.setBlocked(true);
+    run(detector, 1_700, 2_500, () => scene(hand(0.30, 0.80)));
+    expect(run(detector, 2_600, 2_700, () => scene(hand(0.30)))).toEqual([]);
+    detector.setBlocked(false);
+    expect(run(detector, 2_800, 4_000, () => scene(hand(0.30)))).toEqual([]);
+    run(detector, 4_100, 4_900, () => scene(hand(0.30, 0.80)));
+    expect(run(detector, 5_000, 5_700, () => scene(hand(0.30))))
+      .toEqual([{ gesture: 'open_palm', time: 5_300 }]);
+  });
+
+  it('finishes a busy lowering only after the trusted wrist returns from a brief tracking loss', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'], palmReleaseMs: 1_000 });
+    presentPalm(detector);
+    detector.setBlocked(true);
+    run(detector, 1_700, 1_800, () => scene(hand(0.30, 0.73)));
+    run(detector, 1_900, 2_200, () => ({ poses: [pose({ left: { x: 0.30, y: 0.83 }, hidden: [15] })], hands: [] }));
+    expect(detector.confirmationState).not.toBe('raise_required');
+    run(detector, 2_300, 2_400, () => ({ poses: [pose({ left: { x: 0.30, y: 0.83 } })], hands: [] }));
+    expect(detector.confirmationState).toBe('no_hand');
+    detector.setBlocked(false);
+    expect(run(detector, 2_500, 3_200, () => scene(hand(0.30))))
+      .toEqual([{ gesture: 'open_palm', time: 2_800 }]);
+  });
+
+  it.each([5, 10, 15])('does not resume a wave that started during busy time at %i FPS', fps => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['wave'] });
+    detector.setBlocked(true);
+    expect(run(detector, 0, 1_000, time => scene(wave(time)), fps)).toEqual([]);
+    detector.setBlocked(false);
+    expect(run(detector, 1_200, 3_000, time => scene(wave(time)), fps)).toEqual([]);
+    expect(detector.needsRelease).toBe(true);
+    run(detector, 3_200, 4_200, () => scene(hand(0.30)), fps);
+    expect(detector.needsRelease).toBe(false);
+    expect(run(detector, 4_400, 6_000, time => scene(wave(time)), fps).map(event => event.gesture)).toEqual(['wave']);
+  });
+
+  it('retains a wave rest completed while busy but fences renewed movement before resume', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['wave'] });
+    detector.setBlocked(true);
+    run(detector, 0, 900, time => scene(wave(time)));
+    run(detector, 1_000, 2_000, () => scene(hand(0.30)));
+    expect(detector.needsRelease).toBe(false);
+    run(detector, 2_100, 2_200, time => scene(wave(time)));
+    detector.setBlocked(false);
+    expect(run(detector, 2_300, 4_000, time => scene(wave(time)))).toEqual([]);
+    expect(detector.needsRelease).toBe(true);
+  });
+
+  it('accepts a new wave after a rest that finished during busy time', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['wave'] });
+    detector.setBlocked(true);
+    run(detector, 0, 900, time => scene(wave(time)));
+    run(detector, 1_000, 2_000, () => scene(hand(0.30)));
+    detector.setBlocked(false);
+    expect(run(detector, 2_100, 3_500, time => scene(wave(time))).map(event => event.gesture)).toEqual(['wave']);
+  });
+
+  it.each(['reset', 'ambiguous', 'cropped'] as const)('does not treat %s as release of a busy presentation', interruption => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm', 'wave'] });
+    detector.setBlocked(true);
+    run(detector, 0, 800, time => scene(wave(time)));
+    if (interruption === 'reset') detector.reset(true);
+    if (interruption === 'ambiguous') run(detector, 900, 1_600, time => ({ poses: [], hands: [wave(time), hand(0.70)] }));
+    else run(detector, 900, 1_600, time => {
+      const sample = wave(time);
+      if (interruption === 'cropped') sample.landmarks[12].y = -0.1;
+      return scene(sample);
+    });
+    detector.setBlocked(false);
+    expect(run(detector, 1_700, 3_500, time => scene(wave(time)))).toEqual([]);
+  });
+
+  it('consumes both busy palms and only rearms the hand that visibly releases', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    const right = hand(0.70, 0.42, 0, 'open', 'Right');
+    detector.setBlocked(true);
+    run(detector, 0, 1_000, () => scene(hand(0.30), right));
+    detector.setBlocked(false);
+    expect(run(detector, 1_100, 1_800, () => scene(hand(0.30), right))).toEqual([]);
+    run(detector, 1_900, 2_700, () => scene(hand(0.30, 0.80), right));
+    expect(run(detector, 2_800, 3_600, () => scene(hand(0.30), right)))
+      .toEqual([{ gesture: 'open_palm', time: 3_100 }]);
+  });
+
+  it('does not convert a busy ambiguous hand into a new palm when ownership resolves after resume', () => {
+    const detector = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });
+    detector.setBlocked(true);
+    run(detector, 0, 200, () => ({ poses: [], hands: [hand(0.30), hand(0.70)] }));
+    detector.setBlocked(false);
+    expect(run(detector, 300, 1_200, () => ({ poses: [], hands: [hand(0.30)] }))).toEqual([]);
+    run(detector, 1_300, 1_900, () => ({ poses: [], hands: [] }));
+    expect(run(detector, 2_000, 2_700, () => ({ poses: [], hands: [hand(0.30)] })))
+      .toEqual([{ gesture: 'open_palm', time: 2_300 }]);
+  });
+});
+
 describe('configurable mirror gesture selection and timing', () => {
   it('enables only the selected entry point, including a fully disabled selection', () => {
     const palmOnly = new ExhibitionMirrorGestureDetector({ gestures: ['open_palm'] });

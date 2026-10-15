@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Hand, Link2, Maximize2, Monitor, Play, RotateCcw, Sparkles, Square, WifiOff, X } from 'lucide-react';
 import { EXHIBITION_MODE_LABELS, exhibitionReferenceImage, isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionMirrorSummary } from '../../shared/exhibition';
 import { resolveExhibitionGestureSettings, type ExhibitionGestureKind } from '../../shared/exhibitionGestures';
@@ -15,7 +15,7 @@ import { useExhibitionLive, type ExhibitionLiveController } from './useExhibitio
 import { StreamVideo } from './LiveCameraPanel';
 import { TerminalCameraEntry, TerminalCameraSettings, terminalCameraAvailable, useTerminalCameraRequest, useTerminalCameraReport } from './TerminalCameraSettings';
 import { useExhibitionGestures } from './useExhibitionGestures';
-import { usePresenterKeys } from './usePresenterKeys';
+import { usePresenterKeys, type PresenterAction, type PresenterActionKey } from './usePresenterKeys';
 import { useExhibition, type ExhibitionController } from './useExhibition';
 import { MirrorMaterialDrawer } from './MirrorMaterialDrawer';
 import { MoXDragSurface } from './MoXDragSurface';
@@ -66,10 +66,11 @@ function matchesGestureTarget(ack: GestureAcknowledgement, state: ExhibitionStat
     && (state.selectedLookId === ack.lookId || (state.selectedLookId === ack.previousLookId && state.revision === ack.revision));
 }
 
-export function Kiosk({ state, send, disabled = false, passive = false, live, stopExperience, stopPending = false, commandPending = false, selectionPending = false, canControl = true, presentation = 'terminal', diagnostics = null, sendDiagnosed, cameraControl }: {
+export function Kiosk({ state, send, disabled = false, passive = false, live, stopExperience, stopPending = false, commandPending = false, selectionPending = false, canControl = true, presentation = 'terminal', diagnostics = null, sendDiagnosed, cameraControl, presenterActionKeys }: {
   state: ExhibitionState; send?: ExhibitionController['send']; disabled?: boolean; passive?: boolean; live?: ExhibitionLiveController;
   stopExperience?: ExhibitionController['stopExperience']; stopPending?: boolean; commandPending?: boolean; selectionPending?: boolean; canControl?: boolean;
   presentation?: 'terminal' | 'remote'; diagnostics?: ExhibitionDiagnostics | null; sendDiagnosed?: ExhibitionController['sendDiagnosed']; cameraControl?: ReactNode;
+  presenterActionKeys?: Partial<Record<PresenterAction, PresenterActionKey>>;
 }) {
   const remote = presentation === 'remote';
   const kioskLabel = passive ? '镜端状态预览' : remote ? '镜端远程控制' : 'AI 试衣镜';
@@ -81,6 +82,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const loading = state.phase === 'generating' || state.phase === 'positioning';
   const paused = state.phase === 'paused';
   const [carouselBusy, setCarouselBusy] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [beginPending, setBeginPending] = useState(false);
   const [beginError, setBeginError] = useState('');
   const [localStopPending, setLocalStopPending] = useState(false);
@@ -89,16 +91,22 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const [gestureSelection, setGestureSelection] = useState<{ lookId: string; revision: number } | null>(null);
   const [gestureAcknowledgement, setGestureAcknowledgement] = useState<GestureAcknowledgement | null>(null);
   const gestureFeedbackEpoch = useRef(0);
-  const gesturePending = useRef(false);
+  const gesturePending = useRef<object | null>(null);
   const presenterTarget = useRef<PresenterSelection | null>(null);
   const [presenterSelection, setPresenterSelection] = useState<PresenterSelection | null>(null);
   const starting = useRef(false);
   const beginIntent = useRef(0);
   const stopping = useRef(false);
-  const currentRound = useRef({ state, disabled, passive, canChoose: false });
-  currentRound.current = { state, disabled, passive, canChoose: false };
+  const currentRound = useRef({ state, disabled, passive, canControl, remote, canChoose: false });
+  currentRound.current = { state, disabled, passive, canControl, remote, canChoose: false };
   const visualLook = loading || paused ? look : shown;
   const mode = state.experienceMode ?? 'clothx';
+  useLayoutEffect(() => {
+    gesturePending.current = null;
+    setGestureSelection(null);
+    return () => { gesturePending.current = null; };
+  }, [state.mirrorId, state.sessionNumber, mode]);
+  useEffect(() => { setDrawerOpen(false); }, [mode]);
   const mox = mode === 'mox';
   const realtime = state.providerMode === 'xmax';
   useEffect(() => { setBeginError(''); }, [state.phase, state.providerMode, state.experienceMode, state.selectedLookId, state.sessionNumber, state.generationNumber]);
@@ -161,6 +169,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
     if (input.action === 'end' || input.action === 'idle') {
       if (stopping.current || stopPending) return false;
       stopping.current = true; ++beginIntent.current; starting.current = false;
+      gesturePending.current = null;
       diagnosticEpoch.current++;
       gestureFeedbackEpoch.current++;
       setGestureAcknowledgement(null);
@@ -193,7 +202,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       try {
         if (!mox && !live.cameraStream && !(await live.startCamera())) return false;
         const latest = currentRound.current;
-        if (intent !== beginIntent.current || latest.disabled || latest.passive || !['idle', 'select'].includes(latest.state.phase) || latest.state.live
+        if (intent !== beginIntent.current || latest.disabled || latest.passive || !latest.canControl || latest.remote !== remote
+          || latest.state.mirrorId !== state.mirrorId || !['idle', 'select'].includes(latest.state.phase) || latest.state.live
           || latest.state.providerMode !== state.providerMode || latest.state.experienceMode !== state.experienceMode
           || latest.state.sessionNumber !== state.sessionNumber || latest.state.generationNumber !== state.generationNumber
           || latest.state.selectedLookId !== state.selectedLookId) return false;
@@ -211,12 +221,19 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       && latest.state.selectedLookId === state.selectedLookId) void command({ action: 'resume' });
   };
   const hasStop = !welcome || (!!state.live && !locallyEnded) || beginPending || commandPending || stopPending || localStopPending;
-  const stopButton = hasStop ? <button type="button" className="ex-kiosk-primary ex-kiosk-stop" disabled={passive || !canControl || !send || stopPending || localStopPending} onClick={() => void command({ action: 'end' })}><Square fill="currentColor" />{stopPending || localStopPending ? '正在停止…' : '停止生成'}</button> : null;
+  const stopLabel = stopPending || localStopPending ? '正在停止…' : '停止生成';
+  const stopButton = hasStop && !locallyEnded ? <button type="button" className="ex-mirror-stop" aria-label={stopLabel} title={stopLabel} aria-busy={stopPending || localStopPending} disabled={passive || !canControl || !send || stopPending || localStopPending} onClick={() => void command({ action: 'end' })}><Square fill="currentColor" aria-hidden="true" /></button> : null;
   const recoveryButton = locallyEnded ? <button type="button" className="ex-kiosk-primary" disabled={disabled || passive || !canControl || !send || commandPending || stopPending || localStopPending} onClick={() => void command({ action: 'recover' })}><RotateCcw />{commandPending ? '恢复中…' : '恢复操作'}</button> : null;
   const canChoose = !disabled && !passive && canControl && !!send && !localStopPending && !stopPending && !beginPending
     && (!commandPending || selectionPending) && !needsRetry && !serverError && !live?.opening && !state.live?.renewal
     && ((welcome && !state.live) || state.phase === 'generating' || state.phase === 'showcase');
   currentRound.current.canChoose = canChoose;
+  const presenterEnabled = !remote && !passive && !otherDevice && canControl && !!send;
+  const presenterCanStop = hasStop && !locallyEnded && !stopPending && !localStopPending;
+  const presenterCanStart = !hasStop && !locallyEnded && !disabled && !carouselBusy && !commandPending
+    && !live?.opening && welcome && !state.live && !!look;
+  const presenterActions = useRef({ state, enabled: presenterEnabled, canStart: presenterCanStart, canStop: presenterCanStop, command });
+  presenterActions.current = { state, enabled: presenterEnabled, canStart: presenterCanStart, canStop: presenterCanStop, command };
   const clearPresenterSelection = (target: PresenterSelection) => {
     if (presenterTarget.current !== target) return;
     presenterTarget.current = null;
@@ -229,8 +246,33 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       || (!target.pending && (state.selectedLookId === target.lookId || state.revision > target.revision)))) clearPresenterSelection(target);
   }, [state.mirrorId, state.sessionNumber, mode, state.selectedLookId, state.revision, paused, locallyEnded, stopPending, localStopPending, enabled]);
   usePresenterKeys({
-    enabled: !remote && !passive && !otherDevice && canControl && !!send,
+    enabled: presenterEnabled,
     scope: presenterScope(state),
+    actionKeys: presenterActionKeys,
+    onActionPress: action => {
+      const pressed = presenterActions.current;
+      if (!pressed.enabled) return null;
+      if (action === 'menu') return () => {
+        if (presenterActions.current.enabled) setDrawerOpen(open => !open);
+      };
+      const intent = pressed.canStop ? 'end' : pressed.canStart ? 'begin' : null;
+      if (!intent || stopping.current) return null;
+      const scope = presenterScope(pressed.state);
+      const provider = pressed.state.providerMode;
+      const generation = pressed.state.generationNumber;
+      const selected = pressed.state.selectedLookId;
+      const startEpoch = beginIntent.current;
+      return () => {
+        const latest = presenterActions.current;
+        if (!latest.enabled || presenterScope(latest.state) !== scope || latest.state.providerMode !== provider
+          || startEpoch !== beginIntent.current || stopping.current) return;
+        // A release never reverses an intent after a remote or local state change.
+        // Stops may cross material generations, but only within the same experience.
+        if (intent === 'end' ? !latest.canStop : !latest.canStart || starting.current
+          || latest.state.generationNumber !== generation || latest.state.selectedLookId !== selected) return;
+        void latest.command({ action: intent }).catch(() => setBeginError('体验操作未完成，请重试。'));
+      };
+    },
     onStep: direction => {
       const latest = currentRound.current;
       if (!latest.canChoose || carouselBusy || gesturePending.current || gestureSelection || presenterTarget.current
@@ -284,9 +326,10 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   }, [gestureSelection, state.selectedLookId, state.revision, state.looks, state.enabledLookIds, mode, paused, locallyEnded, gesturesOn]);
   const gestures = useExhibitionGestures({
     stream: live?.cameraStream ?? null, enabled: gesturesOn && gestureAvailable && configuredGestures.length > 0,
-    // Blocking boundaries discard old frames while retaining an already-consumed gesture.
+    blocked: gestureBlocked,
+    // Busy transitions preserve release tracking; round changes invalidate old frames.
     mode: 'palm_wave', mirrored: live?.mirrored ?? true, diagnostics: !!diagnostics, recognitionSettings,
-    resetKey: `${state.mirrorId ?? 'default'}:${mode}:${welcome}:${paused}:${stopPending || localStopPending}:${needsRetry || serverError}:${gestureBlocked}:${gestureReset}`,
+    resetKey: `${state.mirrorId ?? 'default'}:${state.sessionNumber}:${mode}:${welcome}:${paused}:${stopPending || localStopPending}:${needsRetry || serverError}:${gestureReset}`,
     onGesture: (gesture, metadata) => {
       const latest = currentRound.current;
       const ordered = enabledLooksForMode(latest.state);
@@ -302,12 +345,12 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
             ...(metadata.raiseStartedAt === undefined ? {} : { raiseLatencyMs: metadata.detectedAt - metadata.raiseStartedAt }) } });
       }
       if (!resolveExhibitionGestureSettings(latest.state.settings.gestureRecognition).gestures.includes(gesture as ExhibitionGestureKind) || !gesturesOn || !gestureAvailable || gestureBlocked
-        || gesturePending.current || presenterTarget.current || gestures.operatorStatus !== 'locked'
-        || gestures.status !== 'ready' || gestures.captureStatus !== 'active' || ordered.length < 2) {
+        || stopping.current || starting.current || gesturePending.current || presenterTarget.current || ordered.length < 2) {
         if (metadata) diagnostics?.record({ type: 'gesture_ignored', context, interactionId: metadata.eventId, actionId: `${metadata.eventId}-attempt-1`, reason: ordered.length < 2 ? 'insufficient_materials' : 'blocked' });
         return;
       }
-      gesturePending.current = true;
+      const request = {};
+      gesturePending.current = request;
       setGestureSelection({ lookId: next.id, revision: latest.state.revision });
       setGestureAcknowledgement(null);
       const acknowledgement: GestureAcknowledgement = {
@@ -319,13 +362,18 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       // Use the same selection path as the material drawer, including stop and lease guards.
       void command(input, metadata?.eventId)
         .then(accepted => {
+          if (gesturePending.current !== request) return;
           if (accepted === false) setGestureSelection(null);
           else if (accepted === true && acknowledgement.epoch === gestureFeedbackEpoch.current
             && matchesGestureTarget(acknowledgement, currentRound.current.state)) setGestureAcknowledgement(acknowledgement);
         })
-        .catch(() => { setBeginError('素材切换未完成，请重试。'); setGestureSelection(null); })
+        .catch(() => {
+          if (gesturePending.current !== request) return;
+          setBeginError('素材切换未完成，请重试。'); setGestureSelection(null);
+        })
         .finally(() => {
-          gesturePending.current = false;
+          if (gesturePending.current !== request) return;
+          gesturePending.current = null;
           setGestureSelection(target => target && (currentRound.current.state.selectedLookId === target.lookId
             || currentRound.current.state.revision > target.revision + 1) ? null : target);
         });
@@ -380,8 +428,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
                             : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
   if (!look || !visualLook || !enabled.length) return <section className={`ex-kiosk ex-mirror-minimal ex-empty-mode${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
-    <div className="ex-mirror-stage ex-mirror-empty"><Sparkles aria-hidden="true" /><span>暂无可用素材</span><div className="ex-mirror-stage-actions">{recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>}</div></div>
-    <footer className="ex-mirror-footer"><div className="ex-mirror-footer-tools">{cameraControl}</div></footer>
+    <div className="ex-mirror-stage ex-mirror-empty"><Sparkles aria-hidden="true" /><span>暂无可用素材</span><div className="ex-mirror-stage-actions">{recoveryButton ?? (!hasStop && <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>)}</div></div>
+    <footer className="ex-mirror-footer"><div className="ex-mirror-footer-tools">{stopButton}{cameraControl}</div></footer>
   </section>;
   const feedback = !locallyEnded && !passive && !otherDevice ? beginError || (realtime ? live?.error || live?.updateError || (serverError ? '换装连接状态未确认，请联系工作人员。' : '') : '') : '';
   return <section className={`ex-kiosk ex-mirror-minimal ex-phase-${state.phase}${welcome ? ' ex-welcome' : ''}${passive ? ' ex-passive' : ''}${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
@@ -398,6 +446,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       </div>}
       {!realtime && loading && <div className="ex-visual-status" role="status"><span>正在生成</span></div>}
       <MirrorMaterialDrawer key={mode} looks={enabled} selectedId={state.selectedLookId} disabled={!canChoose} passive={passive} columns={state.settings.materialDrawerColumns ?? 2}
+        open={drawerOpen} onOpenChange={setDrawerOpen}
         title={mode === 'clothx' ? '选择服装' : '选择素材'} onBusyChange={setCarouselBusy} onSelect={lookId => {
           const latest = currentRound.current;
           if (!latest.canChoose) return Promise.resolve(false);
@@ -410,14 +459,14 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
       {state.lifecycle?.connection === 'recovering' && !welcome && <div className="ex-mirror-feedback" role="status"><span>正在恢复连接</span></div>}
       {locallyEnded && !passive && <div className="ex-mirror-feedback" role="status"><span>本地体验已结束，云端凭证状态待确认。</span></div>}
       <div className="ex-mirror-stage-actions">
-        {recoveryButton ?? stopButton ?? <button className="ex-kiosk-primary" disabled={disabled || passive || carouselBusy || beginPending || live?.opening || !!state.live} onClick={() => void command({ action: 'begin' })}><Play fill="currentColor" />{beginPending || live?.opening ? '等待摄像头…' : '开始体验'}</button>}
+        {recoveryButton ?? (!hasStop && <button className="ex-kiosk-primary" disabled={disabled || passive || carouselBusy || beginPending || live?.opening || !!state.live} onClick={() => void command({ action: 'begin' })}><Play fill="currentColor" />{beginPending || live?.opening ? '等待摄像头…' : '开始体验'}</button>)}
         {paused && !state.live && !stopPending && !localStopPending && <button className="ex-kiosk-continue" disabled={disabled || passive || live?.opening} onClick={() => { if (realtime && !remote) void retryExperience(); else void command({ action: 'resume' }); }}><Play fill="currentColor" />继续体验</button>}
       </div>
     </div>
     <footer className="ex-mirror-footer">
       {!welcome && <button type="button" className="ex-mirror-home" aria-label="返回首页" disabled={passive || !canControl || stopPending || localStopPending} onClick={() => void command({ action: 'idle' })}><ArrowLeft /></button>}
       <div className="ex-mirror-footer-tools">
-      {realtime && !mox && !remote && !passive && !otherDevice && canControl && <button type="button" className="ex-mirror-gesture" data-status={gestures.status}
+      {!welcome && realtime && !mox && !remote && !passive && !otherDevice && canControl && <button type="button" className="ex-mirror-gesture" data-status={gestures.status}
         data-detection={gestureSeeingHand ? 'hand' : gestureBlocked ? 'paused' : 'waiting'} data-capture={gestures.captureStatus}
         data-hand-detected={!!gestures.handDetected} data-hand-raised={!!gestures.handRaised} data-inference-fps={gestures.fps}
         data-operator={gestures.operatorStatus} data-control-source={gestures.controlSource} data-armed={!!gestures.armed} data-processing={gestureProcessing}
@@ -428,6 +477,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
         title={gestures.error || gestureLabel} onClick={() => { if (!configuredGestures.length) return; if (gestures.status === 'error') gestures.retry(); else setGesturesOn(value => !value); }}>
         <Hand aria-hidden="true" /><span aria-live="polite">{gestureLabel}</span><i aria-hidden="true" />
       </button>}
+      {stopButton}
       {cameraControl}
       </div>
     </footer>

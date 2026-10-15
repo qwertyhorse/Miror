@@ -10,7 +10,7 @@ import { createReactHost, flushReact } from './support/reactHost';
 const motion = vi.hoisted(() => ({ update: vi.fn(), reset: vi.fn(), handRaised: false }));
 const poseMotion = vi.hoisted(() => ({ update: vi.fn(), reset: vi.fn(), handRaised: false, handDetected: false,
   operatorStatus: 'searching' as 'searching' | 'locked' | 'ambiguous', armed: false, lastRaiseStartedAt: null as number | null }));
-const mirrorMotion = vi.hoisted(() => ({ create: vi.fn(), configure: vi.fn(), update: vi.fn(), reset: vi.fn(), handRaised: false, handDetected: false,
+const mirrorMotion = vi.hoisted(() => ({ create: vi.fn(), configure: vi.fn(), setBlocked: vi.fn(), update: vi.fn(), reset: vi.fn(), handRaised: false, handDetected: false,
   operatorStatus: 'searching' as 'searching' | 'locked' | 'ambiguous', armed: false, needsRelease: false, controlSource: 'none' as 'none' | 'body' | 'hand', ambiguityReason: null as 'people' | 'hands' | null,
   lastRaiseStartedAt: null as number | null, confirmationState: 'no_hand' as ExhibitionGestureConfirmationState,
   palmHoldMs: 0, rawHandCount: 0, matchedHandCount: 0 }));
@@ -18,6 +18,7 @@ vi.mock('../src/exhibition/mirrorGestureDetector', () => ({
   ExhibitionMirrorGestureDetector: class {
     constructor(options: unknown) { mirrorMotion.create(options); }
     configure = mirrorMotion.configure;
+    setBlocked = mirrorMotion.setBlocked;
     update = mirrorMotion.update;
     reset = mirrorMotion.reset;
     get handRaised() { return mirrorMotion.handRaised; }
@@ -96,7 +97,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function fixture(initial: { enabled?: boolean; stream?: MediaStream; mirrored?: boolean; resetKey?: string; mode?: ExhibitionGestureMode; diagnostics?: boolean; recognitionSettings?: ExhibitionGestureSettings } = {}) {
+async function fixture(initial: { enabled?: boolean; blocked?: boolean; stream?: MediaStream; mirrored?: boolean; resetKey?: string; mode?: ExhibitionGestureMode; diagnostics?: boolean; recognitionSettings?: ExhibitionGestureSettings } = {}) {
   host = await createReactHost();
   const track = Object.assign(new EventTarget(), { readyState: 'live', enabled: true, muted: false, stop: vi.fn() });
   const stream = initial.stream ?? { getVideoTracks: () => [track] } as unknown as MediaStream;
@@ -116,7 +117,7 @@ async function fixture(initial: { enabled?: boolean; stream?: MediaStream; mirro
   Object.assign(document, { hidden: false });
   const onGesture = vi.fn();
   let result!: ReturnType<typeof useExhibitionGestures>;
-  let props = { stream, enabled: initial.enabled ?? true, mode: initial.mode ?? 'wave' as ExhibitionGestureMode,
+  let props = { stream, enabled: initial.enabled ?? true, blocked: initial.blocked ?? false, mode: initial.mode ?? 'wave' as ExhibitionGestureMode,
     mirrored: initial.mirrored ?? true, resetKey: initial.resetKey, diagnostics: initial.diagnostics, recognitionSettings: initial.recognitionSettings, onGesture };
   function Harness() { result = useExhibitionGestures(props); return null; }
   async function render(update: Partial<typeof props> = {}) {
@@ -147,6 +148,60 @@ async function fixture(initial: { enabled?: boolean; stream?: MediaStream; mirro
   return { get result() { return result; }, track, stream, video, canvas, bitmap, createBitmap, getUserMedia,
     onGesture, render, ready, frame, reply, replyPose, replyCombined };
 }
+
+describe('current-frame action validity and busy boundaries', () => {
+  it('uses the current operator result when confirmation and ownership change together', async () => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    expect(f.result.operatorStatus).toBe('searching');
+    mirrorMotion.update.mockImplementation(() => {
+      mirrorMotion.operatorStatus = 'locked'; mirrorMotion.handDetected = true;
+      return 'open_palm';
+    });
+    await f.replyCombined(await f.frame());
+    expect(f.onGesture).toHaveBeenCalledExactlyOnceWith('open_palm');
+    mirrorMotion.update.mockImplementation(() => {
+      mirrorMotion.operatorStatus = 'ambiguous';
+      return 'open_palm';
+    });
+    await f.replyCombined(await f.frame());
+    expect(f.onGesture).toHaveBeenCalledTimes(1);
+    expect(f.result.operatorStatus).toBe('ambiguous');
+  });
+
+  it('keeps capture alive but rejects both old frames and callbacks while blocked', async () => {
+    const f = await fixture({ mode: 'palm_wave' });
+    await f.ready();
+    mirrorMotion.update.mockImplementation(() => {
+      mirrorMotion.operatorStatus = 'locked'; mirrorMotion.handDetected = true; mirrorMotion.armed = true;
+      return 'open_palm';
+    });
+    const beforeBusy = await f.frame();
+    const resets = mirrorMotion.reset.mock.calls.length;
+    await f.render({ blocked: true });
+    await f.replyCombined(beforeBusy);
+    expect(mirrorMotion.update).not.toHaveBeenCalled();
+    await f.replyCombined(await f.frame());
+    expect(mirrorMotion.setBlocked).toHaveBeenLastCalledWith(true);
+    expect(mirrorMotion.update).toHaveBeenCalledOnce();
+    expect(f.result).toMatchObject({ captureStatus: 'active', armed: false, lastGesture: null });
+    expect(f.onGesture).not.toHaveBeenCalled();
+
+    const duringBusy = await f.frame();
+    await f.render({ blocked: false });
+    await f.replyCombined(duringBusy);
+    expect(mirrorMotion.update).toHaveBeenCalledOnce();
+    expect(f.onGesture).not.toHaveBeenCalled();
+    await f.replyCombined(await f.frame());
+    expect(f.onGesture).toHaveBeenCalledExactlyOnceWith('open_palm');
+    expect(mirrorMotion.setBlocked).toHaveBeenLastCalledWith(false);
+    expect(mirrorMotion.reset).toHaveBeenCalledTimes(resets);
+    expect(TestWorker.instances).toHaveLength(1);
+    expect(f.video.pause).not.toHaveBeenCalled();
+    expect(f.track.stop).not.toHaveBeenCalled();
+    expect(f.getUserMedia).not.toHaveBeenCalled();
+  });
+});
 
 describe('exhibition gesture stream ownership and lifecycle', () => {
   it('leaves disabled or placeholder streams alone without loading a model', async () => {
@@ -822,10 +877,12 @@ describe('live mirror recognition configuration', () => {
     const f = await fixture({ mode: 'palm_wave' });
     expect(mirrorMotion.create).toHaveBeenCalledExactlyOnceWith(config());
     await f.ready();
+    mirrorMotion.operatorStatus = 'locked';
     mirrorMotion.update.mockReturnValue('wave');
     await f.replyCombined(await f.frame());
     expect(f.onGesture).not.toHaveBeenCalled();
     mirrorMotion.update.mockReturnValue('open_palm');
+    mirrorMotion.operatorStatus = 'locked';
     await f.replyCombined(await f.frame());
     expect(f.onGesture).toHaveBeenCalledExactlyOnceWith('open_palm');
   });
@@ -877,6 +934,7 @@ describe('live mirror recognition configuration', () => {
     await f.replyCombined(await f.frame());
     expect(f.onGesture).not.toHaveBeenCalled();
     mirrorMotion.update.mockReturnValue('wave');
+    mirrorMotion.operatorStatus = 'locked';
     await f.replyCombined(await f.frame());
     expect(f.onGesture).toHaveBeenCalledExactlyOnceWith('wave');
     expect(f.getUserMedia).not.toHaveBeenCalled();

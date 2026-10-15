@@ -1,12 +1,15 @@
 import http from 'node:http';
 
 export const HOP_HEADERS = new Set(['connection', 'proxy-connection', 'keep-alive', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto']);
-export const HOSTNAME = 'xuminghong.local';
+export const HOSTNAME = process.env.MIROR_LAN_HOSTNAME ?? 'xuminghong.local';
 export const WEB_PORT = 5173;
 export const HTTP_PORT = 10200;
 export const HTTP_COMPAT_PORT = 10201;
-export const EXHIBITION_PORT = 10601;
+export const EXHIBITION_PORT = Number(process.env.MIROR_EXHIBITION_PORT ?? 10601);
 export const CAMERA_PORT = 10202;
+
+if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(HOSTNAME)) throw new Error('MIROR_LAN_HOSTNAME 必须是有效的 .local 主机名。');
+if (![10601, 10101].includes(EXHIBITION_PORT)) throw new Error('MIROR_EXHIBITION_PORT 支持 10601 或 10101。');
 
 export function isPrivateAddress(address = '') {
   const ip = address.toLowerCase().replace(/^::ffff:/, '');

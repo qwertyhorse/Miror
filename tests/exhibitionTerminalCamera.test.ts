@@ -109,13 +109,16 @@ describe('bound browser terminal camera diagnostics', () => {
     expect(mocks.api.mock.calls.every(([url]) => String(url).endsWith('/live/status'))).toBe(true);
   });
 
-  it('keeps the entry visible but disabled during an experience and on a foreign mirror preview', async () => {
+  it('hides the entry during an experience, restores it when idle, and disables it on a foreign mirror preview', async () => {
     const f = await fixture(null);
+    expect(f.button('摄像头')?.getReactProps().disabled).toBe(false);
     await act(async () => f.update({ state: { ...state(), phase: 'generating' } })); await flushReact();
-    expect(f.button('摄像头')).toBeDefined(); expect(f.button('摄像头')?.getReactProps().disabled).toBe(true);
-    expect(host!.find(node => node.textContent === '结束体验后可切换')).toBeDefined();
-    await f.click('摄像头'); expect(f.openCamera).not.toHaveBeenCalled();
+    expect(f.button('摄像头')).toBeUndefined();
+    expect(f.openCamera).not.toHaveBeenCalled();
+    await act(async () => f.update({ state: state() })); await flushReact();
+    expect(f.button('摄像头')?.getReactProps().disabled).toBe(false);
     await act(async () => f.update({ state: state(), boundMirrorId: 'mirror-other' })); await flushReact();
+    expect(f.button('摄像头')?.getReactProps().disabled).toBe(true);
     await f.click('摄像头'); expect(f.openCamera).not.toHaveBeenCalled(); expect(f.gate.request).toBeNull();
   });
 

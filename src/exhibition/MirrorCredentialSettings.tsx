@@ -12,7 +12,7 @@ import './mirror-credential-settings.css';
 interface Props { controller: ExhibitionController; live: ExhibitionLiveController; embedded?: boolean; }
 
 const FRAME_MESSAGE = 'openbuy:mirror-credential';
-const HTTP_PARENT_PORTS = new Set(['10200', '10201', '10601']);
+const HTTP_PARENT_PORTS = new Set(['10200', '10201', '10601', '10101']);
 const REGIONS: readonly { value: XmaxRegion; label: string }[] = [{ value: 'cn', label: '国内版' }, { value: 'global', label: '国际版' }];
 const frameHeight = (height: number) => Math.max(68, Math.min(800, Math.ceil(height)));
 const currentPageUrl = () => new URL(typeof window === 'undefined' ? 'http://xuminghong.local:10200/v1.1/exhibition/control' : window.location.href);

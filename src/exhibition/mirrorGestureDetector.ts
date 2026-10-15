@@ -53,6 +53,12 @@ interface Latch {
   stillSince: number | null;
   stillAnchor: PalmPosition | null;
 }
+interface BlockedWave {
+  stillAnchor: PalmPosition | null;
+  stillSince: number | null;
+  absentSince: number | null;
+  released: boolean;
+}
 
 function trusted(point: ExhibitionGesturePoseLandmark | undefined): point is ExhibitionGesturePoseLandmark {
   return !!point && Number.isFinite(point.x) && Number.isFinite(point.y)
@@ -210,16 +216,37 @@ export class ExhibitionMirrorGestureDetector {
   private rawCount = 0;
   private matchedCount = 0;
   private palmIssues: [ExhibitionGestureConfirmationState | null, ExhibitionGestureConfirmationState | null] = ['no_hand', 'no_hand'];
+  private blocked = false;
+  private blockedWaves: [BlockedWave | null, BlockedWave | null] = [null, null];
+  private blockedUnknownHand = false;
+  private blockedUnknownAbsentSince: number | null = null;
+
+  /** Busy periods still observe release, but never accumulate a future action. */
+  setBlocked(blocked: boolean): void {
+    if (this.blocked === blocked) return;
+    this.blocked = blocked;
+    this.clearWaves();
+    for (const display of this.palms) display.since = null;
+    if (blocked && this.body) {
+      for (const arm of [0, 1] as const) {
+        if (this.palmIssues[arm] === null) this.consumePalm(arm, null, this.body);
+        if (this.waveEnabled && this.palmIssues[arm] !== 'no_hand') this.guardBlockedWave(arm);
+      }
+    }
+    if (!blocked) for (const arm of [0, 1] as const) {
+      if (this.blockedWaves[arm]?.released) this.blockedWaves[arm] = null;
+    }
+  }
 
   get operatorStatus() { return this.status; }
   get controlSource() { return this.source; }
   get ambiguityReason() { return this.ambiguity; }
   get handDetected() { return this.detected; }
   get handRaised() { return this.raised; }
-  get armed() { return this.operatorStatus === 'locked' && !this.latch && ((this.palmEnabled || this.waveEnabled)
-    && this.palms.some((display, arm) => this.palmIssues[arm] !== 'no_hand' && (this.waveEnabled
-      || (!display.consumed && !display.lowering?.waitingForRaise))) || (!!this.options.allowRaise && this.raise.armed)); }
-  get needsRelease() { return this.latch !== null; }
+  get armed() { return !this.blocked && this.operatorStatus === 'locked' && !this.latch && ((this.palmEnabled || this.waveEnabled)
+    && this.palms.some((display, arm) => this.palmIssues[arm] !== 'no_hand' && ((this.waveEnabled && !this.blockedWaves[arm])
+      || (this.palmEnabled && !display.consumed && !display.lowering?.waitingForRaise))) || (!!this.options.allowRaise && this.raise.armed)); }
+  get needsRelease() { return this.latch !== null || this.blockedWaves.some(guard => guard !== null && !guard.released); }
   get lastRaiseStartedAt() { return this.raiseStartedAt; }
   get rawHandCount() { return this.rawCount; }
   get matchedHandCount() { return this.matchedCount; }
@@ -229,7 +256,7 @@ export class ExhibitionMirrorGestureDetector {
     if (!this.matchedCount) return 'unmatched_hand';
     if (this.status !== 'locked') return 'settling';
     if (this.palmEnabled && this.palms.some(display => display.lowering?.since != null)) return 'lowering';
-    if (this.latch) return 'release_required';
+    if (this.needsRelease) return 'release_required';
     if (this.palmIssues.some((issue, arm) => issue === null && !this.palms[arm].consumed && !this.palms[arm].lowering?.waitingForRaise)) return 'holding';
     if (this.palmEnabled && this.palms.some(display => display.lowering?.waitingForRaise)) return 'raise_required';
     if (this.palmIssues.some(issue => issue === null)) return 'already_triggered';
@@ -237,7 +264,7 @@ export class ExhibitionMirrorGestureDetector {
   }
   /** Current uninterrupted, unconsumed full-palm observation; no landmark data leaves the detector. */
   get palmHoldMs(): number {
-    if (!this.palmEnabled) return 0;
+    if (this.blocked || !this.palmEnabled) return 0;
     return Math.max(0, ...this.palms.map((display, arm) => this.palmIssues[arm] === null && !display.consumed && !display.lowering?.waitingForRaise
       && display.since !== null && this.previousTime !== null ? Math.min(this.palmConfirmMs, this.previousTime - display.since) : 0));
   }
@@ -259,6 +286,8 @@ export class ExhibitionMirrorGestureDetector {
     if (!preserveLatch) {
       this.latch = null; this.palms = [newDisplay(), newDisplay()];
       this.lastHands = [null, null]; this.pendingBodyHand = null;
+      this.blockedWaves = [null, null];
+      this.blockedUnknownHand = false; this.blockedUnknownAbsentSince = null;
     }
     this.clearDisplayProgress();
     this.clearReleaseProgress();
@@ -292,6 +321,7 @@ export class ExhibitionMirrorGestureDetector {
     this.matched = false;
     this.ambiguity = null;
     if (this.raise.operatorStatus === 'ambiguous' || (!pose && hands.length > 1)) {
+      if (this.blocked && hands.length) this.blockedUnknownHand = true;
       this.status = 'ambiguous';
       this.source = 'none';
       this.ambiguity = this.raise.operatorStatus === 'ambiguous' ? 'people' : 'hands';
@@ -327,6 +357,7 @@ export class ExhibitionMirrorGestureDetector {
           // Do not turn an ambiguous handover into an unconsumed second palm,
           // or let the stationary other hand release the shared action latch.
           this.status = 'ambiguous'; this.source = 'none'; this.ambiguity = 'hands';
+          if (this.blocked && hands.length) this.blockedUnknownHand = true;
           this.handSince = [null, null]; this.handLastAt = [null, null];
           this.clearWaves(); this.clearReleaseProgress(); this.clearDisplayProgress();
           return null;
@@ -393,12 +424,33 @@ export class ExhibitionMirrorGestureDetector {
     const unknownHand = hands.some(hand => !matches.includes(hand));
     this.observeLoweredPalms(pose, matches, unknownHand, body, timestampMs, frameAspectRatio);
     this.observeDisplays(matches, complete, unknownHand, body, timestampMs, frameAspectRatio);
+    if (this.blocked && unknownHand) this.blockedUnknownHand = true;
+    // An ambiguous busy observation cannot become a fresh presentation merely
+    // because ownership is resolved after the operation finishes.
+    if (this.blocked || this.blockedUnknownHand) {
+      for (const arm of [0, 1] as const) {
+        if (complete[arm]) this.consumePalm(arm, pose, body);
+        if (this.waveEnabled && matches[arm]) this.guardBlockedWave(arm);
+      }
+      if (!unknownHand && this.matchedCount) this.blockedUnknownHand = false;
+      if (!hands.length) {
+        this.blockedUnknownAbsentSince ??= timestampMs;
+        if (timestampMs - this.blockedUnknownAbsentSince >= this.palmReleaseMs) this.blockedUnknownHand = false;
+      } else this.blockedUnknownAbsentSince = null;
+    }
+    this.observeBlockedWaves(matches, unknownHand, body, timestampMs, frameAspectRatio);
+    if (this.blocked) {
+      this.clearWaves();
+      for (const display of this.palms) display.since = null;
+      if (this.latch && this.status === 'locked') this.observeRelease(pose, matches, body, timestampMs, frameAspectRatio);
+      return null;
+    }
     if (this.status !== 'locked') {
       // Track the start of a new hand's wave while ownership settles. The 200 ms
       // settling interval is shorter than wave's 300 ms minimum, so this cannot
       // confirm or consume an action before ownership is locked.
       if (this.waveEnabled && this.source === 'hand' && this.matchedCount === 1 && !this.latch) {
-        for (const arm of [0, 1] as const) this.observeWave(arm, matches[arm], body, timestampMs);
+        for (const arm of [0, 1] as const) if (!this.blockedWaves[arm]) this.observeWave(arm, matches[arm], body, timestampMs);
       }
       return null;
     }
@@ -425,12 +477,37 @@ export class ExhibitionMirrorGestureDetector {
       }
     }
     for (const arm of this.waveEnabled ? [0, 1] as const : []) {
-      if (this.observeWave(arm, matches[arm], body, timestampMs)) {
+      if (!this.blockedWaves[arm] && this.observeWave(arm, matches[arm], body, timestampMs)) {
         this.lock(arm, pose, body, complete);
         return 'wave';
       }
     }
     return null;
+  }
+
+  private guardBlockedWave(arm: Arm) {
+    this.blockedWaves[arm] ??= { stillAnchor: null, stillSince: null, absentSince: null, released: false };
+  }
+
+  /** Retain neutral observations, never the motion history of an ignored wave. */
+  private observeBlockedWaves(matches: readonly (ExhibitionGestureHand | null)[], unknownHand: boolean,
+    body: BodyAnchor, timestamp: number, aspect: number) {
+    for (const arm of [0, 1] as const) {
+      const guard = this.blockedWaves[arm];
+      if (!guard) continue;
+      const hand = matches[arm];
+      if (hand) {
+        const position = palmPosition(hand, body);
+        if (!guard.stillAnchor || palmMoved(position, guard.stillAnchor, aspect)) {
+          guard.stillAnchor = position; guard.stillSince = timestamp; guard.released = false;
+        } else if (guard.stillSince !== null && timestamp - guard.stillSince >= RELEASE_STILL_MS) guard.released = true;
+      } else { guard.stillAnchor = null; guard.stillSince = null; }
+      if (hand ? clearlyClosedPalm(hand, aspect) : !unknownHand) {
+        guard.absentSince ??= timestamp;
+        if (timestamp - guard.absentSince >= this.palmReleaseMs) guard.released = true;
+      } else guard.absentSince = null;
+      if (!this.blocked && guard.released) this.blockedWaves[arm] = null;
+    }
   }
 
   private observeWave(arm: Arm, hand: ExhibitionGestureHand | null, body: BodyAnchor, timestampMs: number): boolean {
@@ -542,6 +619,7 @@ export class ExhibitionMirrorGestureDetector {
       display.since = display.absentSince = null;
       lower.since = null; lower.waitingForRaise = true;
       if (this.latch?.arm === arm) this.latch = null;
+      this.blockedWaves[arm] = null;
       this.waves[arm].reset();
     }
   }
@@ -606,6 +684,10 @@ export class ExhibitionMirrorGestureDetector {
 
   private clearReleaseProgress(preserveBodyLowering = false) {
     if (this.latch) { this.latch.lowerSince = null; this.latch.stillSince = null; this.latch.stillAnchor = null; }
+    for (const guard of this.blockedWaves) if (guard) {
+      guard.stillSince = guard.absentSince = null; guard.stillAnchor = null;
+    }
+    this.blockedUnknownAbsentSince = null;
     if (!preserveBodyLowering) for (const display of this.palms) if (display.lowering) display.lowering.since = null;
   }
 
@@ -619,6 +701,7 @@ export class ExhibitionMirrorGestureDetector {
     [this.handSince[0], this.handSince[1]] = [this.handSince[1], this.handSince[0]];
     [this.handLastAt[0], this.handLastAt[1]] = [this.handLastAt[1], this.handLastAt[0]];
     [this.waves[0], this.waves[1]] = [this.waves[1], this.waves[0]];
+    [this.blockedWaves[0], this.blockedWaves[1]] = [this.blockedWaves[1], this.blockedWaves[0]];
     if (this.latch) this.latch.arm = (1 - this.latch.arm) as Arm;
   }
 

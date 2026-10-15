@@ -45,6 +45,7 @@ internal interface MediaControlling : InteractionControlling {
         position: CameraPosition,
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
+        cameraRotationDegrees: Int = 0,
     ): RealtimeMediaStream
 
     fun startMicrophoneCapture()

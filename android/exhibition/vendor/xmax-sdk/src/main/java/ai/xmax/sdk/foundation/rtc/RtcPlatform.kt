@@ -25,6 +25,8 @@ internal interface RtcPlatformEngine {
 
     fun stopAudioCapture(): Int
 
+    fun setVideoCaptureRotation(rotationDegrees: Int): Int
+
     fun startVideoCapture(width: Int, height: Int, frameRate: Int): Int
 
     fun stopVideoCapture(): Int

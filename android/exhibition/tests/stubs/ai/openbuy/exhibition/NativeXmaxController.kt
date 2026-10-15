@@ -12,16 +12,18 @@ class NativeXmaxController(private val events: MutableList<String>) {
     var connectedImage: ByteArray? = null
     var connectedPosition: CameraPosition? = null
     var connectedCameraDeviceId: String? = null
+    var connectedCameraRotationDegrees: Int? = null
     var generatedPrompt: String? = null
     var generatedReference: String? = null
     suspend fun connect(token: String, region: String, model: String,
                         position: CameraPosition = CameraPosition.BACK, image: ByteArray? = null,
-                        cameraDeviceId: String? = null): String {
+                        cameraDeviceId: String? = null, cameraRotationDegrees: Int = 0): String {
         check(token == "tk-fixture" && region == "cn" && model == "x2.0")
         events.add("connect")
         connectedImage = image
         connectedPosition = position
         connectedCameraDeviceId = cameraDeviceId
+        connectedCameraRotationDegrees = cameraRotationDegrees
         if (failConnect) throw IOException("连接失败 tk-fixture https://supplier-fixture.invalid/?secret=fixture")
         return "ums-fixture"
     }

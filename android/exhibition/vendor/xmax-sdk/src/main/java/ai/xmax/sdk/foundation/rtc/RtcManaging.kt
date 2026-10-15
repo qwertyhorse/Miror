@@ -43,6 +43,9 @@ internal interface RtcManaging {
     /** 停止 RTC 内部麦克风采集。 */
     fun stopAudioCapture()
 
+    /** 设置相机安装方向修正；必须在开始采集之前调用，不改变视图方向。 */
+    fun setVideoCaptureRotation(rotationDegrees: Int)
+
     /** 按指定格式启动 RTC 内部摄像头采集。 */
     fun startVideoCapture(
         width: Int,

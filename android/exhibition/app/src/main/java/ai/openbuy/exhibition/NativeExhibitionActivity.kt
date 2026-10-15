@@ -64,6 +64,7 @@ class NativeExhibitionActivity : Activity() {
     private var permissionAsked = false
     private var position = CameraPosition.BACK
     private var cameraDeviceId: String? = null
+    private var cameraRotationDegrees = 0
     private var activeCameraDeviceId: String? = null
     private var cameraSettingsOpen = false
     private var settingsDialog: Dialog? = null
@@ -126,6 +127,7 @@ class NativeExhibitionActivity : Activity() {
         check(migratedPreferences.putString("screen-url", screenUrl).commit())
         position = if (prefs.getString("native-camera", "back") == "front") CameraPosition.FRONT else CameraPosition.BACK
         cameraDeviceId = prefs.getString("native-camera-id", null)?.takeIf { it.isNotEmpty() }
+        cameraRotationDegrees = prefs.getInt("native-camera-rotation", 0).takeIf { it in listOf(0, 90, 180, 270) } ?: 0
         remoteCamera = NativeCameraRemote(prefs.getStringSet("native-camera-handled-requests", emptySet()).orEmpty())
         gestureMode = prefs.getString("native-gesture-mode", "linux").takeIf { it == "local" } ?: "linux"
         api = newApi()
@@ -316,6 +318,7 @@ class NativeExhibitionActivity : Activity() {
         var runningMirror: String? = null
         var currentPosition = position
         var currentDeviceId = cameraDeviceId
+        var currentRotationDegrees = cameraRotationDegrees
         try {
             while (isActive) {
                 if (attempted.size > 128) attempted.remove(attempted.first())
@@ -326,7 +329,7 @@ class NativeExhibitionActivity : Activity() {
                 val reusable = latest != null && currentSelection != null && round?.canReuse(latest, currentSelection) == true
                 val valid = latest?.string("providerMode") == "xmax" &&
                     latest.string("phase") in listOf("generating", "showcase") &&
-                    runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position && currentDeviceId == cameraDeviceId
+                    runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position && currentDeviceId == cameraDeviceId && currentRotationDegrees == cameraRotationDegrees
                 if (roundJob != null && (!valid || roundJob?.isCompleted == true)) {
                     roundJob?.cancelAndJoin()
                     if (round?.cleanupConfirmed == false) { previewFailed = true; error = "停止状态未确认，请重试停止。" }
@@ -391,12 +394,14 @@ class NativeExhibitionActivity : Activity() {
                     runningMirror = id
                     currentPosition = position
                     currentDeviceId = cameraDeviceId
+                    currentRotationDegrees = cameraRotationDegrees
                     val instance = NativeGenerationRound(owner, id, deviceId, JSONObject(current.toString()),
                         JSONObject(currentLook.toString()), controller,
                         onStatus = { text -> runOnUiThread { generationStatus = text; if (text == "实时生成") error = ""; render() } },
                         onError = { text -> runOnUiThread { error = text; render() } },
                         onFirstFrame = { runOnUiThread { generationStatus = "实时生成"; error = ""; render() } },
                         cameraPosition = position, cameraDeviceId = activeCameraDeviceId,
+                        cameraRotationDegrees = cameraRotationDegrees,
                         onBusyChanged = { render() })
                     round = instance
                     roundJob = launch {
@@ -406,8 +411,9 @@ class NativeExhibitionActivity : Activity() {
                     }
                     render()
                 } else if (!cameraSettingsOpen && !controller.hasReleaseFailure && roundJob == null && latest?.string("providerMode") == "xmax" && latest.string("experienceMode") != "mox" && hasCameraPermission() && !previewFailed &&
-                    (!cameraReady || currentPosition != position || currentDeviceId != cameraDeviceId)) {
+                    (!cameraReady || currentPosition != position || currentDeviceId != cameraDeviceId || currentRotationDegrees != cameraRotationDegrees)) {
                     currentPosition = position
+                    currentRotationDegrees = cameraRotationDegrees
                     controller.onFirstFrame = null
                     controller.onError = { runOnUiThread {
                         cameraReady = false; previewFailed = true; error = "摄像头已断开，点状态重试"
@@ -422,7 +428,7 @@ class NativeExhibitionActivity : Activity() {
                                 prefs.edit().putString("native-camera-id", migrated.storedValue).apply()
                             }
                             currentDeviceId = cameraDeviceId
-                            activeCameraDeviceId = controller.preview(position, cameraDeviceId)
+                            activeCameraDeviceId = controller.preview(position, cameraDeviceId, cameraRotationDegrees = cameraRotationDegrees)
                         }
                         cameraReady = true
                         reportCamera("ready")
@@ -876,6 +882,7 @@ class NativeExhibitionActivity : Activity() {
         val cameraPanel = if (!cameraLocked) NativeCameraSettingsPanel(
             this, controller, NativeCameraSelection(cameraDeviceId), prefs.getString("native-camera", null),
             migrateLegacy = !prefs.contains("native-camera-id"),
+            initialRotationDegrees = cameraRotationDegrees,
             awaitExclusive = { cameraReleased?.join() },
             requestPermission = {
                 if (hasCameraPermission()) true else {
@@ -892,7 +899,7 @@ class NativeExhibitionActivity : Activity() {
             },
         ).also { content.cameraContainer.addView(it, LinearLayout.LayoutParams(-1, -2)) } else null
         cameraSettingsPanel = cameraPanel
-        if (cameraLocked) content.cameraContainer.addView(label(if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "停止生成后可选择摄像头", 13, MUTED, false))
+        if (cameraLocked) content.cameraContainer.addView(label(if (controller.hasReleaseFailure) "摄像头释放失败，请重新打开应用" else "停止生成后可调整摄像头", 13, MUTED, false))
         content.meta.text = "原生版 ${BuildConfig.VERSION_NAME} · ${Build.MODEL}"
         val dialog = MirrorSettingsDialog(this, content)
         content.cancelButton.setOnClickListener { dialog.cancel() }
@@ -948,12 +955,16 @@ class NativeExhibitionActivity : Activity() {
                         .putString("native-gesture-mode", selectedGestureMode)
                     if (cameraPanel != null) {
                         preferences.putString("native-camera-id", cameraPanel.selection.storedValue)
+                        preferences.putInt("native-camera-rotation", cameraPanel.rotationDegrees)
                     }
                     check(preferences.commit()) { "无法保存摄像头设置" }
                     screenUrl = url
                     gestureMode = selectedGestureMode
                     initializeGestures()
-                    if (cameraPanel != null) cameraDeviceId = cameraPanel.selection.cameraId
+                    if (cameraPanel != null) {
+                        cameraDeviceId = cameraPanel.selection.cameraId
+                        cameraRotationDegrees = cameraPanel.rotationDegrees
+                    }
                     saved = true
                     if (remoteRequest == null) {
                         api = newApi()

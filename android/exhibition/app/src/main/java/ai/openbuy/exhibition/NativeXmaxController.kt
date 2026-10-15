@@ -46,6 +46,7 @@ class NativeXmaxController(
     private var previewPosition: CameraPosition? = null
     private var previewDeviceId: String? = null
     private var previewRequestedId: String? = null
+    private var previewRotationDegrees = 0
     private var activeView = view
     private var previewOnly = false
     private var firstFrameDelivered = false
@@ -63,12 +64,15 @@ class NativeXmaxController(
         position: CameraPosition = CameraPosition.BACK,
         cameraDeviceId: String? = null,
         target: XmaxRealtimeVideoView = view,
+        cameraRotationDegrees: Int = 0,
     ): String =
         withContext(Dispatchers.Main.immediate) {
             mutex.withLock {
+                require(cameraRotationDegrees in listOf(0, 90, 180, 270)) { "摄像头方向无效" }
                 check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
                 if (previewOnly && previewPosition == position && previewRequestedId == cameraDeviceId &&
-                    activeView === target && localStream != null) return@withLock checkNotNull(previewDeviceId)
+                    previewRotationDegrees == cameraRotationDegrees && activeView === target && localStream != null)
+                    return@withLock checkNotNull(previewDeviceId)
                 release()
                 activeView = target
                 val ownerEpoch = epoch.get()
@@ -79,9 +83,10 @@ class NativeXmaxController(
                 previewOnly = true
                 previewPosition = position
                 previewRequestedId = cameraDeviceId
+                previewRotationDegrees = cameraRotationDegrees
                 try {
                     val ready = observeErrors(next, ownerEpoch)
-                    localStream = camera(next, position, cameraDeviceId)
+                    localStream = camera(next, position, cameraDeviceId, cameraRotationDegrees)
                     activeView.videoContentMode = VideoContentMode.FILL
                     activeView.isInteractionEnabled = false
                     activeView.remoteTrack = null
@@ -103,8 +108,10 @@ class NativeXmaxController(
         position: CameraPosition = CameraPosition.BACK,
         image: ByteArray? = null,
         cameraDeviceId: String? = null,
+        cameraRotationDegrees: Int = 0,
     ): String = withContext(Dispatchers.Main.immediate) {
         require(model == "x2.0") { "当前仅支持 X2.0" }
+        require(cameraRotationDegrees in listOf(0, 90, 180, 270)) { "摄像头方向无效" }
         mutex.withLock {
             check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
             release()
@@ -118,7 +125,7 @@ class NativeXmaxController(
                     require(image.isNotEmpty() && image.size <= 64 * 1024 * 1024) { "输入图片不可用" }
                     next.createLocalImageStream(image)
                 } else {
-                    camera(next, position, cameraDeviceId)
+                    camera(next, position, cameraDeviceId, cameraRotationDegrees)
                 }
                 localStream = source
                 activeView.videoContentMode = VideoContentMode.FILL
@@ -197,6 +204,7 @@ class NativeXmaxController(
         owner: XmaxRealtimeManaging,
         position: CameraPosition,
         cameraDeviceId: String?,
+        cameraRotationDegrees: Int,
     ): RealtimeMediaStream {
         val detected = cameraSnapshot(owner)
         val selection = NativeCameraSelection(cameraDeviceId)
@@ -213,6 +221,7 @@ class NativeXmaxController(
             },
             useMicrophone = false,
             cameraDeviceId = selected.id,
+            cameraRotationDegrees = cameraRotationDegrees,
         )
     }
 
@@ -237,7 +246,8 @@ class NativeXmaxController(
                     try {
                         if (epoch.get() != ownerEpoch || onLocalFrame == null) return@launch
                         val pixels = NativeCameraPixels.convert(frame.width, frame.height, frame.rotationDegrees,
-                            frame.yData, frame.uData, frame.vData, frame.yStride, frame.uStride, frame.vStride, 640)
+                            frame.yData, frame.uData, frame.vData, frame.yStride, frame.uStride, frame.vStride, 640,
+                            unmirror = frame.isMirrored)
                         val bitmap = Bitmap.createBitmap(pixels.argb, pixels.width, pixels.height, Bitmap.Config.ARGB_8888)
                         val owned = NativeCameraFrame(bitmap, timestampMs, ownerEpoch, { epoch.get() == ownerEpoch }) { inFlight.set(false) }
                         sample = owned
@@ -288,6 +298,7 @@ class NativeXmaxController(
         previewPosition = null
         previewDeviceId = null
         previewRequestedId = null
+        previewRotationDegrees = 0
         previewOnly = false
         firstFrameDelivered = false
         activeView.isInteractionEnabled = false

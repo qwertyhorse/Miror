@@ -9,7 +9,7 @@ internal object NativeCameraPixels {
     data class Pixels(val width: Int, val height: Int, val argb: IntArray)
 
     fun convert(width: Int, height: Int, rotation: Int, y: ByteBuffer, u: ByteBuffer, v: ByteBuffer,
-        yStride: Int, uStride: Int, vStride: Int, longEdge: Int): Pixels {
+        yStride: Int, uStride: Int, vStride: Int, longEdge: Int, unmirror: Boolean = false): Pixels {
         require(width in 1..8192 && height in 1..8192 && rotation in listOf(0, 90, 180, 270))
         require(yStride >= width && uStride >= (width + 1) / 2 && vStride >= (width + 1) / 2)
         require(y.remaining().toLong() >= (height - 1L) * yStride + width)
@@ -27,7 +27,10 @@ internal object NativeCameraPixels {
         for (row in 0 until outHeight) {
             val ry = row * rotatedHeight / outHeight
             for (column in 0 until outWidth) {
-                val rx = column * rotatedWidth / outWidth
+                // Gesture models retain the unmirrored-camera contract even when RTC
+                // preprocessing mirrors the preview and encoder for a front camera.
+                val displayColumn = if (unmirror) outWidth - 1 - column else column
+                val rx = displayColumn * rotatedWidth / outWidth
                 val sx = when (rotation) { 90 -> ry; 180 -> width - 1 - rx; 270 -> width - 1 - ry; else -> rx }
                 val sy = when (rotation) { 90 -> height - 1 - rx; 180 -> height - 1 - ry; 270 -> rx; else -> ry }
                 val yy = max(0, (y.get(yOffset + sy * yStride + sx).toInt() and 255) - 16)

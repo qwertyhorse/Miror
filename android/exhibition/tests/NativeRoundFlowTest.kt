@@ -63,16 +63,47 @@ fun main() = runBlocking {
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
+        // The correction belongs to the camera source; a photo must retain its own orientation.
+        for (rotation in listOf(0, 90, 270)) for (mode in listOf("clothx", "free", "mox")) {
+            RoundFixture(mode, published = true, ready = true, noReference = mode == "free").use { fixture ->
+                val controller = NativeXmaxController(fixture.events)
+                val running = startRound(fixture, controller, cameraRotationDegrees = rotation)
+                try {
+                    withTimeout(5_000) { running.firstFrame.await(); while (running.round.isBusy) delay(5) }
+                    verify(controller.connectedCameraRotationDegrees == if (mode == "mox") 0 else rotation,
+                        "$mode input lost camera rotation $rotation or rotated a MoX photo")
+                    verify((controller.connectedImage != null) == (mode == "mox"),
+                        "Rotation selection changed the input source")
+                    verify(fixture.events.none { it == "upload" } && fixture.imagePaths.isEmpty() == (mode != "mox"),
+                        "Rotation bypassed binding-v1 or downloaded a camera reference")
+                    if (mode == "mox") {
+                        verify(controller.connectedImage!!.contentEquals(fixture.imageBytes),
+                            "Camera rotation modified the MoX input image")
+                    } else {
+                        val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
+                        running.round.update(next, fixture.look)
+                        withTimeout(5_000) { while (!fixture.events.contains("condition-applied") || running.round.isBusy) delay(5) }
+                        verify(controller.connectedCameraRotationDegrees == rotation
+                            && fixture.events.count { it == "connect" } == 1,
+                            "Outfit update reset camera correction or reconnected RTC")
+                    }
+                    fixture.checkHandler()
+                } finally { running.job.cancelAndJoin() }
+            }
+        }
+
         // Numeric offsets occur in real XMAX replies; exercise every metadata receipt.
         for (offset in listOf("+00:00", "+08:00", "-05:30")) {
             val expiry = Instant.now().plusSeconds(120).atOffset(ZoneOffset.of(offset))
                 .format(DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSxxx"))
             RoundFixture("clothx", expiry = expiry).use { fixture ->
-                val running = startRound(fixture, NativeXmaxController(fixture.events))
+                val controller = NativeXmaxController(fixture.events)
+                val running = startRound(fixture, controller)
                 try {
                     withTimeout(5_000) { running.firstFrame.await() }
                     ordered(fixture.events, "create", "bind", "connect", "link", "report-first", "ui-first")
                     verify(!running.failure.isCompleted && running.errors.isEmpty(), "Valid offset expiry failed")
+                    verify(controller.connectedCameraRotationDegrees == 0, "Default camera correction must remain zero")
                 } finally { running.job.cancelAndJoin() }
                 verify(fixture.allocations.get() == 1 && fixture.stoppedIds.toList() == listOf(RoundFixture.SESSION_ID),
                     "Offset expiry duplicated or leaked a reservation")
@@ -449,7 +480,7 @@ fun main() = runBlocking {
 
         RoundFixture("clothx").use { fixture ->
             val controller = NativeXmaxController(fixture.events).apply { failConnect = true }
-            val running = startRound(fixture, controller)
+            val running = startRound(fixture, controller, cameraRotationDegrees = 90)
             try {
                 withTimeout(5_000) { running.failure.await() }
                 running.job.join()
@@ -460,8 +491,22 @@ fun main() = runBlocking {
                 verify(fixture.errorReports.get() == 1 && running.errors.size == 1, "Connection failure was not reported once")
                 verify(running.errors.none { it.contains("tk-fixture") || it.contains("https://") }, "Error callback exposed fixture credentials")
                 verify(running.callbackThreads.all { it == "fixture-main" }, "Failure callback left Main")
+                verify(controller.connectedCameraRotationDegrees == 90, "Failed connection lost camera correction")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
+            // The activity retries with a new round after the failed connection has settled.
+            RoundFixture("clothx").use { retryFixture ->
+                controller.failConnect = false
+                val retry = startRound(retryFixture, controller, cameraRotationDegrees = 90)
+                try {
+                    withTimeout(5_000) { retry.firstFrame.await() }
+                    verify(controller.connectedCameraRotationDegrees == 90,
+                        "Retry connection did not preserve the selected camera correction")
+                    verify(fixture.events.count { it == "connect" } == 2,
+                        "Retry did not establish exactly one replacement connection")
+                    retryFixture.checkHandler()
+                } finally { retry.job.cancelAndJoin() }
+            }
         }
 
         RoundFixture("free", noReference = true, stopConfirmed = false).use { fixture ->
@@ -538,7 +583,7 @@ fun main() = runBlocking {
         }
         RoundFixture("clothx", continuous = true, separateReference = true).use { fixture ->
             val controller = NativeXmaxController(fixture.events)
-            val running = startRound(fixture, controller)
+            val running = startRound(fixture, controller, cameraRotationDegrees = 270)
             try {
                 withTimeout(5_000) { running.firstFrame.await() }
                 withTimeout(8_000) { while (!fixture.events.contains("renewal-commit")) delay(20) }
@@ -547,8 +592,21 @@ fun main() = runBlocking {
                 verify(fixture.errorReports.get() == 0, "Planned renewal was reported as a failure")
                 verify(controller.connectedCameraDeviceId == "usb-camera-fixture", "Renewal source lost exact camera identity")
                 verify(fixture.imagePaths.isEmpty(), "Renewal downloaded or uploaded an already prepared reference")
+                verify(controller.connectedCameraRotationDegrees == 270, "Renewal source lost camera correction")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
+            // Renewal hands control back to the activity, which supplies the saved camera settings again.
+            RoundFixture("clothx", separateReference = true).use { renewedFixture ->
+                val renewed = startRound(renewedFixture, controller, cameraRotationDegrees = 270)
+                try {
+                    withTimeout(5_000) { renewed.firstFrame.await() }
+                    verify(controller.connectedCameraRotationDegrees == 270,
+                        "Renewed connection did not preserve camera correction")
+                    verify(fixture.events.count { it == "connect" } == 2,
+                        "Renewal did not establish exactly one replacement connection")
+                    renewedFixture.checkHandler()
+                } finally { renewed.job.cancelAndJoin() }
+            }
         }
         RoundFixture("clothx", continuous = true, stopConfirmed = false).use { fixture ->
             val running = startRound(fixture, NativeXmaxController(fixture.events))
@@ -575,7 +633,11 @@ private data class RunningRound(
     val busyTransitions: MutableList<Boolean>,
 )
 
-private fun CoroutineScope.startRound(fixture: RoundFixture, controller: NativeXmaxController): RunningRound {
+private fun CoroutineScope.startRound(
+    fixture: RoundFixture,
+    controller: NativeXmaxController,
+    cameraRotationDegrees: Int = 0,
+): RunningRound {
     val firstFrame = CompletableDeferred<Unit>()
     val failure = CompletableDeferred<Throwable>()
     val errors = CopyOnWriteArrayList<String>()
@@ -589,6 +651,7 @@ private fun CoroutineScope.startRound(fixture: RoundFixture, controller: NativeX
         onFirstFrame = { threads.add(Thread.currentThread().name); fixture.events.add("ui-first"); firstFrame.complete(Unit) },
         cameraPosition = CameraPosition.FRONT,
         cameraDeviceId = "usb-camera-fixture",
+        cameraRotationDegrees = cameraRotationDegrees,
         onBusyChanged = { busy.add(round.isBusy) },
     )
     val job = launch {

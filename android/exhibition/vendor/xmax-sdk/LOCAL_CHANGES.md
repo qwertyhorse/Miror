@@ -14,17 +14,41 @@ roots use `https://api.xmaxai.com/open/api/v1` and
 temporary-key, session verification, and teardown services. The application
 accepts only the `x2.0` model.
 
-The local camera API adds `enumerateCameraDevices()` and an optional final
+The local camera API adds `enumerateCameraDevices()` and an optional
 `cameraDeviceId` argument to `createLocalCameraStream`. Enumeration and exact
 device selection use the pinned RTC SDK's `IVideoDeviceManager`; an unavailable
 ID fails without falling back to another camera. Existing calls without an ID
 retain their front/back selection. Enumeration creates no capture or network
 session, and `close()` also releases an engine used only for enumeration.
 
+Both `createLocalCameraStream` overloads additionally accept the final optional
+`cameraRotationDegrees` argument (default `0`; valid values `0`, `90`, `180`,
+`270`). This is a clockwise installation correction, applied after camera
+selection and before capture by the pinned RTC SDK's
+`RTCEngine.setVideoCaptureRotation(VideoRotation)` API. It affects the camera
+stream sent to XMAX as well as local rendering; it is not a TextureView-only
+transform. Invalid angles fail with `INVALID_CONFIGURATION`; a failed RTC call
+prevents capture and follows the existing cleanup path. Every camera stream
+explicitly applies its angle, including `0`, so a previous correction cannot
+silently carry over to the next camera stream.
+
+Rotation metadata from `IVideoFrame.rotation()` is copied unchanged into local
+analysis samples. The RTC frame renderer consumes the same metadata; neither
+consumer adds `cameraRotationDegrees` again. JVM tests cover all four angles,
+call ordering, invalid input, failed-configuration retry, reset to the default,
+and preservation of frame rotation and I420 plane data. Physical device testing
+is still required to verify driver-specific capture and generated-video output.
+
 The optional local video-frame listener exposes bounded CPU I420 samples from
-the existing RTC capture for Android hand inference. A local sink replaces RTC's
-VideoCanvas, so the existing EGL frame renderer also renders local preview with
-the selected mirror mode. The listener never opens a second camera or changes
+the existing RTC capture for Android hand inference. Its local sink uses
+`AFTER_PREPROCESS` so sampling and preview receive the camera correction and
+mirror applied by RTC before transmission. A local sink replaces RTC's
+VideoCanvas, so the existing EGL frame renderer also renders local preview;
+it does not mirror these postprocessed pixels again. Local samples expose
+`RealtimeVideoFrame.isMirrored` based on the applied RTC mirror mode. The host
+uses it to normalize hand-inference input without changing preview or uploaded
+video. Remote samples retain the default `false` and existing rendering behavior.
+The listener never opens a second camera or changes
 remote-frame/session confirmation. Capture samples are copied before the SDK
 callback returns and are invalidated when the camera owner changes or closes.
 

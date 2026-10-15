@@ -36,6 +36,7 @@ class NativeGenerationRound(
     private val onFirstFrame: () -> Unit,
     private val cameraPosition: CameraPosition = CameraPosition.BACK,
     private val cameraDeviceId: String? = null,
+    private val cameraRotationDegrees: Int = 0,
     private val onBusyChanged: () -> Unit = {},
 ) {
     private var snapshot = JSONObject(state.toString())
@@ -240,6 +241,7 @@ class NativeGenerationRound(
                     position = cameraPosition,
                     image = if (mode == "mox") image else null,
                     cameraDeviceId = if (mode == "mox") null else cameraDeviceId,
+                    cameraRotationDegrees = if (mode == "mox") 0 else cameraRotationDegrees,
                 )
                 NativeRoundMetadata.requireValid(NativeRoundMetadata.providerSessionId.matches(providerId), "实时会话编号无效。")
                 val linked = api.link(mirrorId, id, providerId)

@@ -135,7 +135,7 @@ class UiPreviewActivity : Activity() {
             "http://xuminghong.local:10601/v1.1/exhibition/control?mirrorId=exhibition-portrait-screen-000001" else
             "http://xuminghong.local:10601/")
         content.backendIp.setText("192.168.1.102")
-        content.meta.text = "0.3.3 · UI 预览"
+        content.meta.text = "${BuildConfig.VERSION_NAME} · UI 预览"
         content.cameraContainer.addView(cameraView)
         val unavailable = scenario in setOf("settings-no-camera", "camera-error")
         val scanning = scenario == "camera-scanning"

@@ -15,6 +15,7 @@ import com.ss.bytertc.engine.video.IVideoSink
 /** 持续接收后处理帧；渲染与帧回调共用输入，原生引用最多保留最新一帧供视图重新绑定。 */
 internal class VolcRemoteVideoFrameSink(
     private val listener: RtcRemoteVideoSink,
+    private val isMirrored: () -> Boolean = { false },
 ) : IVideoSink {
     private val lock = Any()
     private var active = true
@@ -32,7 +33,7 @@ internal class VolcRemoteVideoFrameSink(
                 val previous = latest
                 latest = frame
                 previous?.releaseRef()
-                listener.onFrame(VolcRemoteVideoFrame(frame))
+                listener.onFrame(VolcRemoteVideoFrame(frame, isMirrored()))
                 renderer?.render(frame)
                 listener.onFirstFrame(frame.width(), frame.height())
             } catch (error: Exception) {
@@ -85,7 +86,7 @@ internal interface RemoteFrameRenderer {
 }
 
 /** 使用 RTC 随包提供的 EGL 渲染器；所有权属于持续 sink，不再切回原生 VideoCanvas。 */
-internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode, mirror: Boolean = false) : RemoteFrameRenderer {
+internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode) : RemoteFrameRenderer {
     private val renderer = VideoFrameRender("XmaxRemoteVideo")
 
     init {
@@ -98,7 +99,7 @@ internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode
                 VideoContentMode.FIT -> RendererCommon.ScalingType.SCALE_ASPECT_FIT
                 VideoContentMode.FILL -> RendererCommon.ScalingType.SCALE_ASPECT_FILL
             })
-            renderer.setMirror(mirror)
+            renderer.setMirror(false)
             renderer.onStart()
         } catch (error: Throwable) {
             try { renderer.release() } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
@@ -110,7 +111,10 @@ internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode
     override fun release() = renderer.release()
 }
 
-internal class VolcRemoteVideoFrame(private val frame: IVideoFrame) : RtcRemoteVideoFrame {
+internal class VolcRemoteVideoFrame(
+    private val frame: IVideoFrame,
+    private val isMirrored: Boolean = false,
+) : RtcRemoteVideoFrame {
     override val width: Int get() = frame.width()
     override val height: Int get() = frame.height()
 
@@ -127,6 +131,7 @@ internal class VolcRemoteVideoFrame(private val frame: IVideoFrame) : RtcRemoteV
             y = copyPlane(0, width, height),
             u = copyPlane(1, chromaWidth, chromaHeight),
             v = copyPlane(2, chromaWidth, chromaHeight),
+            isMirrored = isMirrored,
         )
     }
 

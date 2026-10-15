@@ -3,7 +3,7 @@ package ai.xmax.sdk
 import java.nio.ByteBuffer
 
 /**
- * 最终远端视频帧，像素格式固定为 I420（Y、U、V 三个紧密排列的平面）。
+ * RTC 视频帧，像素格式固定为 I420（Y、U、V 三个紧密排列的平面）。
  * SDK 已复制像素，不依赖 RTC 原生帧的生命周期；接入方可持有此对象供异步编码使用，无须释放。
  * 各 data 访问器返回独立的只读视图，修改 position 不会影响其他消费者。
  */
@@ -19,6 +19,8 @@ public class RealtimeVideoFrame internal constructor(
     private val y: ByteArray,
     private val u: ByteArray,
     private val v: ByteArray,
+    /** 本地前处理帧是否已包含镜像；远端帧默认为 false，不据此改变远端渲染。 */
+    public val isMirrored: Boolean = false,
 ) {
     public val yStride: Int get() = width
     public val uStride: Int get() = (width + 1) / 2

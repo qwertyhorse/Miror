@@ -100,11 +100,12 @@ internal class XmaxRealtimeManager(
         position: CameraPosition,
         useMicrophone: Boolean,
         cameraDeviceId: String?,
+        cameraRotationDegrees: Int,
     ): RealtimeMediaStream = mediaOperation(
         sourceRemoteAudioVolume = 0f,
         waitForCameraPreview = true,
     ) {
-        it.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId)
+        it.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId, cameraRotationDegrees)
     }
     override suspend fun createLocalImageStream(imageData: ByteArray, videoFormat: RealtimeVideoFormat?): RealtimeMediaStream =
         mediaOperation(sourceRemoteAudioVolume = 0f) { it.createLocalImageStream(imageData, videoFormat) }

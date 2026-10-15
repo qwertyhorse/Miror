@@ -18,6 +18,7 @@ internal class NativeCameraSettingsPanel(
     private val migrateLegacy: Boolean,
     private val awaitExclusive: suspend () -> Unit,
     private val requestPermission: () -> Boolean,
+    initialRotationDegrees: Int = 0,
     private val onState: (String, NativeCameraSnapshot, NativeCameraSelection, String?, String?) -> Unit = { _, _, _, _, _ -> },
 ) : NativeCameraSettingsView(context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -33,10 +34,22 @@ internal class NativeCameraSettingsPanel(
     }
     var selection = initialSelection
         private set
+    var rotationDegrees = initialRotationDegrees
+        private set
     private var snapshot = NativeCameraSnapshot(emptyList())
     private var previewedDeviceId: String? = null
 
     init {
+        require(initialRotationDegrees in listOf(0, 90, 180, 270))
+        rotationSpinner.setSelection(initialRotationDegrees / 90)
+        rotationSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position !in 0..3 || position * 90 == rotationDegrees) return
+                rotationDegrees = position * 90
+                if (initialized) launchOperation { showPreview() }
+            }
+        }
         previewContainer.addView(preview, FrameLayout.LayoutParams(-1, -1))
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -100,7 +113,7 @@ internal class NativeCameraSettingsPanel(
                 report("ready", "摄像头已断开，请重新检测")
             }
         }
-        controller.preview(cameraDeviceId = selected.id, target = preview)
+        controller.preview(cameraDeviceId = selected.id, target = preview, cameraRotationDegrees = rotationDegrees)
         // The shared controller defaults to the full-screen mirror's fill mode.
         preview.videoContentMode = VideoContentMode.FIT
         if (!closed && owner == epoch) {

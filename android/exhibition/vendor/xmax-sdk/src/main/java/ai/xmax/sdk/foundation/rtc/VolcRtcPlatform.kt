@@ -62,8 +62,8 @@ internal fun createVolcRtcEngine(
     fun bindObservedLocalVideo() {
         val binding = localVideoBinding.get() ?: return
         localFrameSink.get()?.bind {
-            VolcRemoteFrameRenderer(binding.first, binding.second,
-                localMirrorType.get() in listOf(MirrorType.MIRROR_TYPE_RENDER, MirrorType.MIRROR_TYPE_RENDER_AND_ENCODER))
+            // The postprocessed frame already includes RTC's render-and-encoder mirror.
+            VolcRemoteFrameRenderer(binding.first, binding.second)
         }
     }
     val remoteStreamIds = ConcurrentHashMap<RemoteStream, String>()
@@ -154,6 +154,9 @@ internal fun createVolcRtcEngine(
         }
 
         override fun stopAudioCapture(): Int = engine.stopAudioCapture()
+
+        override fun setVideoCaptureRotation(rotationDegrees: Int): Int =
+            engine.setVideoCaptureRotation(RtcVideoConverter.convertCaptureRotation(rotationDegrees))
 
         override fun startVideoCapture(
             width: Int,
@@ -259,10 +262,9 @@ internal fun createVolcRtcEngine(
         }
 
         override fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?): Int {
-            val configuration = com.ss.bytertc.engine.video.LocalVideoSinkConfig().apply {
-                position = com.ss.bytertc.engine.video.LocalVideoSinkPosition.AFTER_CAPTURE
-                pixelFormat = com.ss.bytertc.engine.data.VideoPixelFormat.I420
-            }
+            val configuration = RtcVideoConverter.makeLocalVideoSinkConfiguration()
+            // RTC owns capture rotation. Both rendering and analysis consume the frame's
+            // rotation metadata unchanged; adding the installation offset again would double it.
             val previous = localFrameSink.getAndSet(null)
             try { previous?.release() }
             finally { engine.setLocalVideoSink(null, configuration) }
@@ -278,7 +280,7 @@ internal fun createVolcRtcEngine(
                     try { listener.onFrame(frame.copy(), timestamp) }
                     catch (_: Exception) { listener.onFrameDropped() }
                 }
-            })
+            }, isMirrored = { localMirrorType.get() == MirrorType.MIRROR_TYPE_RENDER_AND_ENCODER })
             localFrameSink.set(sink)
             try {
                 // A custom sink replaces VideoCanvas. Render the same frames ourselves,

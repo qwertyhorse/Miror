@@ -63,7 +63,14 @@ internal class CameraController(
         position: CameraPosition,
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
+        cameraRotationDegrees: Int = 0,
     ): RealtimeMediaStream {
+        if (cameraRotationDegrees !in listOf(0, 90, 180, 270)) {
+            throw XmaxError(
+                code = XmaxErrorCode.INVALID_CONFIGURATION,
+                message = "Camera rotation must be 0, 90, 180, or 270 degrees",
+            )
+        }
         if (currentTrack != null) {
             throw XmaxError(
                 code = XmaxErrorCode.INVALID_CONFIGURATION,
@@ -92,6 +99,7 @@ internal class CameraController(
             } else {
                 rtcManager.switchCamera(position)
             }
+            rtcManager.setVideoCaptureRotation(cameraRotationDegrees)
             rtcManager.startVideoCapture(
                 width = resolvedFormat.width,
                 height = resolvedFormat.height,

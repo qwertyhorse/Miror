@@ -64,23 +64,28 @@ public interface XmaxRealtimeManaging {
         position: CameraPosition = CameraPosition.FRONT,
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
+        cameraRotationDegrees: Int = 0,
     ): RealtimeMediaStream = createLocalCameraStream(
         videoFormat = options.model.defaultCameraVideoFormat,
         position = position,
         useMicrophone = useMicrophone,
         cameraDeviceId = cameraDeviceId,
+        cameraRotationDegrees = cameraRotationDegrees,
     )
 
     /**
      * 创建并启动相机输入；接入方须先取得所需权限，输入尺寸会按模型规则调整。
      * 麦克风默认关闭；启用后在连接时开始采集、断开时停止，不进行本地回放。
      * cameraDeviceId 来自 enumerateCameraDevices；指定后优先于 position，设备缺失时失败。
+     * cameraRotationDegrees 为相机安装方向的顺时针修正量，仅支持 0、90、180、270；
+     * 在采集开始前交由 RTC 应用，本地预览和发送的视频共用该设置。
      */
     public suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
+        cameraRotationDegrees: Int = 0,
     ): RealtimeMediaStream
 
     /** 停止当前相机输入并释放其资源；当前源不是相机时不执行释放。 */

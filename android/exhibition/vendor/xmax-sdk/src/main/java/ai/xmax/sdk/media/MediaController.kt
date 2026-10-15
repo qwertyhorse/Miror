@@ -116,8 +116,9 @@ internal class MediaController(
         position: CameraPosition,
         useMicrophone: Boolean,
         cameraDeviceId: String?,
+        cameraRotationDegrees: Int,
     ): RealtimeMediaStream = createSource(LocalMediaKind.CAMERA) {
-        cameraController.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId)
+        cameraController.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId, cameraRotationDegrees)
     }
 
     override fun startMicrophoneCapture() {

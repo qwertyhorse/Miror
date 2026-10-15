@@ -205,6 +205,16 @@ internal class RtcManager(
         }
     }
 
+    override fun setVideoCaptureRotation(rotationDegrees: Int) {
+        if (rotationDegrees !in listOf(0, 90, 180, 270)) {
+            throw XmaxError(XmaxErrorCode.INVALID_CONFIGURATION,
+                "Camera rotation must be 0, 90, 180, or 270 degrees")
+        }
+        performEngineOperation("setVideoCaptureRotation") {
+            it.setVideoCaptureRotation(rotationDegrees)
+        }
+    }
+
     override fun startVideoCapture(
         width: Int,
         height: Int,

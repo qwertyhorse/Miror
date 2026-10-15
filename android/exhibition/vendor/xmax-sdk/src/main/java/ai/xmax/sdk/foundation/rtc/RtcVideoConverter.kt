@@ -10,6 +10,8 @@ import ai.xmax.sdk.XmaxErrorCode
 import android.view.View
 import com.ss.bytertc.engine.VideoCanvas
 import com.ss.bytertc.engine.VideoEncoderConfig
+import com.ss.bytertc.engine.video.LocalVideoSinkConfig
+import com.ss.bytertc.engine.video.LocalVideoSinkPosition
 import com.ss.bytertc.engine.data.CameraId
 import com.ss.bytertc.engine.data.MirrorType
 import com.ss.bytertc.engine.data.VideoBufferType
@@ -21,6 +23,12 @@ import java.nio.ByteBuffer
 
 /** 在 Xmax 中性视频配置与火山 RTC 类型之间转换。 */
 internal object RtcVideoConverter {
+    fun makeLocalVideoSinkConfiguration(): LocalVideoSinkConfig = LocalVideoSinkConfig().apply {
+        // Sample after RTC applies rotation and mirror, matching the uploaded stream.
+        position = LocalVideoSinkPosition.AFTER_PREPROCESS
+        pixelFormat = VolcVideoPixelFormat.I420
+    }
+
     fun makeCanvas(
         view: View,
         contentMode: VideoContentMode,
@@ -98,6 +106,15 @@ internal object RtcVideoConverter {
             VideoPixelFormat.ARGB,
             -> VolcVideoPixelFormat.RGBA
         }
+
+    fun convertCaptureRotation(rotationDegrees: Int): VolcVideoRotation = when (rotationDegrees) {
+        0 -> VolcVideoRotation.VIDEO_ROTATION_0
+        90 -> VolcVideoRotation.VIDEO_ROTATION_90
+        180 -> VolcVideoRotation.VIDEO_ROTATION_180
+        270 -> VolcVideoRotation.VIDEO_ROTATION_270
+        else -> throw XmaxError(XmaxErrorCode.INVALID_CONFIGURATION,
+            "Camera rotation must be 0, 90, 180, or 270 degrees")
+    }
 
     fun convertRotation(rotation: VideoRotation): VolcVideoRotation = when (rotation) {
         VideoRotation.ROTATION_0 -> VolcVideoRotation.VIDEO_ROTATION_0

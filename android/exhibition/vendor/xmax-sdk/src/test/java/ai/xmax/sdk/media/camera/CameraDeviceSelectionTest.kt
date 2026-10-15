@@ -92,6 +92,62 @@ class CameraDeviceSelectionTest {
         assertEquals(CameraPosition.BACK, stream.videoTrack?.position)
         assertNull(fixture.engine.selectedId)
         assertEquals(0, fixture.engine.enumerations)
+        assertEquals(listOf(0), fixture.engine.rotations)
+        fixture.media.stopLocalStream()
+    }
+
+    @Test fun cameraRotationIsAppliedAfterSelectionAndBeforeTheFirstCapture() = runBlocking {
+        for (degrees in listOf(0, 90, 180, 270)) {
+            val fixture = Fixture()
+            fixture.media.createLocalCameraStream(format, CameraPosition.FRONT,
+                cameraDeviceId = "usb-2", cameraRotationDegrees = degrees)
+            assertEquals(listOf("select:usb-2", "rotation:$degrees", "capture"), fixture.engine.operations)
+            fixture.media.stopLocalStream()
+        }
+    }
+
+    @Test fun invalidRotationNeverSelectsOrStartsTheCamera() = runBlocking {
+        for (degrees in listOf(-90, 1, 45, 360, Int.MAX_VALUE)) {
+            val fixture = Fixture()
+            val error = runCatching {
+                fixture.media.createLocalCameraStream(format, CameraPosition.FRONT,
+                    cameraDeviceId = "usb-2", cameraRotationDegrees = degrees)
+            }.exceptionOrNull()
+            assertTrue(error is XmaxError)
+            assertEquals(XmaxErrorCode.INVALID_CONFIGURATION, (error as XmaxError).code)
+            assertEquals(0, fixture.permissionChecks)
+            assertTrue(fixture.engine.operations.isEmpty())
+            assertEquals(1, fixture.engineReleases)
+        }
+    }
+
+    @Test fun rotationFailureStopsBeforeCaptureAndAllowsRetry() = runBlocking {
+        val fixture = Fixture()
+        fixture.engine.rotationResult = -1
+        val error = runCatching {
+            fixture.media.createLocalCameraStream(format, CameraPosition.FRONT,
+                cameraDeviceId = "usb-2", cameraRotationDegrees = 90)
+        }.exceptionOrNull()
+        assertTrue(error is XmaxError)
+        assertTrue(error?.message.orEmpty().contains("setVideoCaptureRotation"))
+        assertEquals(0, fixture.engine.captureStarts)
+        assertEquals(1, fixture.engineReleases)
+        assertNull(fixture.media.currentTrack)
+        fixture.engine.rotationResult = 0
+        fixture.media.createLocalCameraStream(format, CameraPosition.FRONT,
+            cameraDeviceId = "usb-2", cameraRotationDegrees = 270)
+        assertEquals(listOf(90, 270), fixture.engine.rotations)
+        assertEquals(1, fixture.engine.captureStarts)
+        fixture.media.stopLocalStream()
+    }
+
+    @Test fun defaultRotationResetsAPreviousCameraCorrection() = runBlocking {
+        val fixture = Fixture()
+        fixture.media.createLocalCameraStream(format, CameraPosition.FRONT, cameraRotationDegrees = 180)
+        fixture.media.stopLocalStream()
+        fixture.media.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertEquals(listOf(180, 0), fixture.engine.rotations)
+        assertEquals(2, fixture.engine.captureStarts)
         fixture.media.stopLocalStream()
     }
 
@@ -124,22 +180,33 @@ class CameraDeviceSelectionTest {
         var switchedPosition: CameraPosition? = null
         var captureStarts = 0
         var selectionResult = 0
+        var rotationResult = 0
+        val rotations = mutableListOf<Int>()
+        val operations = mutableListOf<String>()
         override fun enumerateCameraDevices(): List<RealtimeCameraDevice> {
             enumerations++
             return devices
         }
         override fun selectCameraDevice(deviceId: String, position: CameraPosition?): Int {
+            operations += "select:$deviceId"
             selectedId = deviceId
             selectedPosition = position
             return selectionResult
         }
         override fun switchCamera(position: CameraPosition): Int {
+            operations += "switch:$position"
             switchedPosition = position
             return 0
         }
         override fun startVideoCapture(width: Int, height: Int, frameRate: Int): Int {
+            operations += "capture"
             captureStarts++
             return 0
+        }
+        override fun setVideoCaptureRotation(rotationDegrees: Int): Int {
+            operations += "rotation:$rotationDegrees"
+            rotations += rotationDegrees
+            return rotationResult
         }
         override fun stopVideoCapture() = 0
         override fun configureVideoEncoding(configuration: VideoEncodingConfiguration) = 0

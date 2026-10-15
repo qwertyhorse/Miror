@@ -29,6 +29,22 @@ fun main() {
     verify(reduced.width == 360 && reduced.height == 640 && reduced.argb.size == 360 * 640, "Rotation and reduction bound allocation before conversion")
     val odd = NativeCameraPixels.convert(3, 1, 0, gray(16, 16, 235), gray(128, 128), gray(128, 128), 3, 2, 2, 640)
     verify(odd.argb.last() == 0xffffffff.toInt(), "Odd dimensions use rounded-up chroma planes")
+    for (rotation in listOf(0, 90, 180, 270)) {
+        val sourceY = ByteBuffer.wrap(ByteArray(132 * 66) { at -> (16 + (at * 7 % 220)).toByte() })
+        val sourceU = ByteBuffer.wrap(ByteArray(66 * 33) { 128.toByte() })
+        val sourceV = ByteBuffer.wrap(ByteArray(66 * 33) { 128.toByte() })
+        for (longEdge in listOf(64, 640)) {
+            val normal = NativeCameraPixels.convert(130, 65, rotation, sourceY, sourceU, sourceV, 132, 66, 66, longEdge)
+            val unmirrored = NativeCameraPixels.convert(130, 65, rotation, sourceY, sourceU, sourceV, 132, 66, 66, longEdge, unmirror = true)
+            verify(normal.width == unmirrored.width && normal.height == unmirrored.height,
+                "Front-camera unmirror preserves upright dimensions at $rotation/$longEdge")
+            val reflected = normal.argb.toList().chunked(normal.width).flatMap { it.reversed() }
+            verify(unmirrored.argb.toList() == reflected,
+                "Unmirror acts horizontally after $rotation degree rotation and bounded sampling")
+        }
+        verify(sourceY.position() == 0 && sourceU.position() == 0 && sourceV.position() == 0,
+            "Rotated mirrored consumer retains source buffer ownership")
+    }
     try {
         NativeCameraPixels.convert(2, 2, 0, gray(16, 16, 16), gray(128), gray(128), 2, 1, 1, 640)
         error("Accepted truncated source")

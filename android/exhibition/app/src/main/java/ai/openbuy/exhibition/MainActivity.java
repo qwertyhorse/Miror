@@ -81,12 +81,16 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         preferences = getSharedPreferences("exhibition-device", MODE_PRIVATE);
         initializeTerminalIdentity();
+        String savedScreenUrl = preferences.getString("screen-url", null);
+        SharedPreferences.Editor migratedPreferences = preferences.edit();
+        if (UrlPolicy.shouldClearLegacyFallback(savedScreenUrl, preferences.getString("backend-ip", ""),
+                preferences.getBoolean("backend-ip-prefilled", false))) migratedPreferences.remove("backend-ip");
         try {
-            screenUrl = UrlPolicy.cameraScreenUrl(preferences.getString("screen-url", UrlPolicy.DEFAULT_URL));
+            screenUrl = UrlPolicy.migrateDefaultScreenUrl(savedScreenUrl);
         } catch (IllegalArgumentException ignored) {
             screenUrl = UrlPolicy.DEFAULT_URL;
         }
-        preferences.edit().putString("screen-url", screenUrl).apply();
+        migratedPreferences.putString("screen-url", screenUrl).apply();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(247, 245, 251));

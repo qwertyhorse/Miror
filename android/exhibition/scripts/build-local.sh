@@ -3,8 +3,16 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(dirname "$script_dir")
 openbuy_toolchain_dir="${OPENBUY_ANDROID_TOOLCHAIN:-$HOME/.local/share/openbuy-android}"
-openbuy_java_home="${JAVA_HOME:-$openbuy_toolchain_dir/jdk-17/Contents/Home}"
-openbuy_sdk_root="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+openbuy_default_java="$openbuy_toolchain_dir/jdk-17/Contents/Home"
+if [ ! -x "$openbuy_default_java/bin/java" ]; then
+  openbuy_default_java="$openbuy_toolchain_dir/jdk-17"
+fi
+openbuy_java_home="${JAVA_HOME:-$openbuy_default_java}"
+openbuy_default_sdk="$HOME/Library/Android/sdk"
+if [ ! -d "$openbuy_default_sdk" ]; then
+  openbuy_default_sdk="$openbuy_toolchain_dir/sdk"
+fi
+openbuy_sdk_root="${ANDROID_HOME:-$openbuy_default_sdk}"
 if [ ! -x "$openbuy_java_home/bin/java" ]; then
   printf '%s\n' "JDK 未就绪：$openbuy_java_home" >&2
   exit 1

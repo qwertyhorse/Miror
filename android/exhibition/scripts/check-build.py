@@ -38,9 +38,12 @@ if not sdk and local_properties.exists():
         if line.startswith('sdk.dir='):
             sdk = line.split('=', 1)[1].replace('\\:', ':').replace('\\\\', '\\')
 if not sdk:
-    default = Path.home() / 'Library/Android/sdk'
-    if default.is_dir():
-        sdk = str(default)
+    toolchain = Path(os.environ.get('OPENBUY_ANDROID_TOOLCHAIN') or
+                     str(Path.home() / '.local/share/openbuy-android'))
+    for default in (Path.home() / 'Library/Android/sdk', toolchain / 'sdk'):
+        if default.is_dir():
+            sdk = str(default)
+            break
 report('Android SDK', bool(sdk and Path(sdk).is_dir()), sdk or 'not configured')
 if sdk:
     report('Android API 37', (Path(sdk) / 'platforms/android-37.0/android.jar').is_file(), 'platforms/android-37.0/android.jar')

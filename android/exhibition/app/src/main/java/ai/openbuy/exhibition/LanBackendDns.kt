@@ -8,18 +8,21 @@ import android.os.Build
 import android.os.ext.SdkExtensions
 import okhttp3.Dns
 import java.net.InetAddress
+import java.net.URI
 import java.net.UnknownHostException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
-/** Resolve only the fixed LAN backend; retain the URL, HTTP Host and TLS server name. */
-internal class LanBackendDns(context: Context, fallbackIpv4: String? = null) : Dns {
+/** Resolve only the configured backend; retain the URL, HTTP Host and TLS server name. */
+internal class LanBackendDns(context: Context, screenUrl: String, fallbackIpv4: String? = null) : Dns {
     private val application = context.applicationContext
+    private val hostname = URI(UrlPolicy.cameraScreenUrl(screenUrl)).host
     private val resolver = LanBackendResolver(
         systemLookup = { Dns.SYSTEM.lookup(it) },
-        discover = { LanNsdDiscovery(application).discover() },
+        discover = { if (hostname.endsWith(".local", ignoreCase = true)) LanNsdDiscovery(application, hostname).discover() else null },
         fallbackIpv4 = fallbackIpv4,
+        backendHostname = hostname,
     )
 
     @Throws(UnknownHostException::class)
@@ -32,7 +35,7 @@ private object LanNsdResolutionGate {
 }
 
 @Suppress("DEPRECATION")
-private class LanNsdDiscovery(private val application: Context) {
+private class LanNsdDiscovery(private val application: Context, private val hostname: String) {
     private val nsd = application.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val monitor = Any()
     private val completion = CountDownLatch(1)
@@ -78,8 +81,12 @@ private class LanNsdDiscovery(private val application: Context) {
                     override fun onServiceResolved(info: NsdServiceInfo) {
                         LanNsdResolutionGate.active.compareAndSet(this, null)
                         val addresses = if (supportsResolutionStop()) info.hostAddresses else listOfNotNull(info.host)
-                        val address = addresses.firstOrNull(LanBackendAddress::isPrivateIpv4)
-                        finish(address?.takeIf { isBackendService(info) && info.port == BACKEND_PORT })
+                        // toString reads the name supplied by NSD without a blocking reverse DNS lookup.
+                        val address = addresses.firstOrNull { address ->
+                            LanBackendAddress.isPrivateIpv4(address) &&
+                                LanBackendAddress.isBackendServiceHost(hostname, address.toString().substringBefore('/'))
+                        }
+                        finish(address?.takeIf { isBackendService(info) && info.port in BACKEND_PORTS })
                     }
 
                     override fun onResolutionStopped(info: NsdServiceInfo) {
@@ -179,7 +186,7 @@ private class LanNsdDiscovery(private val application: Context) {
 
     private companion object {
         const val SERVICE_TYPE = "_http._tcp"
-        const val BACKEND_PORT = 10200
+        val BACKEND_PORTS = setOf(10200, 10101)
         const val DISCOVERY_TIMEOUT_MILLIS = 3_000L
     }
 }

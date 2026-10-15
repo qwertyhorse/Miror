@@ -94,20 +94,20 @@ class NativeExhibitionActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("exhibition-device", MODE_PRIVATE)
-        if (!prefs.getBoolean("backend-ip-prefilled", false)) {
-            val defaults = prefs.edit().putBoolean("backend-ip-prefilled", true)
-            if (prefs.getString("backend-ip", "").isNullOrBlank()) defaults.putString("backend-ip", "192.168.63.54")
-            check(defaults.commit())
-        }
+        val savedScreenUrl = prefs.getString("screen-url", null)
+        val migratedPreferences = prefs.edit()
+        if (UrlPolicy.shouldClearLegacyFallback(savedScreenUrl, prefs.getString("backend-ip", ""),
+                prefs.getBoolean("backend-ip-prefilled", false))) migratedPreferences.remove("backend-ip")
         terminalId = prefs.getString("terminal-id", null) ?: "terminal-${UUID.randomUUID()}"
         terminalToken = prefs.getString("terminal-token", null) ?: "${UUID.randomUUID()}${UUID.randomUUID()}"
         check(prefs.edit().putString("terminal-id", terminalId).putString("terminal-token", terminalToken).commit())
         screenUrl = runCatching {
-            val saved = UrlPolicy.cameraScreenUrl(prefs.getString("screen-url", UrlPolicy.DEFAULT_URL))
+            val saved = UrlPolicy.migrateDefaultScreenUrl(savedScreenUrl)
             ExhibitionApi(saved, terminalId, terminalToken, Build.MODEL)
             saved
         }
             .getOrDefault(UrlPolicy.DEFAULT_URL)
+        check(migratedPreferences.putString("screen-url", screenUrl).commit())
         position = if (prefs.getString("native-camera", "back") == "front") CameraPosition.FRONT else CameraPosition.BACK
         cameraDeviceId = prefs.getString("native-camera-id", null)?.takeIf { it.isNotEmpty() }
         remoteCamera = NativeCameraRemote(prefs.getStringSet("native-camera-handled-requests", emptySet()).orEmpty())
@@ -122,7 +122,7 @@ class NativeExhibitionActivity : Activity() {
     }
 
     private fun newApi() = ExhibitionApi(screenUrl, terminalId, terminalToken,
-        "${Build.MANUFACTURER} ${Build.MODEL}".take(80), LanBackendDns(applicationContext, prefs.getString("backend-ip", "")))
+        "${Build.MANUFACTURER} ${Build.MODEL}".take(80), LanBackendDns(applicationContext, screenUrl, prefs.getString("backend-ip", "")))
 
     override fun onStart() {
         super.onStart()
@@ -697,7 +697,7 @@ class NativeExhibitionActivity : Activity() {
                 try {
                     val url = UrlPolicy.cameraScreenUrl(address.text.toString())
                     // Constructor validates the endpoint before a running terminal is interrupted.
-                    ExhibitionApi(url, terminalId, terminalToken, Build.MODEL, LanBackendDns(applicationContext, fallbackIp))
+                    ExhibitionApi(url, terminalId, terminalToken, Build.MODEL, LanBackendDns(applicationContext, url, fallbackIp))
                     val preferences = prefs.edit().putString("screen-url", url).putString("backend-ip", fallbackIp)
                     if (cameraPanel != null) {
                         preferences.putString("native-camera-id", cameraPanel.selection.storedValue)

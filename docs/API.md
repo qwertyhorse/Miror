@@ -22,7 +22,7 @@
 
 ## 体验协议 2 与恢复
 
-API、Web 与 Android 须配套升级；当前 Android 版本为 0.3.3（versionCode 11），后台摄像头控制要求 0.3.2 或更新版本。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
+API、Web 与 Android 须配套升级；当前 Android 版本为 0.5.0（versionCode 13），后台摄像头控制要求 0.3.2 或更新版本。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
 
 `POST M/command` 支持 `commandId`（8–100 位字母、数字、下划线或连字符）。客户端同一次操作重试须沿用编号；同编号同内容返回当前权威快照，同编号不同内容返回 409 `EXHIBITION_COMMAND_CONFLICT`。服务端持久化去重；`expectedRevision` 不参与内容指纹。`end/idle/pause` 优先执行，不因旧 revision 阻止停止。`keepalive` 仅用于正在生成/展示的体验，取消空闲提醒并重新开始空闲计时。
 
@@ -469,6 +469,8 @@ SDK 0.2.11 的内部重连被此 Adapter 阻止，应用已有的有界恢复和
 客户端确认媒体传输关闭后，`POST .../sessions/:id/released {releaseKey}` 记录 `releaseEvidence: client_transport_closed`。这是受授权终端回执，不是供应商撤销/结算证明。后端 `stop` 独立阻止新拨号，但没有凭空实现 Decart revoke。终端失联或停止回执丢失时保持 stopping；记录按最后拨号准入截止 + 单连接最大时长 + 偏差余量，在最迟可能活跃期限后解除门禁，证据为 `bounded_expiry`。此路径依赖供应商执行其返回的 maxSessionDuration 约束；供应商故障不在本地承诺范围内。
 
 Decart `usageStatus: unavailable` 表明没有结算读数，旧公共记录中的 consumedCredits/pointsLimit 兼容字段不可显示为 Decart 真实用量或余额。诊断须同时保留 providerId、model、releaseEvidence，不能把客户端关闭写成云端确认撤销。
+
+当前 Android 0.5.0 默认直接进入 WebView 镜端，XMAX 与 Decart 均使用最新网页流程，包含手势忙碌拦截和翻页笔行为；安装身份保持原生存储。以下 0.4.0 为历史入口行为。
 
 Android 0.4.0 保留原生 XMAX 引擎；选择 Decart 后先释放摄像头，再进入 App 内已有 WebView 镜端，共用 Web 的 Decart Adapter 与恢复机制。终端身份和绑定继续复用，WebView 负责摄像头及远程检测。该路径需要现有最低 WebView 版本、受信 HTTPS 和系统暴露的摄像头；只被原生驱动暴露的特殊 UVC 设备不保证可用于 WebRTC。旧 APK 不具备该路径，应升级后使用 Decart。切回 XMAX 可继续由 Web 引擎处理，重新启动 App 回到原生 XMAX。
 

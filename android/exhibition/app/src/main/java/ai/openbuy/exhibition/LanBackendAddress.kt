@@ -6,10 +6,12 @@ import java.net.UnknownHostException
 
 /** Numeric parsing only: never ask DNS to interpret an IP entered in settings. */
 internal object LanBackendAddress {
-    const val HOSTNAME = "xuminghong.local"
+    const val DEFAULT_HOSTNAME = "xuxin.local"
     const val CACHE_TTL_MILLIS = 15_000L
 
-    fun isBackendHost(hostname: String) = hostname.equals(HOSTNAME, ignoreCase = true)
+    fun isBackendServiceHost(configuredHostname: String, announcedHostname: String) =
+        configuredHostname.endsWith(".local", ignoreCase = true) &&
+            configuredHostname.equals(announcedHostname.trimEnd('.'), ignoreCase = true)
 
     fun requirePrivateIpv4(value: String): Inet4Address {
         val parts = value.split('.')
@@ -18,7 +20,7 @@ internal object LanBackendAddress {
         }
         val octets = parts.map { it.toInt() }
         require(octets.all { it in 0..255 }) { "请输入局域网 IPv4 地址。" }
-        val address = InetAddress.getByAddress(HOSTNAME, octets.map { it.toByte() }.toByteArray()) as Inet4Address
+        val address = InetAddress.getByAddress(octets.map { it.toByte() }.toByteArray()) as Inet4Address
         require(isPrivateIpv4(address)) { "请输入局域网 IPv4 地址。" }
         return address
     }
@@ -39,15 +41,18 @@ internal class LanBackendResolver(
     fallbackIpv4: String? = null,
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     private val cacheTtlMillis: Long = LanBackendAddress.CACHE_TTL_MILLIS,
+    private val backendHostname: String = LanBackendAddress.DEFAULT_HOSTNAME,
 ) {
-    private val manual = fallbackIpv4?.trim()?.takeIf { it.isNotEmpty() }?.let(LanBackendAddress::requirePrivateIpv4)
+    private val manual = fallbackIpv4?.trim()?.takeIf { it.isNotEmpty() }?.let {
+        InetAddress.getByAddress(backendHostname, LanBackendAddress.requirePrivateIpv4(it).address)
+    }
     private val discoveryLock = Any()
     private var cached: InetAddress? = null
     private var expiresAt = 0L
 
     @Throws(UnknownHostException::class)
     fun lookup(hostname: String): List<InetAddress> {
-        if (!LanBackendAddress.isBackendHost(hostname)) return system(hostname)
+        if (!hostname.equals(backendHostname, ignoreCase = true)) return system(hostname)
         manual?.let { return listOf(it) }
         val systemFailure = try {
             return system(hostname)
@@ -66,7 +71,7 @@ internal class LanBackendResolver(
             }
             if (discovered != null && LanBackendAddress.isPrivateIpv4(discovered)) {
                 // Preserve the original URL hostname without ever triggering reverse DNS.
-                val address = InetAddress.getByAddress(LanBackendAddress.HOSTNAME, discovered.address)
+                val address = InetAddress.getByAddress(backendHostname, discovered.address)
                 cached = address
                 expiresAt = nowMillis() + cacheTtlMillis
                 return listOf(address)

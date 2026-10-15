@@ -125,7 +125,9 @@ def main():
         api_classes.mkdir(parents=True)
         api_classpath = os.pathsep.join(map(str, [api_classes, stdlib, coroutines, json_jar] + http_modules))
         print('Run ExhibitionApi contract fixtures.', flush=True)
-        run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', api_classes, SOURCE / 'UrlPolicy.java'])
+        run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', api_classes,
+             SOURCE / 'UrlPolicy.java', TESTS / 'UrlPolicyTest.java'])
+        run([java, '-cp', api_classes, 'ai.openbuy.exhibition.UrlPolicyTest'], timeout=60)
         run(compiler + ['-classpath', api_classpath, '-d', api_classes,
                         SOURCE / 'ExhibitionApi.kt', TESTS / 'ExhibitionApiContractTest.kt'])
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',

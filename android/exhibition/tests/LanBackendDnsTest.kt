@@ -29,6 +29,10 @@ fun main() {
         catch (_: IllegalArgumentException) { assertions++ }
     }
     verify(!LanBackendAddress.isPrivateIpv4(InetAddress.getByAddress(ByteArray(16))), "Reject IPv6 discoveries")
+    verify(LanBackendAddress.isBackendServiceHost("xuxin.local", "XUXIN.local."), "NSD hostname comparison accepts case and final dot")
+    verify(!LanBackendAddress.isBackendServiceHost("xuxin.local", "xuminghong.local"), "An old Mac service cannot resolve Ubuntu")
+    verify(!LanBackendAddress.isBackendServiceHost("custom.local", "xuxin.local"), "A configured custom backend cannot resolve to Ubuntu")
+    verify(!LanBackendAddress.isBackendServiceHost("xuxin.local", ""), "Unidentified NSD service rejected")
 
     var discoveries = 0
     var systemCalls = 0
@@ -39,39 +43,47 @@ fun main() {
         discover = { discoveries++; nextAddress },
         nowMillis = { clock },
     )
-    verify(resolver.lookup("xuminghong.local").single().hostAddress == "192.168.3.7", "System DNS failure uses NSD")
+    verify(resolver.lookup("xuxin.local").single().hostAddress == "192.168.3.7", "System DNS failure uses NSD")
     verify(discoveries == 1 && systemCalls == 1, "Exactly one first discovery")
     // getHostName returns the explicit hostname without a reverse DNS lookup.
-    verify(resolver.lookup("XUMINGHONG.LOCAL").single().hostName == "xuminghong.local", "Retain backend hostname")
+    verify(resolver.lookup("XUXIN.LOCAL").single().hostName == "xuxin.local", "Retain backend hostname")
     verify(discoveries == 1, "Valid discovery cache reused")
     clock += LanBackendAddress.CACHE_TTL_MILLIS
     nextAddress = address("10.2.4.9")
-    verify(resolver.lookup("xuminghong.local").single().hostAddress == "10.2.4.9", "TTL expiry obtains changed IP")
+    verify(resolver.lookup("xuxin.local").single().hostAddress == "10.2.4.9", "TTL expiry obtains changed IP")
     verify(discoveries == 2, "Expired cache rediscovered")
     clock += LanBackendAddress.CACHE_TTL_MILLIS
     nextAddress = null
-    unknownHost { resolver.lookup("xuminghong.local") }
+    unknownHost { resolver.lookup("xuxin.local") }
     verify(discoveries == 3, "Failed rediscovery does not reuse stale address")
 
-    for (host in listOf("example.com", "xuminghong.local.evil", "other.local", "192.168.3.7")) {
+    for (host in listOf("example.com", "xuxin.local.evil", "xuminghong.local", "other.local", "192.168.3.7")) {
         unknownHost { resolver.lookup(host) }
     }
     verify(discoveries == 3, "Other hosts never use NSD or cache")
 
     val systemAddress = address("192.168.8.8")
     val successfulSystem = LanBackendResolver({ listOf(systemAddress) }, { error("Unexpected discovery") })
-    verify(successfulSystem.lookup("xuminghong.local").single() == systemAddress, "Working system DNS preferred")
+    verify(successfulSystem.lookup("xuxin.local").single() == systemAddress, "Working system DNS preferred")
     val manual = LanBackendResolver({ dnsFails(it) }, { error("Unexpected discovery") }, "172.20.3.8")
-    verify(manual.lookup("xuminghong.local").single().hostAddress == "172.20.3.8", "Explicit fallback works without discovery")
+    verify(manual.lookup("xuxin.local").single().hostAddress == "172.20.3.8", "Explicit fallback works without discovery")
     unknownHost { manual.lookup("example.com") }
     val manualPreferred = LanBackendResolver({ error("Unexpected system DNS") }, { error("Unexpected discovery") }, "10.1.2.3")
-    verify(manualPreferred.lookup("xuminghong.local").single().hostAddress == "10.1.2.3", "Explicit fallback takes priority")
+    verify(manualPreferred.lookup("xuxin.local").single().hostAddress == "10.1.2.3", "Explicit fallback takes priority")
+    verify(manualPreferred.lookup("xuxin.local").single().hostName == "xuxin.local", "Manual fallback retains configured hostname")
+    val custom = LanBackendResolver(::dnsFails, { address("192.168.3.2") }, backendHostname = "custom.local")
+    verify(custom.lookup("CUSTOM.LOCAL").single().hostName == "custom.local", "Discovery applies to configured custom backend")
+    unknownHost { custom.lookup("xuxin.local") }
+    unknownHost { custom.lookup("xuminghong.local") }
+    val legacy = LanBackendResolver(::dnsFails, { error("Unexpected discovery") }, "192.168.63.54", backendHostname = "xuminghong.local")
+    verify(legacy.lookup("xuminghong.local").single().hostAddress == "192.168.63.54", "Explicit legacy backend keeps its own address")
+    unknownHost { legacy.lookup("xuxin.local") }
     for (discovered in listOf(address("8.8.8.8"), address("127.0.0.1"), address("169.254.2.3"))) {
         val unsafeDiscovery = LanBackendResolver(::dnsFails, { discovered })
-        unknownHost { unsafeDiscovery.lookup("xuminghong.local") }
+        unknownHost { unsafeDiscovery.lookup("xuxin.local") }
     }
     val emptySystem = LanBackendResolver({ emptyList() }, { address("192.168.1.9") })
-    verify(emptySystem.lookup("xuminghong.local").single().hostAddress == "192.168.1.9", "Empty system answer falls back")
+    verify(emptySystem.lookup("xuxin.local").single().hostAddress == "192.168.1.9", "Empty system answer falls back")
 
     val discoveredOnce = AtomicInteger()
     val enter = CountDownLatch(1)
@@ -84,7 +96,7 @@ fun main() {
     })
     val workers = Executors.newFixedThreadPool(4)
     try {
-        val results = (0 until 4).map { workers.submit<List<InetAddress>> { concurrent.lookup("xuminghong.local") } }
+        val results = (0 until 4).map { workers.submit<List<InetAddress>> { concurrent.lookup("xuxin.local") } }
         check(enter.await(3, TimeUnit.SECONDS))
         release.countDown()
         results.forEach { verify(it.get(3, TimeUnit.SECONDS).single().hostAddress == "192.168.4.5", "Concurrent result") }

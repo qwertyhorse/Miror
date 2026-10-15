@@ -11,7 +11,7 @@ import java.util.Set;
 
 /** Pure Java URL validation, also exercised by the SDK-independent contract test. */
 public final class UrlPolicy {
-    public static final String DEFAULT_URL = "https://xuminghong.local:10202/v1.1/exhibition/screen";
+    public static final String DEFAULT_URL = "https://xuxin.local:10202/v1.1/exhibition/screen";
     public static final String CAMERA_URL = DEFAULT_URL;
     private static final String SCREEN_PATH = "/v1.1/exhibition/screen";
     private static final String NATIVE_IDENTITY_PATH = "/v1.1/api/exhibition/native-identity";
@@ -28,6 +28,31 @@ public final class UrlPolicy {
     ));
 
     private UrlPolicy() {}
+
+    /** Migrate only the former bundled endpoint; retain explicit custom backends. */
+    public static String migrateDefaultScreenUrl(String input) {
+        if (input == null) return DEFAULT_URL;
+        String value = cameraScreenUrl(input);
+        if (!isLegacyDefaultScreenUrl(input)) return value;
+        URI uri = parseHttpUrl(value);
+        return DEFAULT_URL + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery())
+            + (uri.getRawFragment() == null ? "" : "#" + uri.getRawFragment());
+    }
+
+    private static boolean isLegacyDefaultScreenUrl(String input) {
+        if (input == null) return true;
+        try {
+            URI uri = parseHttpUrl(normalizeScreenUrl(input));
+            return host(uri).equals("xuminghong.local") && isMirrorPath(uri)
+                && (uri.getScheme().equalsIgnoreCase("https") && uri.getPort() == 10202
+                    || uri.getScheme().equalsIgnoreCase("http") && uri.getPort() == 10200);
+        } catch (IllegalArgumentException ignored) { return false; }
+    }
+
+    /** Clear the former automatic IP only when its bundled backend is migrating. */
+    public static boolean shouldClearLegacyFallback(String savedUrl, String fallbackIp, boolean wasPrefilled) {
+        return wasPrefilled && "192.168.63.54".equals(fallbackIp) && isLegacyDefaultScreenUrl(savedUrl);
+    }
 
     public static String normalizeScreenUrl(String input) {
         if (input == null || input.trim().isEmpty()) {
@@ -53,7 +78,7 @@ public final class UrlPolicy {
     public static String cameraScreenUrl(String input) {
         String value = normalizeScreenUrl(input);
         URI uri = parseHttpUrl(value);
-        if (!uri.getScheme().equalsIgnoreCase("http") || uri.getPort() != 10200 || !isMirrorPath(uri)) return value;
+        if (!uri.getScheme().equalsIgnoreCase("http") || !isBackendHttpPort(uri.getPort()) || !isMirrorPath(uri)) return value;
         String hostname = host(uri);
         String authority = hostname.contains(":") ? "[" + hostname + "]" : hostname;
         String query = uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery();
@@ -77,9 +102,11 @@ public final class UrlPolicy {
     }
 
     private static boolean isMirrorEntry(URI uri) {
-        return isMirrorPath(uri) && (uri.getScheme().equalsIgnoreCase("http") && uri.getPort() == 10200
+        return isMirrorPath(uri) && (uri.getScheme().equalsIgnoreCase("http") && isBackendHttpPort(uri.getPort())
             || uri.getScheme().equalsIgnoreCase("https") && uri.getPort() == 10202);
     }
+
+    private static boolean isBackendHttpPort(int port) { return port == 10200 || port == 10101; }
 
     /** Changing HTTP/HTTPS or restoring the host must not reassign the physical mirror. */
     public static String preserveMirror(String targetUrl, String currentUrl) {

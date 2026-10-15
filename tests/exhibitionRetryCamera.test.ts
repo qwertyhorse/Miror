@@ -1,3 +1,4 @@
+import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExhibitionLive, type ExhibitionLiveController } from '../src/exhibition/useExhibitionLive';
@@ -63,6 +64,7 @@ async function fixture(initial = snapshot()) {
   let update!: (state: ExhibitionState, options?: { active?: boolean; mirrorId?: string }) => void;
   let created: CreatedSession & { exhibition: { mirrorId: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number } };
   mocks.api.mockImplementation(async (path: string, _method?: string, input?: Record<string, any>) => {
+    if (path.includes('/references/')) return { reference: readyReferenceFixture('https://reference.fixture/garment.png') };
     if (path.endsWith('/live/status')) return { configured: true, perSessionLimit: 30 };
     if (path.endsWith('/live/session')) {
       created = { id: 'retry-session-fixture', token: 'temporary-retry-fixture', model: 'x2.0', status: 'active', sourceId: 'camera-fixture', sourceKind: 'camera',
@@ -72,7 +74,7 @@ async function fixture(initial = snapshot()) {
           sessionNumber: value.state.sessionNumber, generationNumber: input!.generationNumber } };
       return created;
     }
-    if (path.endsWith('/reference')) return { ...created, refImageUrl: input!.refImageUrl, referenceVersion: 1 };
+    if (path.endsWith('/reference')) return { ...created, refImageUrl: resolvedBinding(input!.bindingId), referenceVersion: 1 };
     if (path.endsWith('/link')) return { ...created, providerSessionId: input!.providerSessionId, referenceVersion: 1 };
     if (path.endsWith('/live/heartbeat') || path.endsWith('/live/error')) return {};
     if (path.endsWith('/stop')) return stop();

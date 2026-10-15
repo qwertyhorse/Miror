@@ -43,12 +43,15 @@ export const EXHIBITION_DEFAULT_UPLOAD_LIMITS: Readonly<ExhibitionUploadLimits> 
 };
 export interface ExhibitionLook {
   id: ExhibitionLookId;
+  /** Exact business identity supplied by an import manifest. */
+  sku?: string;
   name: string;
   description: string;
   /** Version-relative URL: clients should resolve through their version-aware app URL helper. */
   image: string;
   /** Independent XMAX input; omitted on legacy materials that reuse the display image. */
   referenceImage?: string;
+  referenceRoleSource?: 'independent' | 'legacy-shared';
   referenceImageInfo?: ExhibitionImageInfo;
   palette: string;
   mode: ExhibitionExperienceMode;
@@ -74,6 +77,7 @@ export function exhibitionReferenceImage(look: Pick<ExhibitionLook, 'image' | 'r
   return look.referenceKind === 'none' ? null : look.referenceImage ?? look.image;
 }
 export interface ExhibitionLookInput {
+  sku?: string;
   name: string;
   description?: string;
   mode?: ExhibitionExperienceMode;
@@ -123,7 +127,19 @@ export interface ExhibitionCommand {
   expectedRevision?: number;
 }
 
+export interface ExhibitionPublication {
+  revision: number;
+  publishedAt: number;
+  legacy: boolean;
+  /** Immutable display/reference versions. Draft edits never alter this list. */
+  looks: ExhibitionLook[];
+}
+export interface ExhibitionPublicationStatus {
+  revision: number; publishedAt: number; legacy: boolean;
+  lookIds: string[]; readyLookIds: string[]; unavailableLookIds: string[]; draftChanged: boolean;
+}
 export interface ExhibitionState {
+  publication?: ExhibitionPublication;
   lifecycle?: import('./exhibitionLifecycle.js').ExperienceLifecycle;
   /** Stable registered mirror; deviceId in live state is a separate browser lease. */
   mirrorId?: string;
@@ -272,7 +288,7 @@ export interface ExhibitionLiveSessionInput extends ExhibitionDeviceCredentials 
 export interface ExhibitionLiveReferenceInput {
   deviceId: string;
   lookId: string;
-  refImageUrl: string;
+  bindingId: string;
 }
 export interface ExhibitionLiveHeartbeatInput { deviceId: string; sessionId: string; }
 

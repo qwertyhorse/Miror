@@ -1,3 +1,4 @@
+import { readyReferenceFixture } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps, type ExhibitionSdkSession } from '../src/exhibition/useExhibitionLive';
 import type { ConnectOptions } from '../src/liveTryOn';
@@ -26,6 +27,7 @@ function fixture() {
   const sdk: ExhibitionSdkSession = { getSessionUid: vi.fn(() => 'ums-manual-stop'), set: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   let callbacks!: ConnectOptions;
   const deps = {
+    preparedReference: async () => readyReferenceFixture('https://fixture.example/ref.png'),
     create: vi.fn(async () => ({ ...local })), reference: vi.fn(async () => new File(['fixture'], 'fixture.png', { type: 'image/png' })),
     prepare: vi.fn(async () => {}), upload: vi.fn(async () => 'https://fixture.example/ref.png'),
     bind: vi.fn(async () => ({ ...local, refImageUrl: 'https://fixture.example/ref.png', referenceVersion: 1 })),

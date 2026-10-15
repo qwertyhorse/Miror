@@ -21,7 +21,7 @@ export class ReferencePreparationQueue {
     if (this.running) return;
     this.running = true;
     try {
-      const mirrors = this.mirrors().filter(mirror => mirror.configured && !mirror.state.live);
+      const mirrors = this.mirrors().filter(mirror => mirror.configured);
       const previous = mirrors.findIndex(mirror => mirror.id === this.lastMirrorId);
       const ordered = previous < 0 ? mirrors : [...mirrors.slice(previous + 1), ...mirrors.slice(0, previous + 1)];
       const candidates = ordered.map(mirror => ({ mirror, enabled: new Set(mirror.state.enabledLookIds) }));
@@ -38,7 +38,7 @@ export class ReferencePreparationQueue {
           const orderedLooks = lastLook < 0 ? looks : [...looks.slice(lastLook + 1), ...looks.slice(0, lastLook + 1)];
           for (const look of orderedLooks) {
             const status = mirror.status(look.id);
-            if (status.state === 'preparing' || status.state === 'unconfigured' || status.state === 'not_required'
+            if (status.refreshState === 'preparing' || (status.retryAt ?? 0) > this.now() || status.state === 'preparing' || status.state === 'unconfigured' || status.state === 'not_required'
               || (status.state === 'ready' && (status.freshUntil ?? 0) > this.now() + 5 * 60_000)
               || (status.state === 'failed' && (status.retryAt ?? 0) > this.now())) continue;
             if (status.state === 'failed') {

@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
@@ -36,23 +37,23 @@ async function fixture(options: { mode?: 'clothx' | 'free' | 'mox' } = {}) {
   const provider: Provider = { configured: true, issueKey: issue, deactivate,
     keyStatus: async token => keys.get(token)!, sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 1 }) };
   const resolveHost = vi.fn(async (_host: string): Promise<string[]> => ['8.8.8.8']);
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost });
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost });
   const mirrors = new ExhibitionMirrors(directory, { now: () => time }); mirrors.attachLiveService(service);
   const mirror = mirrors.getMirror();
   if (options.mode && options.mode !== 'clothx') {
     for (const look of mirror.get().looks) mirror.updateLook(look.id, { mode: options.mode,
       ...(options.mode === 'free' ? { prompt: `水彩效果 ${look.id}`, referenceKind: 'none' } : {}) });
   }
+  mirror.publishPublication({ expectedRevision: mirror.get().revision });
   mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0, ...(options.mode ? { experienceMode: options.mode } : {}) }); mirror.command({ action: 'begin' });
   const server = createApiServer(service, undefined, undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); resources.push({ directory, server, store });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
-  const postAt = (mirrorId: string, path: string, input: unknown) => fetch(base.replace(/default$/u, mirrorId) + path, { method: 'POST', headers: { origin: 'http://127.0.0.1:5173', 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(3_000) });
+  const postAt = (mirrorId: string, path: string, input: unknown) => fetch(base.replace(/default$/u, mirrorId) + path, { method: 'POST', headers: { origin: 'http://127.0.0.1:5173', 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(3_000) });
   const post = (path: string, input: unknown) => postAt('default', path, input);
   const deviceId = 'isolated-seamless-screen';
   const started = await post('/live/session', { deviceId, lookId: 'commute', generationNumber: mirror.get().generationNumber });
   expect(started.status).toBe(201); const session = await started.json();
-  if (options.mode !== 'free') expect((await post(`/live/session/${session.id}/reference`, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/commute.webp' })).status).toBe(200);
   expect((await post(`/sessions/${session.id}/link`, { providerSessionId: 'ums-isolated-seamless' })).status).toBe(200);
   expect((await post(`/sessions/${session.id}/first-frame`, { firstFrameMs: 125 })).status).toBe(200);
   const intent = () => ({ deviceId, lookId: mirror.get().selectedLookId, sessionNumber: mirror.get().sessionNumber, generationNumber: mirror.get().generationNumber });
@@ -68,7 +69,7 @@ describe('same-session exhibition material conditions over HTTP', () => {
       live: { sessionId: f.session.id, lookId: 'commute', generationNumber: 1, status: 'running' } });
     await f.mirror.reconcileLive(); expect(f.deactivate).not.toHaveBeenCalled();
     expect((await f.post('/live/session', { ...f.intent() })).status).toBe(409);
-    const boundResponse = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), refImageUrl: 'https://uploads.example/evening.webp' });
+    const boundResponse = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), bindingId: f.mirror.readyReference('evening', true)!.bindingId });
     expect(boundResponse.status).toBe(200); const bound = await boundResponse.json();
     expect(bound).toMatchObject({ id: f.session.id, providerSessionId: before.providerSessionId, firstFrameMs: 125, referenceVersion: 2,
       exhibition: { lookId: 'evening', generationNumber: 2 }, referenceAsset: '/assets/exhibition/evening-cutout.png' });
@@ -85,14 +86,15 @@ describe('same-session exhibition material conditions over HTTP', () => {
     expect(f.store.list()).toHaveLength(1); expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).not.toHaveBeenCalled();
   });
 
-  it('rejects stale uploads and acknowledgements when a newer material wins during DNS validation', async () => {
+  it('rejects stale prepared bindings and acknowledgements when a newer selection wins during reconciliation', async () => {
     const f = await fixture(); await f.post('/command', { action: 'switch', lookId: 'city' }); const middleIntent = f.intent();
-    const lookup = deferred<string[]>(); const entered = deferred<void>();
-    f.resolveHost.mockImplementationOnce(() => { entered.resolve(); return lookup.promise; });
-    const pending = f.post(`/live/session/${f.session.id}/condition`, { ...middleIntent, refImageUrl: 'https://uploads.example/city.webp' }); await entered.promise;
+    const lookup = deferred<void>(); const entered = deferred<void>();
+    const reconcile = f.mirror.reconcileLive.bind(f.mirror);
+    vi.spyOn(f.mirror, 'reconcileLive').mockImplementationOnce(async () => { entered.resolve(); await lookup.promise; await reconcile(); });
+    const pending = f.post(`/live/session/${f.session.id}/condition`, { ...middleIntent, bindingId: f.mirror.readyReference('city', true)!.bindingId }); await entered.promise;
     expect((await f.post('/command', { action: 'switch', lookId: 'evening' })).status).toBe(200);
-    const latest = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), refImageUrl: 'https://uploads.example/evening.webp' });
-    expect(latest.status).toBe(200); const bound = await latest.json(); lookup.resolve(['8.8.8.8']);
+    const latest = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), bindingId: f.mirror.readyReference('evening', true)!.bindingId });
+    expect(latest.status).toBe(200); const bound = await latest.json(); lookup.resolve();
     const stale = await pending; expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ error: { code: 'EXHIBITION_STALE_GENERATION' } });
     expect((await f.post(`/live/session/${f.session.id}/condition/applied`, { ...middleIntent, referenceVersion: bound.referenceVersion })).status).toBe(409);
     expect((await f.post(`/live/session/${f.session.id}/condition/applied`, { ...f.intent(), referenceVersion: bound.referenceVersion })).status).toBe(200);
@@ -104,11 +106,11 @@ describe('same-session exhibition material conditions over HTTP', () => {
   it('checks device, round, selection and exact reference version before exposing a new result', async () => {
     const f = await fixture(); await f.post('/command', { action: 'next' });
     for (const change of [{ deviceId: 'other-screen' }, { sessionNumber: 2 }, { generationNumber: 1 }, { lookId: 'evening' }]) {
-      const response = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), ...change, refImageUrl: 'https://uploads.example/city.webp' });
+      const response = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), ...change, bindingId: f.mirror.readyReference('city', true)!.bindingId });
       expect(response.status).toBe(409);
     }
-    const invalid = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), refImageUrl: 'http://uploads.example/city.webp' }); expect(invalid.status).toBe(400);
-    const bound = await (await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), refImageUrl: 'https://uploads.example/city.webp' })).json();
+    const invalid = await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), bindingId: 'unknown-binding' }); expect(invalid.status).toBe(409);
+    const bound = await (await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), bindingId: f.mirror.readyReference('city', true)!.bindingId })).json();
     for (const referenceVersion of [0, 1, 3, '2']) expect((await f.post(`/live/session/${f.session.id}/condition/applied`, { ...f.intent(), referenceVersion })).status).toBe(409);
     expect(f.mirror.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute' });
     expect((await f.post(`/live/session/${f.session.id}/condition/applied`, { ...f.intent(), referenceVersion: bound.referenceVersion })).status).toBe(200);
@@ -117,10 +119,11 @@ describe('same-session exhibition material conditions over HTTP', () => {
 
   it('cannot complete a pending condition after an explicit stop', async () => {
     const f = await fixture(); await f.post('/command', { action: 'next' }); const intent = f.intent();
-    const lookup = deferred<string[]>(); const entered = deferred<void>();
-    f.resolveHost.mockImplementationOnce(() => { entered.resolve(); return lookup.promise; });
-    const pending = f.post(`/live/session/${f.session.id}/condition`, { ...intent, refImageUrl: 'https://uploads.example/city.webp' }); await entered.promise;
-    expect((await f.post('/command', { action: 'end' })).status).toBe(200); lookup.resolve(['8.8.8.8']);
+    const lookup = deferred<void>(); const entered = deferred<void>();
+    const reconcile = f.mirror.reconcileLive.bind(f.mirror);
+    vi.spyOn(f.mirror, 'reconcileLive').mockImplementationOnce(async () => { entered.resolve(); await lookup.promise; await reconcile(); });
+    const pending = f.post(`/live/session/${f.session.id}/condition`, { ...intent, bindingId: f.mirror.readyReference('city', true)!.bindingId }); await entered.promise;
+    expect((await f.post('/command', { action: 'end' })).status).toBe(200); lookup.resolve();
     expect((await pending).status).toBe(409); expect(f.mirror.get()).toMatchObject({ phase: 'select', displayedLookId: null, live: null });
     expect(f.store.get(f.session.id)).toMatchObject({ status: 'stopped', referenceVersion: 1, exhibition: { lookId: 'commute' } });
     expect((await f.post(`/live/session/${f.session.id}/condition/applied`, { ...intent, referenceVersion: 1 })).status).toBe(409);
@@ -133,7 +136,7 @@ describe('same-session exhibition material conditions over HTTP', () => {
     expect(f.mirror.get()).toMatchObject({ phase: 'generating', selectedLookId: 'city', displayedLookId: 'commute', autoSwitchAt: null,
       live: { sessionId: f.session.id, lookId: 'commute', status: 'running' } });
     f.advance(4_000); await f.mirror.sweepLive(); expect(f.mirror.get().generationNumber).toBe(2);
-    const bound = await (await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), refImageUrl: 'https://uploads.example/city.webp' })).json();
+    const bound = await (await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), bindingId: f.mirror.readyReference('city', true)!.bindingId })).json();
     const acknowledged = await (await f.post(`/live/session/${f.session.id}/condition/applied`, { ...f.intent(), referenceVersion: bound.referenceVersion })).json();
     expect(acknowledged).toMatchObject({ phase: 'showcase', displayedLookId: 'city', autoSwitchAt: f.now() + 5_000 });
     f.advance(2_000);
@@ -157,7 +160,7 @@ describe('same-session exhibition material conditions over HTTP', () => {
     expect((await f.post('/command', { action: 'configure', experienceMode: 'clothx' })).status).toBe(409);
     expect((await f.post('/command', { action: 'next' })).status).toBe(200); await f.mirror.reconcileLive();
     expect(f.store.get(f.session.id).status).toBe('stopped'); expect(f.mirror.get()).toMatchObject({ phase: 'generating', selectedLookId: 'city', live: null });
-    expect((await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), refImageUrl: 'https://uploads.example/city.webp' })).status).toBe(409);
+    expect((await f.post(`/live/session/${f.session.id}/condition`, { ...f.intent(), bindingId: f.mirror.readyReference('city', true)!.bindingId })).status).toBe(409);
     expect(f.issue).toHaveBeenCalledOnce(); expect(f.deactivate).toHaveBeenCalledOnce();
   });
 
@@ -166,7 +169,7 @@ describe('same-session exhibition material conditions over HTTP', () => {
     const other = f.mirrors.create({ name: '另一个镜端' }); const before = f.store.get(f.session.id); const beforeState = f.mirror.get();
     f.resolveHost.mockClear();
     for (const suffix of ['condition', 'condition/applied']) {
-      const response = await f.postAt(other.id, `/live/session/${f.session.id}/${suffix}`, { ...f.intent(), refImageUrl: 'https://uploads.example/city.webp', referenceVersion: 2 });
+      const response = await f.postAt(other.id, `/live/session/${f.session.id}/${suffix}`, { ...f.intent(), bindingId: f.mirror.readyReference('city', true)!.bindingId, referenceVersion: 2 });
       expect(response.status).toBe(409); expect(await response.json()).toMatchObject({ code: 'EXHIBITION_MIRROR_MISMATCH' });
     }
     expect(f.store.get(f.session.id)).toEqual(before); expect(f.mirror.get()).toEqual(beforeState);

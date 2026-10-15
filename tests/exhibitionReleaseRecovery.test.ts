@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -31,7 +32,7 @@ function fixture() {
     issueKey: issue, keyStatus: query, deactivate: revoke,
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
   const providerForApiKey = vi.fn(() => provider);
-  const service = new TryOnService({ store, secrets, provider, providerForApiKey });
+  const service = new LifecycleTryOnService({ store, secrets, provider, providerForApiKey });
   const mirror = new ExhibitionService(directory); mirror.attachLiveService(service);
   mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
   const create = () => mirror.createLiveSession({ deviceId: 'isolated-recovery-screen', lookId: 'commute', generationNumber: mirror.get().generationNumber });

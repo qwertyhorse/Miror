@@ -1,3 +1,4 @@
+import { withLifecycleReferenceDelivery } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -155,12 +156,12 @@ describe('independent configuration snapshots', () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now });
     const a = manager.getMirror(); const bId = manager.create({ name: '目标设备' }).id;
     const stop = vi.fn();
-    const liveService = {
+    const liveService = withLifecycleReferenceDelivery({
       status: () => ({ configured: true }),
       createExhibition: vi.fn(async (_input, hooks) => { hooks.onReserved('source-session'); return { id: 'source-session' }; }),
       get: vi.fn(async () => ({ status: 'active', expiresAt: new Date(now() + 120000).toISOString() })),
       stop,
-    } as unknown as TryOnService;
+    } as unknown as TryOnService);
     manager.attachLiveService(liveService);
     a.command({ action: 'configure', providerMode: 'xmax' });
     const active = a.command({ action: 'begin' });

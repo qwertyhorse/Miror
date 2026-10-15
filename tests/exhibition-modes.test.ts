@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes } from 'node:crypto';
@@ -33,7 +34,7 @@ function liveFixture() {
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!,
     deactivate: async token => { const status = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, status); return status; },
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
-  const live = new TryOnService({ store, provider, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], resolveHost: async () => ['8.8.8.8'] });
+  const live = new LifecycleTryOnService({ store, provider, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], resolveHost: async () => ['8.8.8.8'] });
   base.service.attachLiveService(live);
   return { ...base, live, store, issue, provider };
 }
@@ -181,6 +182,7 @@ describe('authoritative exhibition mode session snapshots', () => {
   it('creates and links prompt-only Free sessions without using or binding their cover', async () => {
     const { service, live, store, issue } = liveFixture();
     service.updateLook('commute', { mode: 'free', prompt: '视频变成水彩画', referenceKind: 'none' });
+    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax', experienceMode: 'free', autoReturnSeconds: 0 });
     service.command({ action: 'begin' });
     const session = await create(service);
@@ -205,14 +207,13 @@ describe('authoritative exhibition mode session snapshots', () => {
   it.each(EXHIBITION_EXPERIENCE_MODES)('snapshots %s inputs before issuance and retains reference binding and first-frame evidence', async mode => {
     const { service, live, store, issue } = liveFixture();
     setLookMode(service, 'commute', mode, mode === 'free' ? '人物变成水彩画' : undefined);
+    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax', experienceMode: mode, autoReturnSeconds: 0 });
     service.command({ action: 'begin' });
     const session = await create(service, { mode: 'free', prompt: 'untrusted client prompt' });
     expect(session).toMatchObject({ sourceKind: mode === 'mox' ? 'photo' : 'camera', exhibition: { mode, prompt: exhibitionPromptForLook(service.get().looks[0]), mirrorId: 'default' } });
     expect(session.exhibition?.prompt).not.toBe('untrusted client prompt');
     expect(store.get(session.id).exhibition).toEqual(session.exhibition); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
-    await expect(live.link(session.id, `ums-${mode}`)).rejects.toMatchObject({ code: 'REFERENCE_NOT_READY' });
-    await service.bindLiveReference(session.id, { deviceId: 'screen-mode-test', lookId: 'commute', refImageUrl: 'https://uploads.example/reference.webp' });
     await live.link(session.id, `ums-${mode}`); await live.firstFrame(session.id, 200); service.liveFirstFrame(session.id, 200);
     expect(service.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'commute' });
     await live.link(session.id, `ums-${mode}`); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
@@ -220,6 +221,7 @@ describe('authoritative exhibition mode session snapshots', () => {
 
   it('rejects a different-mode live material and empty modes without allocating credits', async () => {
     const { service, issue, store } = liveFixture(); setLookMode(service, 'city', 'charx');
+    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax' }); service.command({ action: 'begin' });
     await expect(create(service, { lookId: 'city' })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_LOOK' });
     service.command({ action: 'end' }); setMode(service, 'mox');
@@ -230,6 +232,7 @@ describe('authoritative exhibition mode session snapshots', () => {
 
   it('does not change mode while any live lease is stopping, and resumes MoX with a new photo generation', async () => {
     const { service, provider, store, issue } = liveFixture(); setLookMode(service, 'commute', 'mox');
+    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax', experienceMode: 'mox' }); service.command({ action: 'begin' });
     const session = await create(service); const generation = service.get().generationNumber;
     service.command({ action: 'pause' }); await service.reconcileLive();

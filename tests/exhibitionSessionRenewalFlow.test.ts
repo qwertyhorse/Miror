@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -48,7 +49,7 @@ function fixture(expireSeconds = 120, decart = false) {
   const credentials = new MirrorCredentialStore(directory, secrets);
   if (decart) credentials.saveProvider('default', { provider: 'decart', apiKey: 'dct_fixture', expectedRevision: 0 }, true);
   const decartFetch = vi.fn<typeof fetch>(async (_url, init) => Response.json({ apiKey: 'ek_fixture', expiresAt: new Date(Date.now() + 30_000).toISOString(), constraints: JSON.parse(init!.body as string).constraints }));
-  const service = new TryOnService({ provider, store, secrets, mirrorCredentials: credentials, decartProvider: key => new DecartProvider(key, decartFetch), resolveHost: async () => ['8.8.8.8'] });
+  const service = new LifecycleTryOnService({ provider, store, secrets, mirrorCredentials: credentials, decartProvider: key => new DecartProvider(key, decartFetch), resolveHost: async () => ['8.8.8.8'] });
   const exhibition = new ExhibitionService(directory, { now: () => Date.now() }); exhibition.attachLiveService(service);
   exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 90, sessionLimits: { credits: null, expireSeconds } });
   exhibition.command({ action: 'begin' });
@@ -59,6 +60,7 @@ function fixture(expireSeconds = 120, decart = false) {
   const sdks: Array<{ disconnect: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> }> = [];
   const statesAfterStopRoute: ExhibitionState[] = [];
   const deps = {
+    preparedReference: vi.fn(async (input: Input) => exhibition.readyReference(input.lookId, true)),
     create: vi.fn(async (input: Input) => {
       const created = await exhibition.createLiveSession(input);
       if (!created.exhibition) throw new Error('Missing exhibition ownership');
@@ -178,20 +180,29 @@ describe('continuous exhibition renewal across the real services and client life
 });
 
 
-it('renews ten Decart segments through the shared client and durable experience without overlapping or using XMAX', async () => {
-  const f = fixture(120, true);
-  for (let segment = 0; segment < 10; segment++) {
+it.each([false, true])('simulates four hours of continuous bounded segments (Decart=%s) without overlapping leases', async decart => {
+  const f = fixture(120, decart);
+  const segments = 138; // 138 × 105 seconds = 4h 1m 30s of simulated exhibition time.
+  const dns = vi.fn(async () => { throw new Error('DNS unavailable during exhibition'); });
+  f.service.options.resolveHost = dns;
+  for (let segment = 0; segment < segments; segment++) {
     const connection = f.connection(); await f.ready(connection);
     const id = connection.sessionId!;
     expect(f.store.list().filter(row => row.status === 'active')).toHaveLength(1);
     expect(f.exhibition.get()).toMatchObject({ phase: 'showcase', sessionNumber: 1, generationNumber: segment + 1 });
     await vi.advanceTimersByTimeAsync(105_000);
-    expect(f.store.get(id)).toMatchObject({ status: 'stopped', releaseEvidence: 'client_transport_closed' });
+    expect(f.store.get(id)).toMatchObject({ status: 'stopped', ...(decart ? { releaseEvidence: 'client_transport_closed' } : {}) });
     expect(f.exhibition.get()).toMatchObject({ phase: 'generating', sessionNumber: 1, live: null });
   }
   f.exhibition.command({ action: 'end' }); await f.exhibition.reconcileLive();
   await vi.advanceTimersByTimeAsync(120_000);
-  expect(f.decartFetch).toHaveBeenCalledTimes(10);
-  expect(f.issue).not.toHaveBeenCalled(); expect(f.deactivate).not.toHaveBeenCalled();
+  expect(f.decartFetch).toHaveBeenCalledTimes(decart ? segments : 0);
+  expect(f.issue).toHaveBeenCalledTimes(decart ? 0 : segments);
+  expect(f.deactivate).toHaveBeenCalledTimes(decart ? 0 : segments);
+  expect(f.activeKeysAtIssue.every(count => count === 0)).toBe(true);
+  expect(f.store.list()).toHaveLength(segments);
+  expect(f.store.list().every(record => record.status === 'stopped')).toBe(true);
+  expect(dns).not.toHaveBeenCalled();
+  expect(f.deps.upload).not.toHaveBeenCalled();
   expect(f.deps.reportError).not.toHaveBeenCalled(); expect(f.originalStop).not.toHaveBeenCalled();
-});
+}, 30_000);

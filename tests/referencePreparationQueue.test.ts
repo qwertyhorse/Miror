@@ -40,13 +40,13 @@ it('prioritizes selections across mirrors and rotates mirrors for equal priority
   expect(calls).toEqual(['a:selected', 'b:selected', 'a:enabled', 'b:enabled', 'a:unused', 'b:unused']);
 });
 
-it('skips live mirrors, unconfigured mirrors and prompt-only material', async () => {
+it('maintains live mirrors while skipping unconfigured mirrors and prompt-only material', async () => {
   const active = fixture('live'); active.mirror.state.live = {} as NonNullable<ReferencePreparationMirror['state']['live']>;
   const unconfigured = fixture('unconfigured'); unconfigured.mirror.configured = false;
   const f = fixture(); f.mirror.state.looks[2].referenceKind = 'none';
   const queue = new ReferencePreparationQueue(() => [active.mirror, unconfigured.mirror, f.mirror], () => 1_000);
-  await queue.runOnce();
-  expect(active.calls).toEqual([]); expect(unconfigured.calls).toEqual([]); expect(f.calls).toEqual(['enabled']);
+  await queue.runOnce(); await queue.runOnce();
+  expect(active.calls).toEqual(['selected']); expect(unconfigured.calls).toEqual([]); expect(f.calls).toEqual(['enabled']);
 });
 
 it('skips pending and cooling-down work without blocking other materials, then retries after cooldown', async () => {

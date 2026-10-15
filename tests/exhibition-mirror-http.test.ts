@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes } from 'node:crypto';
@@ -33,13 +34,13 @@ async function fixture(totalLimit = 360) {
   const sessionStatus = vi.fn(async (_token: string, sessionUid: string) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }));
   const provider: Provider = { configured: true, issueKey: issue, deactivate, keyStatus, sessionStatus };
   const resolveHost = vi.fn(async () => ['8.8.8.8']);
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], totalLimit, resolveHost });
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], totalLimit, resolveHost });
   const mirrors = new ExhibitionMirrors(directory);
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', protocol = '2') => fetch(base + path, {
-    method, headers: { 'X-Miror-Protocol': protocol, 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+    method, headers: { 'X-Miror-Protocol': protocol, 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
     ...(value === undefined ? {} : { body: JSON.stringify(value) }),
   });
   const root = (id: string) => `/api/exhibition/mirrors/${id}`;
@@ -62,7 +63,7 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     expect(issue).not.toHaveBeenCalled();
   });
 
-  it('returns a reference DNS failure without binding, linking, or allocating another credential', async () => {
+  it('uses the prepared binding despite DNS outage and rejects client URL replacement', async () => {
     const { request, root, start, resolveHost, store, issue, sessionStatus } = await fixture();
     const input = start('default');
     const created = await request(root('default') + '/live/session', input);
@@ -71,9 +72,10 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     const failed = await request(root('default') + `/live/session/${session.id}/reference`, {
       deviceId: input.deviceId, lookId: input.lookId, refImageUrl: 'https://uploads.example/a.webp',
     });
-    expect(failed.status).toBe(502);
-    expect(await failed.json()).toMatchObject({ code: 'MEDIA_DNS_UNAVAILABLE', message: '素材地址解析失败，请重试。' });
-    expect(store.get(session.id)).toMatchObject({ referenceVersion: 0, refImageUrl: '' });
+    expect(failed.status).toBe(409);
+    expect(await failed.json()).toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
+    expect(resolveHost).not.toHaveBeenCalled();
+    expect(store.get(session.id)).toMatchObject({ referenceVersion: 1, refImageUrl: expect.stringMatching(/^https:/) });
     expect(store.get(session.id).providerSessionId).toBeUndefined();
     expect(issue).toHaveBeenCalledOnce(); expect(sessionStatus).not.toHaveBeenCalled();
     const stopped = await request(root('default') + `/sessions/${session.id}/stop`, {});
@@ -187,8 +189,7 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
       const input = start(mirror.id);
       const response = await request(root(mirror.id) + '/live/session', input);
       expect(response.status).toBe(201); const session = await response.json(); sessions.push(session);
-      const reference = await request(root(mirror.id) + `/live/session/${session.id}/reference`, { ...input, refImageUrl: `https://uploads.example/${mirror.id}.webp` });
-      expect(reference.status).toBe(200);
+      expect(session.referenceVersion).toBe(1);
       expect((await request(root(mirror.id) + `/sessions/${session.id}/link`, { providerSessionId: `ums-${mirror.id}` })).status).toBe(200);
       expect((await request(root(mirror.id) + `/sessions/${session.id}/first-frame`, { firstFrameMs: 120 })).status).toBe(200);
       expect(mirrors.getMirror(mirror.id).get().phase).toBe('showcase');
@@ -241,7 +242,7 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     const other = mirrors.create({ name: '新镜' });
     expect((await request(root(other.id) + `/sessions/${session.id}`)).status).toBe(409);
     await expect(service.bindExhibitionReference(session.id, { ...input, mirrorId: other.id, refImageUrl: 'https://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_MIRROR_MISMATCH' });
-    await expect(service.bindExhibitionReference(session.id, { ...input, refImageUrl: 'https://uploads.example/a.webp' })).resolves.toMatchObject({ exhibition: { mirrorId: 'default' } });
+    await expect(service.bindExhibitionReference(session.id, { ...input, refImageUrl: 'https://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
   });
 
   it('rejects another mirror’s reference asset before reserving any credits', async () => {

@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes } from 'node:crypto';
@@ -27,7 +28,7 @@ function fixture() {
   const deactivate = vi.fn(async (token: string) => { const value = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, value); return value; });
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!, deactivate,
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)),
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)),
     resolveHost: async host => host === 'private.example' ? ['127.0.0.1'] : ['8.8.8.8'] });
   const exhibition = new ExhibitionService(directory, { now: () => time }); exhibition.attachLiveService(service);
   return { exhibition, service, provider, store, issue, deactivate, keys, directory, now: () => time, advance: (amount: number) => { time += amount; } };
@@ -55,7 +56,7 @@ describe('explicit exhibition XMAX path', () => {
     try {
       for (const sourceKind of ['photo', 'camera']) {
         const response = await fetch(base + '/api/sessions', {
-          method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+          method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
           body: JSON.stringify({ targetItemId: 'real-inner', sourceId: 'test', sourceKind, sourceName: 'test' }),
         });
         expect(response.status).toBe(404);
@@ -74,12 +75,10 @@ describe('explicit exhibition XMAX path', () => {
     expect(exhibition.get()).toEqual(started); expect(issue).not.toHaveBeenCalled();
     await expect(exhibition.createLiveSession({ deviceId, lookId: 'city', generationNumber: exhibition.get().generationNumber })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_LOOK' });
     const session = await create(exhibition);
-    expect(session).toMatchObject({ model: 'x2.0', referenceAsset: '/assets/exhibition/commute-cutout.png', refImageUrl: '', sourceKind: 'camera', pointsLimit: CONTINUOUS_SEGMENT_CREDITS, exhibition: { lookId: 'commute', deviceId, sessionNumber: 1, continuous: true } });
+    expect(session).toMatchObject({ model: 'x2.0', referenceAsset: '/assets/exhibition/commute-cutout.png', refImageUrl: expect.stringMatching(/^https:/), sourceKind: 'camera', pointsLimit: CONTINUOUS_SEGMENT_CREDITS, exhibition: { lookId: 'commute', deviceId, sessionNumber: 1, continuous: true } });
     expect(issue).toHaveBeenCalledWith(CONTINUOUS_SEGMENT_CREDITS, 120); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     expect(JSON.stringify(exhibition.get())).not.toContain(session.token); expect(readFileSync(join(directory, 'exhibition.json'), 'utf8')).not.toContain(session.token);
     advance(5000); expect(exhibition.get().phase).toBe('generating');
-    await expect(service.link(session.id, 'ums-test')).rejects.toMatchObject({ code: 'REFERENCE_NOT_READY' });
-    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/garment.webp' });
     await service.link(session.id, 'ums-test'); await service.firstFrame(session.id, 750); exhibition.liveFirstFrame(session.id, 750);
     expect(exhibition.get()).toMatchObject({ phase: 'showcase', displayedLookId: 'commute', live: { status: 'running', firstFrameMs: 750 } });
   });
@@ -97,7 +96,6 @@ describe('explicit exhibition XMAX path', () => {
     const bytes = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#bfbcff88' } }).png().toBuffer();
     const input = { name: '现场新增服装', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), referenceImageBase64: bytes.toString('base64'), expectedRevision: 0 };
     start(exhibition); const session = await create(exhibition);
-    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/garment.webp' });
     await service.link(session.id, 'ums-active-upload');
     const pending = exhibition.upload(input);
     advance(5000); exhibition.heartbeat({ deviceId, sessionId: session.id });
@@ -118,13 +116,12 @@ describe('explicit exhibition XMAX path', () => {
     expect(deactivate).toHaveBeenCalledTimes(1); expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
-  it('checks reference and heartbeat ownership, rejects private reference addresses, and locks an accepted reference', async () => {
+  it('checks reference and heartbeat ownership and rejects all URL rebinding of the prepared reference', async () => {
     const { exhibition } = fixture(); start(exhibition); const session = await create(exhibition);
     expect(() => exhibition.heartbeat({ deviceId: 'other-screen', sessionId: session.id })).toThrow(expect.objectContaining({ code: 'EXHIBITION_OWNER_MISMATCH' }));
     await expect(exhibition.bindLiveReference(session.id, { deviceId: 'other-screen', lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
-    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'http://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'INVALID_REMOTE_URL' });
-    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://private.example/a.webp' })).rejects.toMatchObject({ code: 'REFERENCE_ADDRESS_BLOCKED' });
-    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
+    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'http://uploads.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
+    await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://private.example/a.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
     await expect(exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/b.webp' })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
   });
 
@@ -154,7 +151,6 @@ describe('explicit exhibition XMAX path', () => {
   it('switches a running camera outfit in the same experience and requires a current condition acknowledgement', async () => {
     const { exhibition, service, store, issue, deactivate, advance } = fixture(); start(exhibition);
     const previous = await create(exhibition);
-    await exhibition.bindLiveReference(previous.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/commute.webp' });
     await service.link(previous.id, 'ums-direct-switch-old');
     await service.firstFrame(previous.id, 100); exhibition.liveFirstFrame(previous.id, 100);
     const showcased = exhibition.get();
@@ -176,7 +172,7 @@ describe('explicit exhibition XMAX path', () => {
     advance(5_000); exhibition.liveFirstFrame(previous.id, 300);
     expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute', live: { sessionId: previous.id } });
     const intent = { deviceId, lookId: 'evening', sessionNumber: switching.sessionNumber, generationNumber: switching.generationNumber };
-    const updated = await exhibition.updateLiveCondition(previous.id, { ...intent, refImageUrl: 'https://uploads.example/evening.webp' });
+    const updated = await exhibition.updateLiveCondition(previous.id, { ...intent, bindingId: exhibition.readyReference('evening', true)!.bindingId });
     expect(updated).toMatchObject({ id: previous.id, providerSessionId: 'ums-direct-switch-old', referenceVersion: 2,
       exhibition: { lookId: 'evening', sessionNumber: showcased.sessionNumber, generationNumber: switching.generationNumber } });
     expect(exhibition.get()).toMatchObject({ phase: 'generating', displayedLookId: 'commute' });
@@ -316,7 +312,6 @@ describe('explicit exhibition XMAX path', () => {
   it('distinguishes rapid pause/resume generations so an old frame or error cannot complete the new attempt', async () => {
     const { exhibition, service, store } = fixture(); start(exhibition); const oldGeneration = exhibition.get().generationNumber;
     const session = await create(exhibition);
-    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
     await service.link(session.id, 'ums-old');
     exhibition.command({ action: 'pause' });
     expect(() => exhibition.command({ action: 'resume' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
@@ -349,7 +344,6 @@ describe('explicit exhibition XMAX path', () => {
 
   it('coalesces concurrent stop requests and rechecks provider linking after an in-flight stop', async () => {
     const { exhibition, service, provider, keys, store } = fixture(); start(exhibition); const session = await create(exhibition);
-    await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
     let finishLink!: () => void; let finishStop!: () => void;
     provider.sessionStatus = (_token, sessionUid) => new Promise(resolve => { finishLink = () => resolve({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }); });
     const linking = service.link(session.id, 'ums-late-link');
@@ -390,7 +384,7 @@ describe('live HTTP integration uses mock provider only', () => {
     const exhibition = mirrors.getMirror('default');
     const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-    const headers = { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
+    const headers = { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
     const mirrorPath = '/api/exhibition/mirrors/default';
     const post = async (path: string, input: unknown) => {
       const response = await fetch(base + path, { method: 'POST', headers, body: JSON.stringify(input) });
@@ -403,7 +397,6 @@ describe('live HTTP integration uses mock provider only', () => {
       await post(mirrorPath + '/command', { action: 'configure', providerMode: 'xmax' });
       expect(await post(mirrorPath + '/command', { action: 'begin' })).toMatchObject({ phase: 'generating', sessionNumber: 1, generationNumber: 1, generationReadyAt: null });
       const session = await post(mirrorPath + '/live/session', { deviceId, lookId: 'commute', generationNumber: exhibition.get().generationNumber });
-      await post(`${mirrorPath}/live/session/${session.id}/reference`, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/a.webp' });
       await post(`${mirrorPath}/sessions/${session.id}/link`, { providerSessionId: 'ums-http-session' });
       await post(`${mirrorPath}/sessions/${session.id}/first-frame`, { firstFrameMs: 111 });
       expect(exhibition.get().phase).toBe('showcase');
@@ -414,7 +407,7 @@ describe('live HTTP integration uses mock provider only', () => {
       await exhibition.reconcileLive();
       expect(store.get(session.id).status).toBe('active');
       const intent = { deviceId, lookId: 'evening', sessionNumber: switched.sessionNumber, generationNumber: switched.generationNumber };
-      const updated = await post(`${mirrorPath}/live/session/${session.id}/condition`, { ...intent, refImageUrl: 'https://uploads.example/evening.webp' });
+      const updated = await post(`${mirrorPath}/live/session/${session.id}/condition`, { ...intent, bindingId: exhibition.readyReference('evening', true)!.bindingId });
       expect(await post(`${mirrorPath}/live/session/${session.id}/condition/applied`, { ...intent, referenceVersion: updated.referenceVersion }))
         .toMatchObject({ phase: 'showcase', displayedLookId: 'evening', live: { sessionId: session.id, status: 'running' } });
       const stopped = await post(mirrorPath + '/command', { action: 'end' }); expect(stopped).toMatchObject({ phase: 'select', live: null });

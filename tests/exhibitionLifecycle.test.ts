@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -25,7 +26,7 @@ function fixture() {
     deactivate: vi.fn(async token => { const value = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, value); return value; }),
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 0 }),
   };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost: async () => ['8.8.8.8'] });
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost: async () => ['8.8.8.8'] });
   const open = () => { const mirror = new ExhibitionService(directory, { now: () => now }); mirror.attachLiveService(service); return mirror; };
   const mirror = open();
   mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
@@ -33,7 +34,6 @@ function fixture() {
   const connect = async () => {
     const state = mirror.get();
     const session = await mirror.createLiveSession({ deviceId: owner, lookId: state.selectedLookId, generationNumber: state.generationNumber, expectedRevision: state.revision });
-    await mirror.bindLiveReference(session.id, { deviceId: owner, lookId: state.selectedLookId, refImageUrl: 'https://fixture.example/image.webp' });
     await service.link(session.id, `ums-${session.id}`);
     await service.firstFrame(session.id, 100); mirror.liveFirstFrame(session.id, 100);
     return session;

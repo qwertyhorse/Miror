@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -186,12 +187,12 @@ describe('camera control HTTP contract', () => {
   it('opens only the bound terminal, reports through authenticated polls, and gates start without making XMAX calls', async () => {
     const f = fixture(); const store = new SessionStore(':memory:'); f.resource.store = store;
     const issueKey = vi.fn();
-    const service = new TryOnService({ store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [],
+    const service = new LifecycleTryOnService({ store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [],
       provider: { configured: true, issueKey, keyStatus: vi.fn(), deactivate: vi.fn(), sessionStatus: vi.fn() } });
     const origin = 'http://xuminghong.local:10200'; const server = createApiServer(service, [origin], undefined, f.mirrors); f.resource.server = server;
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition`;
-    const post = (path: string, data: unknown, from = origin) => fetch(base + path, { method: 'POST', headers: { Origin: from, 'Content-Type': 'application/json', 'x-miror-protocol': '2' }, body: JSON.stringify(data) });
+    const post = (path: string, data: unknown, from = origin) => fetch(base + path, { method: 'POST', headers: { Origin: from, 'Content-Type': 'application/json', 'x-miror-protocol': '2', 'x-miror-material': 'binding-v1' }, body: JSON.stringify(data) });
     expect((await post('/mirrors/default/camera', { action: 'open', terminalId: f.device.terminalId }, 'https://wrong.example')).status).toBe(403);
     const devices = Array.from({ length: 24 }, (_, index) => ({ id: '镜'.repeat(510) + String(index).padStart(2, '0'), label: '摄'.repeat(120), kind: 'unknown' as const }));
     const metadata = { ...f.device, cameraReport: f.report({ devices, selectedDeviceId: devices[0].id, activeDeviceId: devices[0].id, error: '错'.repeat(240) }) };

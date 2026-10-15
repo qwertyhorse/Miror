@@ -1,7 +1,6 @@
 import { DecartProvider } from './decart.ts';
 import { DECART_MODEL, isDecartReference } from '../shared/providers.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { isBenchmarkAddress } from './network.ts';
 import { ApiError, type Provider, type SessionRecord, type SessionRequest } from './types.ts';
@@ -13,6 +12,7 @@ import { EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibit
 
 import { ReferenceAssets, type ReferenceStorage } from './referenceAssets.ts';
 import { referenceStorage } from './referenceStorage.ts';
+import type { ReferenceDeliveryIdentity } from '../shared/referenceDelivery.ts';
 import type { ReferencePreparationStatus } from '../shared/referencePreparation.ts';
 import { CONTINUOUS_SEGMENT_CREDITS, DEFAULT_CREDENTIAL_LIMITS, isSessionLimits, type ExhibitionSessionLimits } from '../shared/sessionLimits.ts';
 
@@ -38,12 +38,6 @@ export function publicAddress(address: string): boolean {
     return !(/^(::|fc|fd|fe[89ab]|ff|2001:db8)/.test(lower));
   }
   return false;
-}
-function httpsUrl(value: string): URL {
-  let url: URL;
-  try { url = new URL(value); } catch { throw new ApiError('INVALID_REMOTE_URL', '媒体链接无效。'); }
-  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443') || url.hash || isIP(url.hostname)) throw new ApiError('INVALID_REMOTE_URL', '仅允许已核验的 HTTPS 媒体链接。');
-  return url;
 }
 function boundedText(value: unknown, name: string, max = 150): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u001f]/.test(value)) throw new ApiError('INVALID_INPUT', `${name}无效。`);
@@ -73,10 +67,10 @@ export class TryOnService {
     if (this.hasBlockingMirrorSessions(mirrorId)) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '上一轮连接正在释放，请稍候。', 409);
     this.options.mirrorCredentials?.activateProvider(mirrorId);
   }
-  saveProviderSettings(mirrorId: string, input: { provider?: unknown; apiKey?: unknown; expectedRevision?: unknown }, editable: boolean) {
+  saveProviderSettings(mirrorId: string, input: { provider?: unknown; apiKey?: unknown; expectedRevision?: unknown }, editable: boolean, readyToApply = false) {
     if (!this.options.mirrorCredentials) throw new ApiError('SETTINGS_UNAVAILABLE', '当前服务不支持设置。', 503);
     if (input.apiKey && this.providerSettings(mirrorId)?.active === 'decart' && !editable) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请先结束体验，再更换当前服务的密钥。', 409);
-    return this.options.mirrorCredentials.saveProvider(mirrorId, input, editable && !this.hasBlockingMirrorSessions(mirrorId), this.options.provider.configured);
+    return this.options.mirrorCredentials.saveProvider(mirrorId, input, editable && readyToApply && !this.hasBlockingMirrorSessions(mirrorId), this.options.provider.configured);
   }
   requestProviderSwitch(mirrorId: string, revision: unknown) { this.options.mirrorCredentials?.requestProviderSwitch(mirrorId, revision); }
   finishProviderSwitch(mirrorId: string) { if (this.providerSettings(mirrorId)?.applyAfterStop && !this.hasBlockingMirrorSessions(mirrorId)) this.options.mirrorCredentials?.activateProvider(mirrorId); }
@@ -84,8 +78,8 @@ export class TryOnService {
     const key = this.options.mirrorCredentials?.decartKey(mirrorId);
     await this.decart(key ?? '').verify(); return { authenticated: true, model: DECART_MODEL, generationStarted: false };
   }
-  private credentialContext(mirrorId?: string): { provider: Provider; scope: string; region: XmaxRegion; key?: string } {
-    if (mirrorId !== undefined && this.providerSettings(mirrorId)?.active === 'decart') {
+  private credentialContext(mirrorId?: string, target?: 'xmax' | 'decart'): { provider: Provider; scope: string; region: XmaxRegion; key?: string } {
+    if (mirrorId !== undefined && (target === 'decart' || (!target && this.providerSettings(mirrorId)?.active === 'decart'))) {
       const key = this.options.mirrorCredentials?.decartKey(mirrorId) ?? '';
       return { provider: this.decart(key), scope: apiKeyBudgetScope(key), region: 'global', key };
     }
@@ -117,31 +111,45 @@ export class TryOnService {
     };
     return new TryOnService({ ...this.options, provider, mirrorCredentials: undefined });
   }
-  private referenceContext(mirrorId: string) {
-    const context = this.credentialContext(mirrorId);
+  private referenceContext(mirrorId: string, target?: 'xmax' | 'decart') {
+    const context = this.credentialContext(mirrorId, target);
     const scope = createHash('sha256').update(`${context.provider.kind === 'decart' ? 'decart:' : ''}${context.region}:${context.scope}`).digest('hex');
     return { ...context, scope };
   }
-  readyReference(mirrorId: string, bytes: Buffer, mime: string) {
-    const context = this.referenceContext(mirrorId);
+  readyReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart') {
+    const context = this.referenceContext(mirrorId, target);
     return context.provider.configured ? this.options.referenceAssets?.ready({ scope: context.scope, bytes, mime }) ?? null : null;
   }
-  referencePreparationStatus(mirrorId: string, sha256: string, mime: string): ReferencePreparationStatus {
-    const context = this.referenceContext(mirrorId);
+  isReferenceReadyForProvider(mirrorId: string, expected: ReferenceDeliveryIdentity, target: 'xmax' | 'decart'): boolean {
+    const context = this.referenceContext(mirrorId, target);
+    const ready = context.provider.configured ? this.options.referenceAssets?.ready({ ...expected, scope: context.scope }) : null;
+    return !!ready && !!this.options.referenceAssets?.acquire(ready.bindingId, { ...expected, scope: context.scope });
+  }
+  assertReferenceBinding(mirrorId: string, bindingId: unknown, expected: ReferenceDeliveryIdentity | undefined, sessionId?: string) {
+    const scope = this.referenceContext(mirrorId).scope;
+    const record = sessionId ? this.options.store.get(sessionId) : undefined;
+    if (!expected || typeof bindingId !== 'string' || (record && record.referenceScope !== scope))
+      throw new ApiError('REFERENCE_BINDING_INVALID', '素材授权已更新，请重新选择。', 409);
+    const ready = this.options.referenceAssets?.acquire(bindingId, { ...expected, scope });
+    if (!ready) throw new ApiError('REFERENCE_NOT_READY', '这件素材暂不可用，请选择其他素材。', 409);
+    return ready;
+  }
+  referencePreparationStatus(mirrorId: string, sha256: string, mime: string, target?: 'xmax' | 'decart'): ReferencePreparationStatus {
+    const context = this.referenceContext(mirrorId, target);
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return { state: 'unconfigured' };
     return this.options.referenceAssets.status({ scope: context.scope, sha256, mime });
   }
-  async prepareReference(mirrorId: string, bytes: Buffer, mime: string) {
-    const context = this.referenceContext(mirrorId);
+  async prepareReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart') {
+    const context = this.referenceContext(mirrorId, target);
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return null;
     let provider = this.referenceProviders.get(context.scope);
     if (!provider) {
-      provider = context.provider.kind === 'decart' ? this.decart(context.key).references() : this.options.referenceStorage?.(context.key, context.region) ?? referenceStorage(context.key, context.region);
+      provider = context.provider.kind === 'decart' ? this.decart(context.key).references() : this.options.referenceStorage?.(context.key, context.region) ?? referenceStorage(context.key, context.region, fetch, this.options.resolveHost);
       this.referenceProviders.set(context.scope, provider);
       while (this.referenceProviders.size > 16) this.referenceProviders.delete(this.referenceProviders.keys().next().value!);
     }
     const prepared = await this.options.referenceAssets.prepare({ scope: context.scope, bytes, mime }, provider);
-    return this.referenceContext(mirrorId).scope === prepared.scope ? prepared : null;
+    return this.referenceContext(mirrorId, target).scope === prepared.scope ? prepared : null;
   }
   private sessionProvider(record: SessionRecord): Provider {
     const region = record.providerRegion ?? 'global';
@@ -414,20 +422,13 @@ export class TryOnService {
       throw new ApiError('STOP_NOT_CONFIRMED', '临时凭证停止尚未确认，请重试停止。', 502);
     }
   }
-  async bindExhibitionReference(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; refImageUrl: string }) {
+  async bindExhibitionReference(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; bindingId?: string; refImageUrl?: string }, expectedReference?: ReferenceDeliveryIdentity) {
     this.assertSessionMirror(id, input.mirrorId ?? 'default', true);
     const record = this.options.store.get(id);
     if (!record.exhibition || record.exhibition.deviceId !== input.deviceId || record.exhibition.lookId !== input.lookId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前设备或服装与会话不匹配。', 409);
     if (record.exhibition.mode === 'free' && record.referenceAsset === '') throw new ApiError('EXHIBITION_REFERENCE_NOT_REQUIRED', '此 Free 素材仅使用提示词，不能绑定封面或参考图。', 409);
     if (record.status !== 'active' || record.providerSessionId || record.refImageUrl) throw new ApiError('EXHIBITION_REFERENCE_LOCKED', '展会参考图已锁定或会话已结束。', 409);
-    const refImageUrl = boundedText(input.refImageUrl, '参考图链接', 4096);
-    if (record.providerId === 'decart') {
-      if (!isDecartReference(refImageUrl)) throw new ApiError('INVALID_REMOTE_URL', 'Decart 素材引用无效。');
-      return this.public(this.options.store.update(id, { refImageUrl, referenceVersion: 1 }));
-    }
-    const url = httpsUrl(refImageUrl);
-    const addresses = await (this.options.resolveHost ? this.options.resolveHost(url.hostname) : lookup(url.hostname, { all: true }).then(rows => rows.map(row => row.address)));
-    if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ApiError('REFERENCE_ADDRESS_BLOCKED', '参考图必须是 SDK 上传后可访问的云端链接。');
+    const refImageUrl = this.assertReferenceBinding(input.mirrorId ?? 'default', input.bindingId, expectedReference, id).url;
     const latest = this.options.store.get(id);
     if (latest.status !== 'active' || latest.refImageUrl || latest.providerSessionId) throw new ApiError('EXHIBITION_REFERENCE_LOCKED', '会话已停止或参考已锁定。', 409);
     return this.public(this.options.store.update(id, { refImageUrl, referenceVersion: 1 }));
@@ -446,7 +447,7 @@ export class TryOnService {
     return !!record.exhibition && (record.exhibition.mirrorId ?? 'default') === mirrorId && record.status === 'active' && !!record.providerSessionId && record.sourceKind === 'camera' && record.exhibition.mode !== 'mox';
   }
   /** Change conditions within an existing camera lease; credential and RTC ownership stay fixed. */
-  async updateExhibitionCondition(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; refImageUrl?: string }, isCurrent: () => boolean) {
+  async updateExhibitionCondition(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; bindingId?: string; refImageUrl?: string }, isCurrent: () => boolean, expectedReference?: ReferenceDeliveryIdentity) {
     const mirrorId = input.mirrorId ?? 'default';
     if (typeof mirrorId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(mirrorId)) throw new ApiError('EXHIBITION_INVALID_MIRROR', '试衣镜编号无效。');
     this.assertSessionMirror(id, mirrorId, true);
@@ -467,18 +468,11 @@ export class TryOnService {
     const sample = ['commute', 'city', 'evening'].includes(lookId) && input.referenceAsset === `/assets/exhibition/${lookId}-cutout.png`;
     const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/((?:upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})|commute|city|evening)(?:\/(display|reference)\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?$/.exec(input.referenceAsset);
     if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
-    const refImageUrl = noReference ? '' : boundedText(input.refImageUrl, '参考图链接', 4096);
+    const refImageUrl = noReference ? '' : this.assertReferenceBinding(mirrorId, input.bindingId, expectedReference, id).url;
     const sameCondition = (current: SessionRecord) => current.sourceKind === 'camera' && current.providerSessionId === record.providerSessionId && current.exhibition?.deviceId === deviceId && current.exhibition.sessionNumber === input.sessionNumber && (current.exhibition.mirrorId ?? 'default') === mirrorId && (current.exhibition.mode ?? 'clothx') === mode && current.exhibition.lookId === lookId && current.exhibition.generationNumber === input.generationNumber && current.exhibition.prompt === prompt && current.referenceAsset === input.referenceAsset && current.refImageUrl === refImageUrl;
     const stale = () => new ApiError('EXHIBITION_STALE_GENERATION', '素材选择已更新，请使用当前素材。', 409);
     if (!isCurrent() || input.generationNumber < record.exhibition.generationNumber || (input.generationNumber === record.exhibition.generationNumber && !sameCondition(record))) throw stale();
     if (input.generationNumber === record.exhibition.generationNumber) return this.public(record);
-    if (record.providerId === 'decart' && !isDecartReference(refImageUrl)) throw new ApiError('INVALID_REMOTE_URL', 'Decart 素材引用无效。');
-    if (!noReference && record.providerId !== 'decart') {
-      const url = httpsUrl(refImageUrl);
-      const addresses = await (this.options.resolveHost ? this.options.resolveHost(url.hostname) : lookup(url.hostname, { all: true }).then(rows => rows.map(row => row.address)));
-      if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ApiError('REFERENCE_ADDRESS_BLOCKED', '参考图必须是 SDK 上传后可访问的云端链接。');
-    }
-    // DNS validation yields. A stop, another material change or a newer selection must win.
     const latest = this.options.store.get(id);
     if (latest.status !== 'active') throw new ApiError('SESSION_INACTIVE', '展会会话已停止，不能更换素材。', 409);
     if (!isCurrent()) throw stale();

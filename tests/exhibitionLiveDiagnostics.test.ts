@@ -1,3 +1,4 @@
+import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, useExhibitionLive, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
@@ -38,20 +39,21 @@ function fixture(diagnostic?: (event: DiagnosticEventInput) => void, prefetchIma
     disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const condition = async (_id: string, intent: Parameters<NonNullable<ExhibitionLiveDeps['updateCondition']>>[1]) => {
     if (record.exhibition.generationNumber !== intent.generationNumber) record = { ...record, referenceAsset: `/assets/${intent.lookId}.png`,
-      refImageUrl: intent.refImageUrl!, referenceVersion: record.referenceVersion + 1,
+      refImageUrl: resolvedBinding(intent.bindingId)!, referenceVersion: record.referenceVersion + 1,
       exhibition: { ...record.exhibition, lookId: intent.lookId, generationNumber: intent.generationNumber } };
     return { ...record, exhibition: { ...record.exhibition } };
   };
   const deps = {
     create: vi.fn(async () => ({ ...record })), reference: vi.fn(async (input: Input) => new File(['reference'], input.image.split('/').pop()!, { type: 'image/png' })),
-    upload: vi.fn(async (file: File) => `https://upload.fixture/${file.name}?credential=private-fixture`), prepare: vi.fn(async () => {}),
-    bind: vi.fn(async (_id, input) => { record = { ...record, refImageUrl: input.refImageUrl, referenceVersion: 1 }; return { ...record }; }),
+    readyLookup: vi.fn(async (file: File) => `https://upload.fixture/${file.name}?credential=private-fixture`), prepare: vi.fn(async () => {}),
+    bind: vi.fn(async (_id, input) => { record = { ...record, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 }; return { ...record }; }),
     updateCondition: vi.fn(condition), conditionApplied: vi.fn(async () => ({})),
     connect: vi.fn(async (_source, _local, value) => { callbacks = value; return sdk; }),
     link: vi.fn(async (_id, providerSessionId) => { record = { ...record, providerSessionId }; return { ...record }; }),
     firstFrame: vi.fn(async () => ({ ...record })), stop: vi.fn(async () => ({ ...record, status: 'stopped' })),
     heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => clone), now: vi.fn(() => clock),
-  } satisfies ExhibitionLiveDeps;
+  } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
+  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), updateError: vi.fn(), diagnostic };
   const controller = new ExhibitionLiveConnection(first, events, deps); connections.push(controller);
   const next = (lookId: string, generationNumber = 2): Input => ({ ...first, lookId, generationNumber, image: `/assets/${lookId}.png` });
@@ -67,7 +69,7 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     const trace: DiagnosticEventInput[] = [];
     const f = fixture(event => trace.push(event)); await f.ready();
     const initial = trace[0].operationId;
-    expect(trace.map(event => event.type)).toEqual(['experience_started', 'reference_started', 'reference_ready', 'credential_started', 'credential_ready', 'upload_started', 'upload_ready',
+    expect(trace.map(event => event.type)).toEqual(['experience_started', 'reference_started', 'reference_ready', 'credential_started', 'credential_ready',
       'bind_started', 'bind_ready', 'rtc_started', 'rtc_ready', 'sdk_set_started', 'sdk_set_resolved', 'session_first_frame']);
     f.advance(700); expect(await f.controller.update(f.next('second'))).toBe(true);
     f.controller.reportRenderedFrame(f.output); f.callbacks().onRemoteVideoFirstFrame(); await flush();
@@ -129,7 +131,7 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
   it.each(['upload', 'set'] as const)('invalidates diagnostics immediately on stop while %s is unresolved', async stage => {
     const trace: DiagnosticEventInput[] = []; const f = fixture(event => trace.push(event)); await f.ready();
     const upload = deferred<string>(); const set = deferred<void>();
-    if (stage === 'upload') f.deps.upload.mockImplementationOnce(() => upload.promise);
+    if (stage === 'upload') f.deps.readyLookup.mockImplementationOnce(() => upload.promise);
     else f.sdk.set.mockImplementationOnce(() => set.promise);
     const updating = f.controller.update(f.next('second')); await flush();
     const stopping = f.controller.stop();
@@ -144,11 +146,11 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
   it('does not attribute neighbour prewarming or its cached upload to a foreground update', async () => {
     const trace: DiagnosticEventInput[] = []; const f = fixture(event => trace.push(event), ['/assets/second.png']);
     await f.ready(); await flush();
-    expect(f.deps.upload).toHaveBeenCalledTimes(2);
-    expect(trace.filter(event => event.type === 'upload_started')).toHaveLength(1);
+    expect(f.deps.readyLookup).toHaveBeenCalledTimes(1);
+    expect(trace.filter(event => event.type === 'upload_started')).toHaveLength(0);
     const before = trace.length; expect(await f.controller.update(f.next('second'))).toBe(true);
-    expect(trace.slice(before).map(event => event.type)).toEqual(['bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'condition_committed']);
-    expect(f.deps.upload).toHaveBeenCalledTimes(2);
+    expect(trace.slice(before).map(event => event.type)).toEqual(['reference_cache_hit', 'bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'condition_committed']);
+    expect(f.deps.readyLookup).toHaveBeenCalledTimes(2);
   });
 
   it('records sanitized failure reasons and forbids repeating an uncertain operation', async () => {
@@ -166,7 +168,7 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     for (const receive of [undefined, () => { throw new Error('diagnostic-only'); }]) {
       const f = fixture(receive); await f.ready(); expect(await f.controller.update(f.next('second'))).toBe(true);
       expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
-      expect(f.deps.upload).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenCalledTimes(2);
+      expect(f.deps.readyLookup).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenCalledTimes(2);
       expect(f.deps.updateCondition).toHaveBeenCalledOnce(); expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
       expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.deps.reportError).not.toHaveBeenCalled();
       expect(await f.controller.stop()).toBe(true);

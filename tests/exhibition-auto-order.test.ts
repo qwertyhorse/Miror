@@ -1,3 +1,4 @@
+import { withLifecycleReferenceDelivery } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -35,7 +36,7 @@ function liveFixture() {
   const get = vi.fn(async (id: string) => structuredClone(sessions.get(id)!));
   const stop = vi.fn(async (id: string) => { const session = sessions.get(id)!; session.status = 'stopped'; return structuredClone(session); });
   const cancelExhibitionSession = (id: string) => { const session = sessions.get(id)!; if (session.status !== 'stopped') session.status = 'stopping'; };
-  const liveService = { status: () => ({ configured: true }), createExhibition: create, get, stop, cancelExhibitionSession } as unknown as TryOnService;
+  const liveService = withLifecycleReferenceDelivery({ status: () => ({ configured: true }), createExhibition: create, get, stop, cancelExhibitionSession } as unknown as TryOnService);
   f.service.attachLiveService(liveService);
   f.service.command({ action: 'configure', providerMode: 'xmax', switchMode: 'auto', autoSwitchSeconds: 5 });
   const createSession = () => f.service.createLiveSession({ deviceId: 'auto-screen-001', lookId: f.service.get().selectedLookId, generationNumber: f.service.get().generationNumber });
@@ -125,7 +126,7 @@ describe('automatic material switching', () => {
     const file = join(directory, 'exhibition.json'); const stored = JSON.parse(readFileSync(file, 'utf8'));
     for (let i = 0; i < 96; i += 1) {
       const id = `upload-${randomUUID()}`;
-      stored.state.looks.push({ ...stored.state.looks[0], id, source: 'upload', image: `/api/exhibition/assets/${id}`, width: 512, height: 768, bytes: 100, mime: 'image/webp' });
+      stored.state.looks.push({ ...stored.state.looks[0], id, source: 'upload', image: `/api/exhibition/assets/${id}`, referenceImage: `/api/exhibition/assets/${id}`, width: 512, height: 768, bytes: 100, mime: 'image/webp' });
       stored.state.enabledLookIds.push(id);
     }
     delete stored.state.settings.switchMode; delete stored.state.settings.autoSwitchSeconds; delete stored.state.settings.uiSkin; delete stored.state.autoSwitchAt;

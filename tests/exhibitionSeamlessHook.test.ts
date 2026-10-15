@@ -1,3 +1,4 @@
+import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExhibitionLive, type ExhibitionLiveController, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
@@ -41,6 +42,7 @@ async function fixture(initialState = snapshot(), continuous = false) {
     return look.referenceKind === 'none' ? '' : look.referenceImage ?? look.image;
   };
   mocks.api.mockImplementation(async (path: string, _method?: string, input?: Record<string, any>) => {
+    if (path.includes('/references/')) { const lookId = decodeURIComponent(path.split('/').pop()!); return { reference: readyReferenceFixture(`https://reference.fixture/${referenceAsset(lookId).split('/').pop()}`) }; }
     if (path.endsWith('/live/status')) return { configured: true, perSessionLimit: 30 };
     if (path.endsWith('/live/session')) {
       record = { id: continuous ? `segment-${++segments}` : 'same-session', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'camera', sourceKind: 'camera', sourceName: '摄像头',
@@ -50,11 +52,11 @@ async function fixture(initialState = snapshot(), continuous = false) {
           mode: 'clothx', prompt: exhibitionPromptForLook({ mode: 'clothx' }), ...(continuous ? { continuous: true } : {}) } };
       return { ...record };
     }
-    if (path.endsWith('/reference')) { record = { ...record, refImageUrl: input!.refImageUrl, referenceVersion: 1 }; return { ...record }; }
+    if (path.endsWith('/reference')) { record = { ...record, refImageUrl: resolvedBinding(input!.bindingId), referenceVersion: 1 }; return { ...record }; }
     if (path.endsWith('/link')) { record = { ...record, providerSessionId: input!.providerSessionId }; return { ...record }; }
     if (path.endsWith('/condition')) {
       if (record.exhibition.generationNumber !== input!.generationNumber) record = { ...record, lookId: input!.lookId, referenceAsset: referenceAsset(input!.lookId),
-        refImageUrl: input!.refImageUrl, referenceVersion: record.referenceVersion + 1, exhibition: { ...record.exhibition, lookId: input!.lookId, generationNumber: input!.generationNumber } };
+        refImageUrl: resolvedBinding(input!.bindingId), referenceVersion: record.referenceVersion + 1, exhibition: { ...record.exhibition, lookId: input!.lookId, generationNumber: input!.generationNumber } };
       return { ...record };
     }
     if (path.endsWith('/condition/applied')) return {};
@@ -119,37 +121,20 @@ describe('exhibition hook preserves generated output while the selected outfit c
       { ...state.looks[0], id: 'mox-fixture', mode: 'mox', image: '/assets/mox.png' });
     state.enabledLookIds = enabledLookIds;
     await fixture(state);
-    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
-      expect.stringMatching(/\/assets\/first\.png$/), expect.stringMatching(/\/assets\/second\.png$/), expect.stringMatching(/\/assets\/third\.png$/),
-    ]);
-    expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(3); expect(mocks.createXmaxClient).toHaveBeenCalledTimes(2);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mocks.uploadAndCheckImage).not.toHaveBeenCalled(); expect(mocks.createXmaxClient).toHaveBeenCalledOnce();
   });
-
-  it('does not duplicate the only eligible neighbouring reference or upload prompt-only materials', async () => {
-    const state = snapshot(); state.looks[1].referenceKind = 'none';
-    await fixture(state);
-    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
-      expect.stringMatching(/\/assets\/first\.png$/), expect.stringMatching(/\/assets\/third\.png$/),
-    ]);
-    expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(2);
+  it('does not upload neighbouring or prompt-only materials', async () => {
+    const state = snapshot(); state.looks[1].referenceKind = 'none'; await fixture(state);
+    expect(fetch).not.toHaveBeenCalled(); expect(mocks.uploadAndCheckImage).not.toHaveBeenCalled();
   });
-
-  it('starts and prefetches generation images, then reuses the prepared image for continuous selection', async () => {
-    const state = snapshot();
-    state.looks[0].referenceImage = '/assets/first-reference.png';
-    state.looks[1].referenceImage = '/assets/second-reference.png';
+  it('acquires the independent prepared reference for continuous selection without browser image transport', async () => {
+    const state = snapshot(); state.looks[0].referenceImage = '/assets/first-reference.png'; state.looks[1].referenceImage = '/assets/second-reference.png';
     const f = await fixture(state);
-    const fetchedImages = () => vi.mocked(fetch).mock.calls.map(([url]) => String(url));
-    expect(fetchedImages()).toEqual([
-      expect.stringMatching(/\/assets\/first-reference\.png$/), expect.stringMatching(/\/assets\/second-reference\.png$/),
-      expect.stringMatching(/\/assets\/third\.png$/),
-    ]);
-    await act(async () => f.update({ ...state, phase: 'generating', generationNumber: 2, selectedLookId: 'second', displayedLookId: 'first', live: f.lease, revision: 3 }));
-    await flushReact();
-    expect(fetchedImages()).toHaveLength(3); expect(mocks.uploadAndCheckImage).toHaveBeenCalledTimes(3);
-    expect(f.calls('/condition/applied')).toHaveLength(1); expect(f.live.updateError).toBe('');
-    expect(f.allocations()).toBe(1); expect(mocks.connect).toHaveBeenCalledOnce();
-    expect(f.live.outputStream).toBe(f.output);
+    await act(async () => f.update({ ...state, phase: 'generating', generationNumber: 2, selectedLookId: 'second', displayedLookId: 'first', live: f.lease, revision: 3 })); await flushReact();
+    expect(fetch).not.toHaveBeenCalled(); expect(mocks.uploadAndCheckImage).not.toHaveBeenCalled();
+    expect(mocks.sdk.set).toHaveBeenLastCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.fixture/second-reference.png' }));
+    expect(f.calls('/condition/applied')).toHaveLength(1); expect(f.live.updateError).toBe(''); expect(f.allocations()).toBe(1); expect(mocks.connect).toHaveBeenCalledOnce(); expect(f.live.outputStream).toBe(f.output);
   });
 
   it('keeps the camera, remote stream, SDK and credential while the server still displays the preceding outfit', async () => {

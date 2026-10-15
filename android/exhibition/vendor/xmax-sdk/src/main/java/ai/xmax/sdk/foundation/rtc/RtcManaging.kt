@@ -126,6 +126,8 @@ internal interface RtcManaging {
     /** 设置 RTC 摄像头预览就绪监听器，传入空值时清除。 */
     fun setCameraPreviewReadyListener(listener: RealtimeCameraPreviewReadyListener?)
 
+    fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?) {}
+
     /** 为当前生成注册持续帧接收器；清除时同时停止该接收器的远端渲染。 */
     fun setRemoteVideoFrameListener(
         stream: RemoteStream,

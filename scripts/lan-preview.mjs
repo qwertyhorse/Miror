@@ -68,6 +68,54 @@ async function writeAddresses(ips) {
   await rename(temporary, resolve(directory, 'lan-addresses.json'));
 }
 
+/** Keep DNS address and DNS-SD service records alive as one registration. */
+export function createLanBroadcaster({ platform = process.platform, hostname = HOSTNAME,
+  port = platform === 'linux' ? EXHIBITION_PORT : HTTP_PORT, spawnChild = spawn, now = Date.now } = {}) {
+  let addresses = [];
+  let registration = null;
+  let closed = false;
+  let retries = 0;
+  let retryAt = 0;
+  function clear() {
+    const previous = registration;
+    registration = null;
+    for (const child of previous?.children ?? []) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    }
+  }
+  function update(next) {
+    if (closed) return;
+    if (JSON.stringify(addresses) !== JSON.stringify(next)) {
+      clear(); addresses = [...next]; retryAt = 0; retries = 0;
+    }
+    if (!['darwin', 'linux'].includes(platform) || registration || !addresses.length || now() < retryAt) return;
+    const commands = platform === 'linux'
+      ? [
+        ['/usr/bin/avahi-publish-address', ['--no-reverse', '--no-fail', hostname, addresses[0]]],
+        // A unique instance avoids colliding with the original Mac's "Miror" service.
+        ['/usr/bin/avahi-publish-service', ['--no-fail', '--host=' + hostname,
+          `Miror-${hostname.replace(/\.local$/i, '')}`, '_http._tcp', String(port), `hostname=${hostname}`]],
+      ]
+      : [['/usr/bin/dns-sd', ['-P', 'Miror', '_http._tcp', 'local', String(port), hostname, addresses[0]]]];
+    const group = { children: [], startedAt: now() };
+    registration = group;
+    function retry() {
+      if (closed || registration !== group) return;
+      if (now() - group.startedAt > 60000) retries = 0;
+      clear();
+      retryAt = now() + Math.min(30000, 1000 * 2 ** ++retries);
+    }
+    try {
+      for (const [command, arguments_] of commands) {
+        const child = spawnChild(command, arguments_, { stdio: 'inherit' });
+        group.children.push(child);
+        child.once('error', retry); child.once('exit', retry);
+      }
+    } catch { retry(); }
+  }
+  return { update, stop() { closed = true; clear(); } };
+}
+
 async function serve() {
   let ips = lanIPv4();
   const sockets = new Set();
@@ -75,16 +123,13 @@ async function serve() {
   const servers = httpPorts.map(port => ({ server: http.createServer(handler), port }));
   let closing = false;
   let awake;
-  let registration;
+  const broadcaster = createLanBroadcaster();
   let networkTimer;
   let networkRefresh = false;
-  let retryAt = 0;
-  let retries = 0;
-  function stopRegistration() { const current = registration; registration = null; if (current && current.exitCode === null && current.signalCode === null) current.kill('SIGTERM'); }
   function stop(error) {
     if (closing) return; closing = true;
     if (error) { console.error(error.message ?? error); process.exitCode = 1; }
-    clearInterval(networkTimer); stopRegistration();
+    clearInterval(networkTimer); broadcaster.stop();
     if (awake && awake.exitCode === null && awake.signalCode === null) awake.kill('SIGTERM');
     for (const { server } of servers) server.close();
     for (const socket of sockets) socket.destroy();
@@ -102,35 +147,19 @@ async function serve() {
     awake.once('error', stop);
     awake.once('exit', (code, signal) => { if (!closing) stop(new Error(`防睡眠进程已退出 (${code ?? signal})。`)); });
   }
-  function broadcast() {
-    if (!['darwin', 'linux'].includes(process.platform) || closing || registration || !ips.length || Date.now() < retryAt) return;
-    const command = process.platform === 'linux'
-      ? ['/usr/bin/avahi-publish-address', ['--no-reverse', '--no-fail', HOSTNAME, ips[0]]]
-      : ['/usr/bin/dns-sd', ['-P', 'Miror', '_http._tcp', 'local', String(HTTP_PORT), HOSTNAME, ips[0]]];
-    const current = spawn(command[0], command[1], { stdio: 'inherit' });
-    registration = current;
-    const startedAt = Date.now();
-    function retry() {
-      if (closing || registration !== current) return;
-      registration = null;
-      if (Date.now() - startedAt > 60000) retries = 0;
-      retryAt = Date.now() + Math.min(30000, 1000 * 2 ** ++retries);
-    }
-    current.once('error', retry); current.once('exit', retry);
-  }
   async function refreshNetwork() {
     if (closing || networkRefresh) return; networkRefresh = true;
     try {
       const next = lanIPv4();
       if (JSON.stringify(next) !== JSON.stringify(ips)) {
-        stopRegistration(); ips = next; retries = 0; retryAt = 0; await writeAddresses(ips);
+        ips = next; await writeAddresses(ips);
         console.log(`${new Date().toISOString()} 局域网地址：${ips.join(', ') || '等待联网'}`);
       }
-      broadcast();
+      broadcaster.update(ips);
     } catch (error) { stop(error); }
     finally { networkRefresh = false; }
   }
-  await writeAddresses(ips); broadcast();
+  await writeAddresses(ips); broadcaster.update(ips);
   networkTimer = setInterval(() => { void refreshNetwork(); }, 10000);
   process.once('SIGTERM', () => stop()); process.once('SIGINT', () => stop());
   console.log(`工作人员后台：http://${HOSTNAME}:${EXHIBITION_PORT}/；智能镜入口：${LAN_URL}；兼容入口：http://${HOSTNAME}:${HTTP_COMPAT_PORT}/`);

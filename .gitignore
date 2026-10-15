@@ -36,3 +36,5 @@ tools/npm/
 # Local browser diagnostics and test evidence
 artifacts/
 output/
+tmp/
+__pycache__/

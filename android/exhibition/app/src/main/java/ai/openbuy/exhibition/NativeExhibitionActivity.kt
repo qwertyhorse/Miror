@@ -14,6 +14,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Build
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
@@ -24,6 +25,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.UUID
 import kotlin.math.max
 
@@ -84,6 +86,20 @@ class NativeExhibitionActivity : Activity() {
     private var roundJob: Job? = null
     private val attempted = mutableSetOf<String>()
     private val stoppedGeneration = mutableMapOf<String, Long>()
+    private var gestureBridge: NativeGestureBridge? = null
+    @Volatile private var handTracker: NativeHandTracker? = null
+    @Volatile private var remoteGestures: NativeRemoteGestures? = null
+    @Volatile private var gestureMode = "linux"
+    private var remoteGestureBinding = ""
+    private var gestureInstance = 0L
+    private val localReleaseFence = NativeGestureReleaseFence()
+    @Volatile private var gestureCaptureEnabled = false
+    private var gesturesOn = true
+    private var gestureBlocked = true
+    private var gestureScope = ""
+    private var gestureOptionsKey = ""
+    private var gestureState: JSONObject? = null
+    private var gestureError = ""
     private val imageCache = object : android.util.LruCache<String, Bitmap>(12 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = max(1, value.allocationByteCount / 1024)
     }
@@ -111,9 +127,16 @@ class NativeExhibitionActivity : Activity() {
         position = if (prefs.getString("native-camera", "back") == "front") CameraPosition.FRONT else CameraPosition.BACK
         cameraDeviceId = prefs.getString("native-camera-id", null)?.takeIf { it.isNotEmpty() }
         remoteCamera = NativeCameraRemote(prefs.getStringSet("native-camera-handled-requests", emptySet()).orEmpty())
+        gestureMode = prefs.getString("native-gesture-mode", "linux").takeIf { it == "local" } ?: "linux"
         api = newApi()
         buildInterface()
         controller = NativeXmaxController(this, video)
+        initializeGestures()
+        controller.onLocalFrame = { frame ->
+            if (!gestureCaptureEnabled) frame.close()
+            else if (gestureMode == "linux") remoteGestures?.submit(frame) ?: frame.close()
+            else handTracker?.submit(frame) ?: frame.close()
+        }
         controller.onCameraSnapshot = { snapshot ->
             cameraSnapshot = snapshot
             if (!cameraSettingsOpen) reportCamera("ready")
@@ -153,6 +176,15 @@ class NativeExhibitionActivity : Activity() {
 
     override fun onDestroy() {
         destroyed = true
+        gestureCaptureEnabled = false
+        gestureInstance++
+        remoteGestures?.close()
+        remoteGestures = null
+        controller.onLocalFrame = null
+        handTracker?.close()
+        handTracker = null
+        gestureBridge?.close()
+        gestureBridge = null
         restartEpoch++
         imageScope.cancel()
         imageCache.evictAll()
@@ -173,6 +205,15 @@ class NativeExhibitionActivity : Activity() {
 
     /** One engine owns all SDK operations. A replacement waits for its predecessor's cleanup. */
     private fun restartWork() {
+        gestureCaptureEnabled = false
+        remoteGestures?.close()
+        remoteGestures = null
+        remoteGestureBinding = ""
+        handTracker?.invalidate()
+        gestureBridge?.setBlocked(true)
+        gestureBridge?.reset()
+        requireLocalRelease()
+        gestureBlocked = true
         val requestedEpoch = ++restartEpoch
         val old = work
         work = null
@@ -318,6 +359,10 @@ class NativeExhibitionActivity : Activity() {
                     controller.disconnect()
                     cameraReady = false
                     if (controller.hasReleaseFailure) { error = "摄像头释放未确认，请重试。"; render(); delay(1000); continue }
+                    if (!MirrorRuntime.supportsWeb()) {
+                        error = "此设备请在后台选择 XMAX"
+                        render(); delay(1_000); continue
+                    }
                     prefs.edit().putString("screen-url", screenUrl).apply()
                     startActivity(Intent(this@NativeExhibitionActivity, MainActivity::class.java))
                     awaitCancellation()
@@ -351,7 +396,8 @@ class NativeExhibitionActivity : Activity() {
                         onStatus = { text -> runOnUiThread { generationStatus = text; if (text == "实时生成") error = ""; render() } },
                         onError = { text -> runOnUiThread { error = text; render() } },
                         onFirstFrame = { runOnUiThread { generationStatus = "实时生成"; error = ""; render() } },
-                        cameraPosition = position, cameraDeviceId = activeCameraDeviceId)
+                        cameraPosition = position, cameraDeviceId = activeCameraDeviceId,
+                        onBusyChanged = { render() })
                     round = instance
                     roundJob = launch {
                         try { instance.run() }
@@ -483,14 +529,11 @@ class NativeExhibitionActivity : Activity() {
 
     private fun step(direction: Int) {
         val snapshot = state ?: return
-        if (snapshot.string("phase") == "showcase") {
-            command(if (direction > 0) "next" else "previous")
-        } else {
-            val all = enabledLooks(snapshot)
-            if (all.isEmpty()) return
-            val index = all.indexOfFirst { it.string("id") == snapshot.string("selectedLookId") }
-            command("select", all[Math.floorMod(index + direction, all.size)].string("id"))
-        }
+        val all = enabledLooks(snapshot)
+        if (all.size < 2) return
+        val index = all.indexOfFirst { it.string("id") == snapshot.string("selectedLookId") }
+        command(if (snapshot.string("phase") in listOf("generating", "showcase")) "switch" else "select",
+            all[Math.floorMod(index + direction, all.size)].string("id"))
     }
 
     @Suppress("DEPRECATION")
@@ -509,6 +552,14 @@ class NativeExhibitionActivity : Activity() {
         primary.setOnClickListener { startOrStop() }
         kiosk.continueButton.setOnClickListener { command("resume") }
         kiosk.home.setOnClickListener { command("idle") }
+        kiosk.gestures.setOnClickListener {
+            if (gestureError.isNotEmpty()) initializeGestures()
+            else {
+                gesturesOn = !gesturesOn
+                initializeGestures()
+            }
+            render()
+        }
         kiosk.drawer.bindImage = { target, path -> bindImage(target, path, 512) }
         kiosk.drawer.onSelect = { id ->
             if (id != state?.string("selectedLookId")) {
@@ -589,6 +640,187 @@ class NativeExhibitionActivity : Activity() {
         lastUiMode = mode
         kiosk.drawer.submit(enabledLooks(snapshot), snapshot?.string("selectedLookId").orEmpty(),
             settings?.optInt("materialDrawerColumns", 2) ?: 2, canSelect, if (mode == "clothx") "选择服装" else "选择素材")
+        syncGestures()
+    }
+
+    private fun requireLocalRelease() = localReleaseFence.reset()
+
+    private fun initializeGestures() {
+        gestureCaptureEnabled = false
+        val instance = ++gestureInstance
+        remoteGestures?.close()
+        remoteGestures = null
+        remoteGestureBinding = ""
+        handTracker?.close()
+        handTracker = null
+        gestureBridge?.close()
+        gestureBridge = null
+        gestureError = ""
+        gestureState = null
+        gestureScope = ""
+        gestureOptionsKey = ""
+        gestureBlocked = true
+        requireLocalRelease()
+        if (gestureMode != "local") return
+        // A fresh bridge also recovers a destroyed WebView renderer. Fresh detectors first observe release.
+        gestureBridge = try { NativeGestureBridge(this,
+            { if (instance == gestureInstance) onGestureState(it) },
+            { if (instance == gestureInstance) onGestureError(it) })
+            .also { it.setBlocked(true) } } catch (_: RuntimeException) {
+            gestureError = "手势识别未能启动，请重试。"; null
+        }
+        handTracker = NativeHandTracker(this, { result ->
+            val age = android.os.SystemClock.elapsedRealtime() - result.timestampMs
+            if (!destroyed && instance == gestureInstance && gestureCaptureEnabled && age in 0L until 800L) {
+                val hands = JSONArray()
+                for (hand in result.hands) {
+                    val points = JSONArray()
+                    for (point in hand.landmarks) points.put(JSONObject()
+                        .put("x", 1.0 - point.x).put("y", point.y.toDouble()).put("z", point.z.toDouble()))
+                    hands.put(JSONObject().put("handedness", hand.handedness).put("landmarks", points))
+                }
+                observeLocalRelease(result.timestampMs, result.hands.isEmpty())
+                gestureBridge?.accept(result.timestampMs, hands, result.width.toDouble() / result.height)
+            }
+        }, { if (instance == gestureInstance) onGestureError(it) })
+    }
+
+    private fun observeLocalRelease(timestamp: Long, empty: Boolean) {
+        if (localReleaseFence.observe(timestamp, empty)) syncGestures()
+    }
+
+    private fun onGestureError(message: String) {
+        if (destroyed) return
+        gestureError = message
+        gestureCaptureEnabled = false
+        handTracker?.invalidate()
+        gestureBridge?.setBlocked(true)
+        requireLocalRelease()
+        gestureBlocked = true
+        renderGestureFeedback()
+    }
+
+    private fun syncRemoteGestures(enabled: Boolean, blocked: Boolean, settings: JSONObject) {
+        val id = mirrorId
+        if (gestureMode != "linux" || id == null || !gestureAvailable() || !gesturesOn || !enabled) {
+            remoteGestures?.close()
+            remoteGestures = null
+            remoteGestureBinding = ""
+            return
+        }
+        val binding = "$id:${System.identityHashCode(api)}"
+        if (binding != remoteGestureBinding || remoteGestures == null) {
+            remoteGestures?.close()
+            remoteGestureBinding = binding
+            val owner = api
+            val instance = gestureInstance
+            lateinit var current: NativeRemoteGestures
+            current = NativeRemoteGestures(api.gestures(id), { value ->
+                if (!destroyed && instance == gestureInstance && owner === api && remoteGestures === current) {
+                    val recovered = gestureError.isNotEmpty()
+                    gestureError = ""
+                    if (recovered) syncGestures()
+                    onGestureState(value)
+                }
+            }, { message ->
+                if (!destroyed && instance == gestureInstance && owner === api && remoteGestures === current) {
+                    gestureError = message
+                    renderGestureFeedback()
+                }
+            })
+            remoteGestures = current
+        }
+        remoteGestures?.configure(true, blocked, "$gestureScope:$gestureOptionsKey", settings.optInt("maxFps", 10))
+    }
+
+    private fun gestureAvailable(): Boolean = started && !destroyed && mirrorId != null &&
+        state?.string("providerMode") == "xmax" && state?.string("experienceMode") != "mox" &&
+        provider?.string("providerId") != "decart" && !cameraSettingsOpen && hasCameraPermission() &&
+        !blockedUnlessOwn(state?.optJSONObject("live"))
+
+    private fun gesturesBlockedNow(): Boolean = !gestureAvailable() || !gesturesOn || !healthy ||
+        (!cameraReady && round == null) || previewFailed || controller.hasReleaseFailure ||
+        actionBusy || stopBusy || round?.isBusy == true || error.isNotEmpty() || gestureError.isNotEmpty() ||
+        state?.string("phase") !in listOf("idle", "select", "showcase") ||
+        state?.optJSONObject("live")?.optBoolean("localEnded") == true || enabledLooks(state).size < 2
+
+    private fun syncGestures() {
+        val settings = JSONObject((state?.optJSONObject("settings")?.optJSONObject("gestureRecognition") ?: JSONObject()).toString())
+        val configured = settings.optJSONArray("gestures") ?: JSONArray().put("open_palm")
+        settings.put("gestures", configured)
+        for ((key, value) in mapOf("palmConfirmMs" to 300, "palmReleaseMs" to 500,
+            "palmLowerMs" to 350, "lowerTrackingGraceMs" to 500)) if (!settings.has(key)) settings.put(key, value)
+        val enabled = (0 until configured.length()).any { configured.optString(it) in listOf("open_palm", "wave") }
+        gestureCaptureEnabled = gestureAvailable() && gesturesOn && enabled && (gestureMode == "linux" || gestureError.isEmpty())
+        val publicationRevision = if (state?.string("providerMode") == "xmax")
+            state?.optJSONObject("publication")?.optLong("revision", 0) else null
+        val scope = "${mirrorId}:${state?.optLong("sessionNumber")}:${state?.string("experienceMode")}:" +
+            "${state?.string("phase") == "paused"}:$stopBusy:$previewFailed:$cameraSettingsOpen:$publicationRevision"
+        if (scope != gestureScope) {
+            gestureScope = scope
+            handTracker?.invalidate()
+            gestureBridge?.reset()
+            requireLocalRelease()
+        }
+        val optionsKey = settings.toString()
+        if (optionsKey != gestureOptionsKey) {
+            gestureOptionsKey = optionsKey
+            handTracker?.invalidate()
+            requireLocalRelease()
+        }
+        handTracker?.configure(
+            settings.optDouble("minHandDetectionConfidence", .35).toFloat(),
+            settings.optDouble("minHandPresenceConfidence", .35).toFloat(),
+            settings.optDouble("minTrackingConfidence", .5).toFloat(),
+            settings.optInt("maxFps", 10), settings.optInt("inputLongEdge", 640))
+        gestureBridge?.configure(settings)
+        val blocked = gesturesBlockedNow() || !enabled || (gestureMode == "local" && localReleaseFence.required)
+        if (blocked != gestureBlocked) {
+            gestureBlocked = blocked
+            handTracker?.invalidate()
+            gestureBridge?.setBlocked(blocked)
+        }
+        syncRemoteGestures(enabled, blocked, settings)
+        renderGestureFeedback()
+    }
+
+    private fun onGestureState(current: JSONObject) {
+        if (destroyed) return
+        gestureState = current
+        // Validate the current result, never last render's recognition snapshot.
+        val event = current.string("event")
+        val timestamp = current.optLong("timestamp", -1)
+        val age = android.os.SystemClock.elapsedRealtime() - timestamp
+        if (event in listOf("open_palm", "wave") && current.string("operatorStatus") == "locked" &&
+            timestamp >= 0 && age in 0L until 800L && !current.optBoolean("blocked", true) && !gesturesBlockedNow() && !gestureBlocked) step(1)
+        renderGestureFeedback()
+    }
+
+    private fun renderGestureFeedback() {
+        if (destroyed || !::kiosk.isInitialized) return
+        kiosk.gestures.visibility = if (gestureAvailable()) View.VISIBLE else View.GONE
+        kiosk.gestures.text = when {
+            gestureError.isNotEmpty() -> "重试手势"
+            !gesturesOn -> "手势已关闭"
+            actionBusy || state?.string("phase") == "generating" || round?.isBusy == true -> "切换中"
+            (gestureMode == "local" && localReleaseFence.required) || gestureState?.optBoolean("needsRelease") == true -> "请放下手"
+            gestureState?.string("operatorStatus") == "ambiguous" -> "请只伸出一只手"
+            gestureState?.optBoolean("handDetected") == true -> "手势已就绪"
+            else -> "手势已开启"
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val direction = when (event.keyCode) {
+            KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_UP -> -1
+            KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_DOWN -> 1
+            else -> return super.dispatchKeyEvent(event)
+        }
+        if (settingsDialog != null || event.isAltPressed || event.isCtrlPressed || event.isShiftPressed || event.isMetaPressed)
+            return super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 && started && healthy && !stopBusy &&
+            !blockedUnlessOwn(state?.optJSONObject("live")) && state?.string("phase") in listOf("idle", "select", "generating", "showcase")) step(direction)
+        return true
     }
 
     private fun blockedUnlessOwn(live: JSONObject?) = live != null && live.string("deviceId") != deviceId
@@ -630,6 +862,17 @@ class NativeExhibitionActivity : Activity() {
         val content = NativeDeviceSettingsView(this, remoteRequest != null)
         val address = content.address.apply { setText(screenUrl) }
         val backendIp = content.backendIp.apply { setText(prefs.getString("backend-ip", "")) }
+        val gestureSelector = Spinner(this).apply {
+            contentDescription = "手势识别"
+            adapter = ArrayAdapter(this@NativeExhibitionActivity, android.R.layout.simple_spinner_item,
+                arrayOf("安卓本机", "Linux电脑")).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            setSelection(if (gestureMode == "local") 0 else 1)
+            minimumHeight = dp(48)
+        }
+        if (remoteRequest == null) {
+            content.cameraContainer.addView(MirrorSettingsStyle.label(this).apply { text = "手势识别" })
+            content.cameraContainer.addView(gestureSelector, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(18) })
+        }
         val cameraPanel = if (!cameraLocked) NativeCameraSettingsPanel(
             this, controller, NativeCameraSelection(cameraDeviceId), prefs.getString("native-camera", null),
             migrateLegacy = !prefs.contains("native-camera-id"),
@@ -698,12 +941,18 @@ class NativeExhibitionActivity : Activity() {
                     val url = UrlPolicy.cameraScreenUrl(address.text.toString())
                     // Constructor validates the endpoint before a running terminal is interrupted.
                     ExhibitionApi(url, terminalId, terminalToken, Build.MODEL, LanBackendDns(applicationContext, url, fallbackIp))
+                    val selectedGestureMode = if (remoteRequest == null) {
+                        if (gestureSelector.selectedItemPosition == 0) "local" else "linux"
+                    } else gestureMode
                     val preferences = prefs.edit().putString("screen-url", url).putString("backend-ip", fallbackIp)
+                        .putString("native-gesture-mode", selectedGestureMode)
                     if (cameraPanel != null) {
                         preferences.putString("native-camera-id", cameraPanel.selection.storedValue)
                     }
                     check(preferences.commit()) { "无法保存摄像头设置" }
                     screenUrl = url
+                    gestureMode = selectedGestureMode
+                    initializeGestures()
                     if (cameraPanel != null) cameraDeviceId = cameraPanel.selection.cameraId
                     saved = true
                     if (remoteRequest == null) {
@@ -771,8 +1020,11 @@ class NativeExhibitionActivity : Activity() {
     private fun selectedLook(value: JSONObject?): JSONObject? = enabledLooks(value).firstOrNull { it.string("id") == value?.string("selectedLookId") }
     private fun enabledLooks(value: JSONObject?): List<JSONObject> {
         if (value == null) return emptyList()
-        val all = value.optJSONArray("looks") ?: return emptyList()
-        val enabled = value.optJSONArray("enabledLookIds") ?: return emptyList()
+        val publication = if (value.string("providerMode") == "xmax") value.optJSONObject("publication") else null
+        val all = (publication ?: value).optJSONArray("looks") ?: return emptyList()
+        val enabled = if (publication != null) JSONArray().apply {
+            for (at in 0 until all.length()) all.optJSONObject(at)?.let { put(it.string("id")) }
+        } else value.optJSONArray("enabledLookIds") ?: return emptyList()
         val index = (0 until all.length()).mapNotNull { all.optJSONObject(it) }.associateBy { it.string("id") }
         return (0 until enabled.length()).mapNotNull { index[enabled.optString(it)] }
             .filter { it.string("mode").ifBlank { "clothx" } == value.string("experienceMode").ifBlank { "clothx" } }

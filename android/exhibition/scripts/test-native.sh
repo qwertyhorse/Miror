@@ -133,6 +133,18 @@ def main():
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',
              '-cp', api_classpath, 'ai.openbuy.exhibition.ExhibitionApiContractTestKt'], timeout=60)
 
+        upload_classes = temporary / 'gesture-upload/classes'
+        upload_classes.mkdir(parents=True)
+        upload_classpath = os.pathsep.join(map(str, [upload_classes, stdlib, coroutines, json_jar] + http_modules))
+        upload_stubs = sorted((TESTS / 'remote-gesture-stubs').rglob('*.kt'))
+        print('Run bounded remote gesture uploads against an isolated HTTP peer.', flush=True)
+        run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', upload_classes, SOURCE / 'UrlPolicy.java'])
+        run(compiler + ['-classpath', upload_classpath, '-d', upload_classes,
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeCameraFrame.kt', SOURCE / 'NativeRemoteGestures.kt',
+                        TESTS / 'NativeRemoteGesturesTest.kt'] + upload_stubs)
+        run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',
+             '-cp', upload_classpath, 'ai.openbuy.exhibition.NativeRemoteGesturesTestKt'], timeout=60)
+
         tls_dir = temporary / 'tls'
         tls_classes = tls_dir / 'classes'
         tls_classes.mkdir(parents=True)
@@ -163,6 +175,18 @@ def main():
                         SOURCE / 'LanBackendAddress.kt', TESTS / 'LanBackendDnsTest.kt'])
         run([java, '-cp', lan_classpath, 'ai.openbuy.exhibition.LanBackendDnsTestKt'], timeout=60)
 
+        nsd_classes = temporary / 'lan-nsd/classes'
+        nsd_classes.mkdir(parents=True)
+        nsd_classpath = os.pathsep.join(map(str, [nsd_classes, stdlib]))
+        nsd_stubs = sorted((TESTS / 'nsd-stubs').rglob('*.kt'))
+        require(bool(nsd_stubs), 'NSD 回调顺序测试的 Android 替身未就绪。')
+        print('Run actual NSD discovery callback ordering fixtures.', flush=True)
+        run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', nsd_classes, SOURCE / 'UrlPolicy.java'])
+        run(compiler + ['-classpath', nsd_classpath, '-d', nsd_classes,
+                        SOURCE / 'LanBackendAddress.kt', SOURCE / 'LanBackendDns.kt',
+                        TESTS / 'LanNsdDiscoveryTest.kt'] + nsd_stubs)
+        run([java, '-cp', nsd_classpath, 'ai.openbuy.exhibition.LanNsdDiscoveryTestKt'], timeout=60)
+
         camera_classes = temporary / 'camera/classes'
         camera_classes.mkdir(parents=True)
         camera_classpath = os.pathsep.join(map(str, [camera_classes, stdlib]))
@@ -170,6 +194,35 @@ def main():
         run(compiler + ['-classpath', camera_classpath, '-d', camera_classes,
                         SOURCE / 'NativeCameraSelection.kt', TESTS / 'NativeCameraSelectionTest.kt'])
         run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraSelectionTestKt'], timeout=60)
+
+        pixels_classes = temporary / 'camera-pixels/classes'
+        pixels_classes.mkdir(parents=True)
+        pixels_classpath = os.pathsep.join(map(str, [pixels_classes, stdlib]))
+        print('Run native I420 stride, rotation and reduced-allocation fixtures.', flush=True)
+        run(compiler + ['-classpath', pixels_classpath, '-d', pixels_classes,
+                        SOURCE / 'NativeCameraPixels.kt', TESTS / 'NativeCameraPixelsTest.kt'])
+        run([java, '-cp', pixels_classpath, 'ai.openbuy.exhibition.NativeCameraPixelsTestKt'], timeout=60)
+
+        tracker_classes = temporary / 'hand-tracker/classes'
+        tracker_classes.mkdir(parents=True)
+        tracker_classpath = os.pathsep.join(map(str, [tracker_classes, stdlib]))
+        tracker_stubs = sorted((TESTS / 'hand-tracker-stubs').rglob('*.kt'))
+        require(bool(tracker_stubs), '原生手势推理测试的 Android/MediaPipe 替身未就绪。')
+        print('Run native inference scheduling and frame ownership fixtures.', flush=True)
+        run(compiler + ['-classpath', tracker_classpath, '-d', tracker_classes,
+                        SOURCE / 'NativeCameraFrame.kt', SOURCE / 'NativeHandTracker.kt',
+                        TESTS / 'NativeHandTrackerTest.kt'] + tracker_stubs)
+        run([java, '-cp', tracker_classpath, 'ai.openbuy.exhibition.NativeHandTrackerTestKt'], timeout=60)
+
+        gesture_classes = temporary / 'gesture/classes'
+        gesture_classes.mkdir(parents=True)
+        gesture_classpath = os.pathsep.join(map(str, [gesture_classes, stdlib]))
+        print('Run native gesture single-flight and stale-callback fixtures.', flush=True)
+        run(compiler + ['-classpath', gesture_classpath, '-d', gesture_classes,
+                        SOURCE / 'NativeGestureFrameGate.kt', SOURCE / 'NativeGestureReleaseFence.kt',
+                        TESTS / 'NativeGestureFrameGateTest.kt', TESTS / 'NativeGestureReleaseFenceTest.kt'])
+        run([java, '-cp', gesture_classpath, 'ai.openbuy.exhibition.NativeGestureFrameGateTestKt'], timeout=60)
+        run([java, '-cp', gesture_classpath, 'ai.openbuy.exhibition.NativeGestureReleaseFenceTestKt'], timeout=60)
 
         ui_classes = temporary / 'mirror-ui/classes'
         ui_classes.mkdir(parents=True)

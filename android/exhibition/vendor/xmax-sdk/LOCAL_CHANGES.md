@@ -21,6 +21,13 @@ ID fails without falling back to another camera. Existing calls without an ID
 retain their front/back selection. Enumeration creates no capture or network
 session, and `close()` also releases an engine used only for enumeration.
 
+The optional local video-frame listener exposes bounded CPU I420 samples from
+the existing RTC capture for Android hand inference. A local sink replaces RTC's
+VideoCanvas, so the existing EGL frame renderer also renders local preview with
+the selected mirror mode. The listener never opens a second camera or changes
+remote-frame/session confirmation. Capture samples are copied before the SDK
+callback returns and are invalidated when the camera owner changes or closes.
+
 The local Gradle file removes publication/native compilation tasks and consumes
 the official 1.0.8 AAR's precompiled `libxmax_yuv.so` and `libc++_shared.so` for
 all four published ABIs. An NDK installation is therefore unnecessary.

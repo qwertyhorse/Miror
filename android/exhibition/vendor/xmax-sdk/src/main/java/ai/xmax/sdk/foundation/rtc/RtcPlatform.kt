@@ -45,6 +45,8 @@ internal interface RtcPlatformEngine {
 
     fun setCameraPreviewReadyListener(listener: (() -> Unit)?)
 
+    fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?): Int = 0
+
     fun setRemoteVideoFrameListener(
         streamId: String,
         listener: RtcRemoteVideoSink?,

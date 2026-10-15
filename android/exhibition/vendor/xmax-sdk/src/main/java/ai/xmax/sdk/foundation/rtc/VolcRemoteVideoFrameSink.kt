@@ -85,7 +85,7 @@ internal interface RemoteFrameRenderer {
 }
 
 /** 使用 RTC 随包提供的 EGL 渲染器；所有权属于持续 sink，不再切回原生 VideoCanvas。 */
-internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode) : RemoteFrameRenderer {
+internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode, mirror: Boolean = false) : RemoteFrameRenderer {
     private val renderer = VideoFrameRender("XmaxRemoteVideo")
 
     init {
@@ -98,7 +98,7 @@ internal class VolcRemoteFrameRenderer(view: View, contentMode: VideoContentMode
                 VideoContentMode.FIT -> RendererCommon.ScalingType.SCALE_ASPECT_FIT
                 VideoContentMode.FILL -> RendererCommon.ScalingType.SCALE_ASPECT_FILL
             })
-            renderer.setMirror(false)
+            renderer.setMirror(mirror)
             renderer.onStart()
         } catch (error: Throwable) {
             try { renderer.release() } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }

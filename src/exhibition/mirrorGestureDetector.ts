@@ -1,5 +1,5 @@
-import { ExhibitionGestureDetector, type ExhibitionGestureHand, type ExhibitionGestureLandmark } from './gestureDetector';
-import { ExhibitionRaiseGestureDetector, type ExhibitionGesturePose, type ExhibitionGesturePoseLandmark } from './raiseGestureDetector';
+import { ExhibitionGestureDetector, type ExhibitionGestureHand, type ExhibitionGestureLandmark } from './gestureDetector.ts';
+import { ExhibitionRaiseGestureDetector, type ExhibitionGesturePose, type ExhibitionGesturePoseLandmark } from './raiseGestureDetector.ts';
 
 // Initial camera tuning, to validate against real seated and standing recordings.
 const MIN_VISIBILITY = 0.65;

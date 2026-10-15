@@ -4,6 +4,8 @@ import { ApiError } from './types.ts';
 import { TryOnService } from './service.ts';
 import type { ExhibitionService } from './exhibition.ts';
 import type { ExhibitionMirrors } from './exhibitionMirrors.ts';
+import { RemoteGestureCoordinator, RemoteGestureError } from './remoteGestures.ts';
+import { remoteGestureRequest } from './remoteGestureHttp.ts';
 
 const BROWSER_TEST_ID = /^test-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const BROWSER_TEST_COOKIE = 'miror_browser_test';
@@ -42,7 +44,7 @@ async function body(request: IncomingMessage, maximumBytes = 16_384): Promise<Re
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ApiError('INVALID_JSON', '请提供有效的 JSON 对象。');
   return value as Record<string, unknown>;
 }
-export function createApiServer(service: TryOnService, allowedOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:4173', 'http://localhost:4173'], _unusedKeySettings?: unknown, exhibition?: ExhibitionService | ExhibitionMirrors) {
+export function createApiServer(service: TryOnService, allowedOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:4173', 'http://localhost:4173'], _unusedKeySettings?: unknown, exhibition?: ExhibitionService | ExhibitionMirrors, gestures?: RemoteGestureCoordinator) {
   exhibition?.attachLiveService(service);
   const mirrors = exhibition && 'getMirror' in exhibition ? exhibition : undefined;
   const defaultExhibition = () => mirrors ? mirrors.getMirror() : exhibition as ExhibitionService | undefined;
@@ -98,6 +100,11 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           assertCurrent();
           return input;
         };
+        if (!browserTest && mirrorRoute && path.startsWith('/gestures/')) {
+          if (!mirrors || !gestures) throw new ApiError('GESTURE_UNAVAILABLE', 'Linux 手势识别暂不可用。', 503);
+          await remoteGestureRequest(request, response, { mirrorId, path, mirrors, current, coordinator: gestures, assertCurrent });
+          return;
+        }
         if (browserTest && path === '/browser-test' && request.method === 'GET') return json(response, 200, { mirror: context!.mirror, expiresAt: context!.expiresAt });
         if (!browserTest && mirrorRoute && path === '/browser-tests' && request.method === 'POST') {
           const input = await readBody(2_048);
@@ -268,13 +275,14 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
       }
       throw new ApiError('NOT_FOUND', '未找到接口。', 404);
     } catch (error) {
-      const safe = error instanceof ApiError ? error : new ApiError('INTERNAL_ERROR', '本地服务暂时不可用。', 500);
+      const safe = error instanceof ApiError ? error : error instanceof RemoteGestureError
+        ? new ApiError(error.code, error.message, error.status) : new ApiError('INTERNAL_ERROR', '本地服务暂时不可用。', 500);
       if (response.headersSent) { response.destroy(); return; }
       json(response, safe.statusCode, { error: { code: safe.code, message: safe.message }, code: safe.code, message: safe.message });
     }
   });
   const exhibitionWatchdog = exhibition ? setInterval(() => { void exhibition.sweepLive().catch(() => undefined); }, 1_000) : undefined;
   exhibitionWatchdog?.unref();
-  server.on('close', () => { if (exhibitionWatchdog) clearInterval(exhibitionWatchdog); });
+  server.on('close', () => { if (exhibitionWatchdog) clearInterval(exhibitionWatchdog); void gestures?.closeAll(); });
   return server;
 }

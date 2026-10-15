@@ -13,6 +13,9 @@ internal object LanBackendAddress {
         configuredHostname.endsWith(".local", ignoreCase = true) &&
             configuredHostname.equals(announcedHostname.trimEnd('.'), ignoreCase = true)
 
+    fun isBackendServiceInstance(configuredHostname: String, instance: String): Boolean =
+        instance == "Miror" || instance.equals("Miror-${configuredHostname.trimEnd('.').lowercase().removeSuffix(".local")}", ignoreCase = true)
+
     fun requirePrivateIpv4(value: String): Inet4Address {
         val parts = value.split('.')
         require(parts.size == 4 && parts.all { it.matches(Regex("0|[1-9][0-9]{0,2}")) }) {

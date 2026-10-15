@@ -55,6 +55,7 @@ internal class RtcManager(
     private var cameraListenerVersion = 0L
     private var cameraSourceVersion = 0L
     private var cameraPreviewReadyListener: RealtimeCameraPreviewReadyListener? = null
+    private var localVideoFrameListener: ai.xmax.sdk.RealtimeLocalVideoFrameListener? = null
     private var remoteFrameRegistration: RemoteFrameRegistration? = null
     private var isCameraVideoSourceActive = false
     private var hasCapturedFirstLocalVideoFrame = false
@@ -95,6 +96,8 @@ internal class RtcManager(
                     lease.engine.setCameraPreviewReadyListener {
                         if (isCurrentLease(lease)) markFirstLocalVideoFrameCaptured()
                     }
+                    checkResult("setLocalVideoSink", lease.engine.setLocalVideoFrameListener(
+                        synchronized(stateLock) { localVideoFrameListener }))
                 }
             } catch (error: Throwable) {
                 cleanupAfterFailure(error, {
@@ -118,10 +121,12 @@ internal class RtcManager(
                             platformEventListener = null
                             remoteFrameRegistration = null
                             cameraPreviewReadyListener = null
+                            localVideoFrameListener = null
                             resetCameraPreviewReadinessLocked(cameraSourceActive = false)
                             hasBoundLocalVideoCanvas = false
                         }
                     }
+                    lease?.engine?.setLocalVideoFrameListener(null)
                     lease?.engine?.setEventListener(null)
                     lease?.engine?.setQualityListener(null)
                     lease?.engine?.setCameraPreviewReadyListener(null)
@@ -434,6 +439,16 @@ internal class RtcManager(
             markCameraPreviewReadyReportedIfNeededLocked()
         }
         notifyCameraPreviewReady(shouldNotify)
+    }
+
+    override fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?) {
+        nativeGate.write {
+            val engine = synchronized(stateLock) {
+                localVideoFrameListener = listener
+                engineLease?.engine
+            }
+            if (engine != null) checkResult("setLocalVideoSink", engine.setLocalVideoFrameListener(listener))
+        }
     }
 
     override fun setRemoteVideoFrameListener(

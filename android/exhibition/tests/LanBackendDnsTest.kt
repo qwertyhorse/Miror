@@ -33,6 +33,11 @@ fun main() {
     verify(!LanBackendAddress.isBackendServiceHost("xuxin.local", "xuminghong.local"), "An old Mac service cannot resolve Ubuntu")
     verify(!LanBackendAddress.isBackendServiceHost("custom.local", "xuxin.local"), "A configured custom backend cannot resolve to Ubuntu")
     verify(!LanBackendAddress.isBackendServiceHost("xuxin.local", ""), "Unidentified NSD service rejected")
+    verify(LanBackendAddress.isBackendServiceInstance("xuxin.local", "Miror-xuxin"), "Unique Ubuntu service is discoverable")
+    verify(LanBackendAddress.isBackendServiceInstance("xuxin.local", "Miror"), "Legacy service is still checked by its resolved hostname")
+    verify(LanBackendAddress.isBackendServiceInstance("custom.local", "Miror-custom"), "Custom backend uses its own unique service instance")
+    verify(!LanBackendAddress.isBackendServiceInstance("xuxin.local", "Miror-xuminghong"), "A different backend's unique instance is ignored")
+    verify(!LanBackendAddress.isBackendServiceInstance("xuxin.local", "Miror-xuxin-extra"), "Instance matching does not accept a hostname prefix")
 
     var discoveries = 0
     var systemCalls = 0

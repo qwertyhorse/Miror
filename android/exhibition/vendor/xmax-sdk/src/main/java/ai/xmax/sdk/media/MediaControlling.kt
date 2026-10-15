@@ -36,6 +36,8 @@ internal interface MediaControlling : InteractionControlling {
 
     fun setCameraPreviewReadyListener(listener: RealtimeCameraPreviewReadyListener?)
 
+    fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?) {}
+
     suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice>
 
     suspend fun createLocalCameraStream(

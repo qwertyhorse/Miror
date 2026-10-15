@@ -42,6 +42,7 @@ internal class XmaxRealtimeManager(
     @Volatile private var configuredRemoteAudioVolume: Float? = null
     private var networkQualityListener: RealtimeNetworkQualityListener? = null
     private var performanceAlarmListener: RealtimePerformanceAlarmListener? = null
+    private var localVideoFrameListener: RealtimeLocalVideoFrameListener? = null
     private val coordinator = RealtimeCoordinator(
         callbacks,
         dispatcher,
@@ -57,6 +58,12 @@ internal class XmaxRealtimeManager(
     }
     override suspend fun setRemoteVideoFrameListener(listener: RealtimeVideoFrameListener?) {
         callbacks.remoteVideoFrames.setListener(listener)
+    }
+    override suspend fun setLocalVideoFrameListener(listener: RealtimeLocalVideoFrameListener?) {
+        execute(OperationKind.SETTING) { _, c ->
+            c.media.setLocalVideoFrameListener(listener)
+            localVideoFrameListener = listener
+        }
     }
     override suspend fun setNetworkQualityListener(listener: RealtimeNetworkQualityListener?) {
         execute(OperationKind.SETTING) { _, c ->
@@ -393,6 +400,7 @@ internal class XmaxRealtimeManager(
                 cleanupResources(
                     { c.media.stopLocalStream() },
                     { c.media.setCameraPreviewReadyListener(null) },
+                    { c.media.setLocalVideoFrameListener(null) },
                     { c.stream.setNetworkQualityListener(null) },
                     { c.stream.setPerformanceAlarmListener(null) },
                 )
@@ -439,6 +447,7 @@ internal class XmaxRealtimeManager(
             owner.audioSettingsApplied = true
         }
         if (!owner.listenersApplied) {
+            owner.components.media.setLocalVideoFrameListener(localVideoFrameListener)
             owner.components.media.setCameraPreviewReadyListener {
                 if (runtime === owner) {
                     coordinator.localPreviewDidBecomeReady()

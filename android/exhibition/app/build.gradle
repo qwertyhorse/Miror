@@ -10,8 +10,9 @@ android {
         applicationId 'ai.openbuy.exhibition'
         minSdk 28
         targetSdk 35
-        versionCode 13
-        versionName '0.5.0'
+        versionCode 15
+        versionName '0.6.0'
+        testInstrumentationRunner 'ai.openbuy.exhibition.NativeGestureInstrumentation'
     }
 
     compileOptions {
@@ -35,10 +36,22 @@ android {
     }
 }
 
+// Reuse the reviewed web model without checking a second binary into the repository.
+def gestureAssets = layout.buildDirectory.dir('generated/gesture-assets')
+def copyGestureModel = tasks.register('copyGestureModel', Copy) {
+    from("${rootProject.projectDir}/../../public/assets/exhibition-gestures") {
+        include 'hand_landmarker.task', 'LICENSE*'
+    }
+    into(gestureAssets.map { it.dir('exhibition-gestures') })
+}
+android.sourceSets.main.assets.srcDir(gestureAssets.get().asFile)
+tasks.named('preBuild').configure { dependsOn(copyGestureModel) }
+
 dependencies {
     implementation project(':xmax-sdk')
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
     // Already supplied by the XMAX COS dependency; expose DNS customization to the LAN client.
     implementation 'com.squareup.okhttp3:okhttp:3.12.6'
+    implementation 'com.google.mediapipe:tasks-vision:0.10.32'
 }

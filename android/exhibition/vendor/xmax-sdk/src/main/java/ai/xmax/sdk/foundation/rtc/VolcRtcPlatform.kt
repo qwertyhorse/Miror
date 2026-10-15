@@ -57,6 +57,15 @@ internal fun createVolcRtcEngine(
     val qualityListener = AtomicReference<WeakReference<RtcQualityListener>?>(null)
     val activeRoomId = AtomicReference<String?>(null)
     val localMirrorType = AtomicReference(MirrorType.MIRROR_TYPE_NONE)
+    val localFrameSink = AtomicReference<VolcRemoteVideoFrameSink?>(null)
+    val localVideoBinding = AtomicReference<Pair<View, VideoContentMode>?>(null)
+    fun bindObservedLocalVideo() {
+        val binding = localVideoBinding.get() ?: return
+        localFrameSink.get()?.bind {
+            VolcRemoteFrameRenderer(binding.first, binding.second,
+                localMirrorType.get() in listOf(MirrorType.MIRROR_TYPE_RENDER, MirrorType.MIRROR_TYPE_RENDER_AND_ENCODER))
+        }
+    }
     val remoteStreamIds = ConcurrentHashMap<RemoteStream, String>()
     val remoteSinks = ConcurrentHashMap<String, VolcRemoteVideoFrameSink>()
     val engine = RTCEngine.createRTCEngine(configuration, object : IRTCEngineEventHandler() {
@@ -171,7 +180,7 @@ internal fun createVolcRtcEngine(
             if (switchResult < 0) return switchResult
             val mirrorType = RtcVideoConverter.convertMirrorType(position)
             val mirrorResult = engine.setLocalVideoMirrorType(mirrorType)
-            if (mirrorResult >= 0) localMirrorType.set(mirrorType)
+            if (mirrorResult >= 0) { localMirrorType.set(mirrorType); bindObservedLocalVideo() }
             return mirrorResult
         }
 
@@ -198,7 +207,7 @@ internal fun createVolcRtcEngine(
             if (selectionResult != 0) return selectionResult
             val mirrorType = position?.let(RtcVideoConverter::convertMirrorType) ?: MirrorType.MIRROR_TYPE_NONE
             val mirrorResult = engine.setLocalVideoMirrorType(mirrorType)
-            if (mirrorResult == 0) localMirrorType.set(mirrorType)
+            if (mirrorResult == 0) { localMirrorType.set(mirrorType); bindObservedLocalVideo() }
             return mirrorResult
         }
 
@@ -206,6 +215,11 @@ internal fun createVolcRtcEngine(
             view: View,
             contentMode: VideoContentMode,
         ): Int {
+            localVideoBinding.set(view to contentMode)
+            if (localFrameSink.get() != null) {
+                bindObservedLocalVideo()
+                return 0
+            }
             val canvasResult = engine.setLocalVideoCanvas(
                 RtcVideoConverter.makeCanvas(view, contentMode),
             )
@@ -213,7 +227,11 @@ internal fun createVolcRtcEngine(
             return engine.setLocalVideoMirrorType(localMirrorType.get())
         }
 
-        override fun unbindLocalVideo(): Int = engine.setLocalVideoCanvas(null)
+        override fun unbindLocalVideo(): Int {
+            localVideoBinding.set(null)
+            localFrameSink.get()?.unbind()
+            return engine.setLocalVideoCanvas(null)
+        }
 
         override fun bindRemoteVideo(
             userId: String,
@@ -238,6 +256,44 @@ internal fun createVolcRtcEngine(
 
         override fun setCameraPreviewReadyListener(listener: (() -> Unit)?) {
             cameraPreviewReadyListener.set(listener)
+        }
+
+        override fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?): Int {
+            val configuration = com.ss.bytertc.engine.video.LocalVideoSinkConfig().apply {
+                position = com.ss.bytertc.engine.video.LocalVideoSinkPosition.AFTER_CAPTURE
+                pixelFormat = com.ss.bytertc.engine.data.VideoPixelFormat.I420
+            }
+            val previous = localFrameSink.getAndSet(null)
+            try { previous?.release() }
+            finally { engine.setLocalVideoSink(null, configuration) }
+            if (listener == null) {
+                val binding = localVideoBinding.get()
+                return engine.setLocalVideoCanvas(binding?.let { RtcVideoConverter.makeCanvas(it.first, it.second) })
+            }
+            val sink = VolcRemoteVideoFrameSink(object : RtcRemoteVideoSink {
+                override fun onFirstFrame(width: Int, height: Int) = Unit
+                override fun onFrame(frame: RtcRemoteVideoFrame) {
+                    val timestamp = android.os.SystemClock.elapsedRealtime()
+                    if (!listener.shouldCaptureFrame(timestamp)) return
+                    try { listener.onFrame(frame.copy(), timestamp) }
+                    catch (_: Exception) { listener.onFrameDropped() }
+                }
+            })
+            localFrameSink.set(sink)
+            try {
+                // A custom sink replaces VideoCanvas. Render the same frames ourselves,
+                // while the analysis consumer independently skips busy frames.
+                engine.setLocalVideoCanvas(null)
+                val result = engine.setLocalVideoSink(sink, configuration)
+                if (result < 0) { localFrameSink.set(null); sink.release() }
+                else bindObservedLocalVideo()
+                return result
+            } catch (error: Throwable) {
+                localFrameSink.set(null)
+                try { sink.release() } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
+                try { engine.setLocalVideoSink(null, configuration) } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
+                throw error
+            }
         }
 
         override fun setRemoteVideoFrameListener(

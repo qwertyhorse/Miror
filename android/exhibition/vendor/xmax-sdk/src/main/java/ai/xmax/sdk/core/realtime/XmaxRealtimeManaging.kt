@@ -35,6 +35,9 @@ public interface XmaxRealtimeManaging {
      */
     public suspend fun setRemoteVideoFrameListener(listener: RealtimeVideoFrameListener?)
 
+    /** Observe local camera frames independently of generated remote frames. */
+    public suspend fun setLocalVideoFrameListener(listener: RealtimeLocalVideoFrameListener?) {}
+
     /** 替换 RTC 网络质量监听器；传 null 注销。 */
     public suspend fun setNetworkQualityListener(listener: RealtimeNetworkQualityListener?)
 

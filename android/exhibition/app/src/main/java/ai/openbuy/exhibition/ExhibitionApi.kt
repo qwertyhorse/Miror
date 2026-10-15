@@ -36,6 +36,10 @@ class ExhibitionApi(
     // DNS may supply a LAN address; paid POSTs must never be retried automatically.
     private val client = OkHttpClient.Builder().dns(dns)
         .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build()
+    // Sampling is an independent lane: it cannot occupy a command/long-poll call or retry a POST.
+    private val gestureClient = client.newBuilder()
+        .connectTimeout(1_200, TimeUnit.MILLISECONDS).readTimeout(1_200, TimeUnit.MILLISECONDS)
+        .writeTimeout(1_200, TimeUnit.MILLISECONDS).callTimeout(1_200, TimeUnit.MILLISECONDS).build()
 
     init {
         require(screen.rawPath == SCREEN_PATH || screen.rawPath == "$SCREEN_PATH/") {
@@ -83,6 +87,66 @@ class ExhibitionApi(
 
     suspend fun state(mirrorId: String): JSONObject = json(mirrorPath(mirrorId))
 
+    internal fun gestures(mirrorId: String): NativeGestureTransport {
+        val path = "${mirrorPath(mirrorId)}/gestures"
+        fun credentials() = JSONObject().put("terminalId", terminalId).put("terminalToken", terminalToken)
+        return object : NativeGestureTransport {
+            override suspend fun open() = gestureRequest("$path/open", credentials(), timeoutMs = 15_000)
+            override suspend fun control(sessionId: String, epoch: Long, blocked: Boolean, reset: Boolean) =
+                gestureRequest("$path/control", credentials().put("sessionId", sessionId)
+                    .put("epoch", epoch).put("blocked", blocked).put("reset", reset), timeoutMs = 1_200)
+            override suspend fun frame(metadata: NativeGestureUpload, jpeg: ByteArray): JSONObject {
+                require(jpeg.isNotEmpty() && jpeg.size <= 256 * 1024) { "手势采样图片过大。" }
+                return gestureRequest("$path/frame", jpeg = jpeg, headers = mapOf(
+                    "X-OpenBuy-Terminal-Id" to terminalId, "X-OpenBuy-Terminal-Token" to terminalToken,
+                    "X-OpenBuy-Gesture-Session" to metadata.sessionId,
+                    "X-OpenBuy-Gesture-Epoch" to metadata.epoch.toString(),
+                    "X-OpenBuy-Gesture-Seq" to metadata.seq.toString(),
+                    "X-OpenBuy-Gesture-Time" to metadata.timestampMs.toString(),
+                    "X-OpenBuy-Gesture-Blocked" to metadata.blocked.toString(),
+                ), timeoutMs = 1_200)
+            }
+            override suspend fun close(sessionId: String) {
+                gestureRequest("$path/close", credentials().put("sessionId", sessionId), timeoutMs = 1_200)
+            }
+        }
+    }
+
+    private suspend fun gestureRequest(
+        path: String, json: JSONObject? = null, jpeg: ByteArray? = null,
+        headers: Map<String, String> = emptyMap(), timeoutMs: Long,
+    ): JSONObject = withContext(Dispatchers.IO) {
+        suspendCancellableCoroutine { continuation ->
+            val bytes = jpeg ?: requireNotNull(json).toString().toByteArray(Charsets.UTF_8)
+            val mime = if (jpeg != null) "image/jpeg" else "application/json; charset=utf-8"
+            val request = Request.Builder().url("$origin$VERSION_PATH/api$path")
+                .post(RequestBody.create(MediaType.parse(mime), bytes))
+                .header("Accept", "application/json").header("Cache-Control", "no-store")
+                .header("Origin", origin).header("X-Miror-Protocol", "2")
+                .apply { headers.forEach { (key, value) -> header(key, value) } }.build()
+            val call = (if (timeoutMs == 1_200L) gestureClient else gestureClient.newBuilder()
+                .connectTimeout(8_000, TimeUnit.MILLISECONDS).readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS).callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build())
+                .newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            try {
+                if (!continuation.isActive) return@suspendCancellableCoroutine
+                val result = call.execute().use { response ->
+                    checkStatus(response) { continuation.isActive }
+                    val type = response.header("Content-Type").orEmpty().substringBefore(';').trim()
+                    if (!type.equals("application/json", ignoreCase = true))
+                        throw ExhibitionApiException("INVALID_RESPONSE", "手势服务返回无效。")
+                    val body = response.body() ?: throw IOException("empty gesture response")
+                    JSONObject(body.byteStream().use { readLimited(it, MAX_ERROR_BYTES) { continuation.isActive } }
+                        .toString(Charsets.UTF_8))
+                }
+                if (continuation.isActive) continuation.resume(result)
+            } catch (error: Exception) {
+                if (continuation.isActive) continuation.resumeWithException(networkError(error))
+            }
+        }
+    }
+
     private var changesSupported = true
     suspend fun changes(mirrorId: String, after: Long): JSONObject {
         if (!changesSupported) return state(mirrorId)
@@ -117,7 +181,8 @@ class ExhibitionApi(
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session", "POST", JSONObject()
         .put("deviceId", deviceId).put("lookId", lookId)
         .put("generationNumber", generationNumber).put("expectedRevision", revision)
-        .put("terminalId", terminalId).put("terminalToken", terminalToken), 30_000)
+        .put("terminalId", terminalId).put("terminalToken", terminalToken), 30_000,
+        headers = mapOf("X-Miror-Material" to "binding-v1"))
 
     suspend fun bindReference(
         mirrorId: String,
@@ -125,8 +190,10 @@ class ExhibitionApi(
         deviceId: String,
         lookId: String,
         refImageUrl: String,
+        bindingId: String? = null,
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/reference", "POST",
-        JSONObject().put("deviceId", deviceId).put("lookId", lookId).put("refImageUrl", refImageUrl), 20_000)
+        JSONObject().put("deviceId", deviceId).put("lookId", lookId)
+            .apply { if (bindingId != null) put("bindingId", bindingId) else put("refImageUrl", refImageUrl) }, 20_000)
 
     suspend fun readyReference(mirrorId: String, lookId: String): JSONObject? {
         require(Regex("[A-Za-z0-9_-]{1,100}").matches(lookId)) { "素材编号无效。" }
@@ -216,7 +283,8 @@ class ExhibitionApi(
         method: String = "GET",
         body: JSONObject? = null,
         timeoutMs: Int = 8_000,
-    ): JSONObject = request("$origin$VERSION_PATH/api$path", method, body?.toString()?.toByteArray(Charsets.UTF_8), timeoutMs) { response, active ->
+        headers: Map<String, String> = emptyMap(),
+    ): JSONObject = request("$origin$VERSION_PATH/api$path", method, body?.toString()?.toByteArray(Charsets.UTF_8), timeoutMs, headers) { response, active ->
         checkStatus(response, active)
         if (!response.header("Content-Type").orEmpty().substringBefore(';').trim().equals("application/json", true)) {
             throw ExhibitionApiException("INVALID_RESPONSE", "后台返回异常，请检查展台网址。")
@@ -234,6 +302,7 @@ class ExhibitionApi(
         method: String,
         body: ByteArray?,
         timeoutMs: Int,
+        headers: Map<String, String> = emptyMap(),
         read: (Response, () -> Boolean) -> T,
     ): T = withContext(Dispatchers.IO) {
         suspendCancellableCoroutine { continuation ->
@@ -241,7 +310,8 @@ class ExhibitionApi(
             val request = Request.Builder().url(url).method(method, requestBody)
                 .header("Accept", "application/json, image/png, image/jpeg, image/webp")
                 .header("Cache-Control", "no-store").header("Pragma", "no-cache")
-                .header("Origin", origin).header("X-Miror-Protocol", "2").build()
+                .header("Origin", origin).header("X-Miror-Protocol", "2")
+                .apply { headers.forEach { (key, value) -> header(key, value) } }.build()
             val call = client.newBuilder()
                 .connectTimeout(minOf(timeoutMs, 8_000).toLong(), TimeUnit.MILLISECONDS)
                 .readTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
@@ -318,3 +388,14 @@ class ExhibitionApi(
 }
 
 class ExhibitionApiException(val code: String, message: String, val status: Int? = null) : IOException(message)
+
+internal data class NativeGestureUpload(
+    val sessionId: String, val epoch: Long, val seq: Long, val timestampMs: Long, val blocked: Boolean,
+)
+
+internal interface NativeGestureTransport {
+    suspend fun open(): JSONObject
+    suspend fun control(sessionId: String, epoch: Long, blocked: Boolean, reset: Boolean): JSONObject
+    suspend fun frame(metadata: NativeGestureUpload, jpeg: ByteArray): JSONObject
+    suspend fun close(sessionId: String)
+}

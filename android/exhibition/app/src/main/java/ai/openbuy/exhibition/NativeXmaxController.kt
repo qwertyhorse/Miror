@@ -1,6 +1,7 @@
 package ai.openbuy.exhibition
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import ai.xmax.sdk.CameraPosition
@@ -8,6 +9,8 @@ import ai.xmax.sdk.RealtimeConfiguration
 import ai.xmax.sdk.RealtimeConnectionState
 import ai.xmax.sdk.RealtimeContext
 import ai.xmax.sdk.RealtimeMediaStream
+import ai.xmax.sdk.RealtimeLocalVideoFrameListener
+import ai.xmax.sdk.RealtimeVideoFrame
 import ai.xmax.sdk.RealtimeModel
 import ai.xmax.sdk.RealtimeReason
 import ai.xmax.sdk.RealtimeVideoFormat
@@ -19,7 +22,10 @@ import ai.xmax.sdk.XmaxRealtimeManaging
 import ai.xmax.sdk.XmaxRealtimeVideoView
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -50,6 +56,8 @@ class NativeXmaxController(
     var onFirstFrame: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     internal var onCameraSnapshot: ((NativeCameraSnapshot) -> Unit)? = null
+    /** Receiver owns each sample and must close it, even when discarding it. */
+    @Volatile var onLocalFrame: ((NativeCameraFrame) -> Unit)? = null
 
     /** Local-only capture: no temporary key request or XMAX session is created. */
     suspend fun preview(
@@ -216,6 +224,7 @@ class NativeXmaxController(
         val selected = selection.resolve(detected.devices)
             ?: throw IllegalStateException(selection.unavailableMessage(detected))
         previewDeviceId = selected.id
+        observeLocalFrames(owner, epoch.get())
         return owner.createLocalCameraStream(
             videoFormat = RealtimeVideoFormat(width = 704, height = 1280, fps = 24),
             position = when (selected.facing) {
@@ -226,6 +235,48 @@ class NativeXmaxController(
             useMicrophone = false,
             cameraDeviceId = selected.id,
         )
+    }
+
+    private suspend fun observeLocalFrames(owner: XmaxRealtimeManaging, ownerEpoch: Long) {
+        if (onLocalFrame == null) { owner.setLocalVideoFrameListener(null); return }
+        val inFlight = AtomicBoolean()
+        val lastSample = AtomicLong(Long.MIN_VALUE)
+        owner.setLocalVideoFrameListener(object : RealtimeLocalVideoFrameListener {
+            override fun shouldCaptureFrame(timestampMs: Long): Boolean {
+                if (epoch.get() != ownerEpoch || onLocalFrame == null) return false
+                val previous = lastSample.get()
+                if (previous != Long.MIN_VALUE && timestampMs - previous < 100) return false
+                if (!inFlight.compareAndSet(false, true)) return false
+                lastSample.set(timestampMs)
+                return true
+            }
+            override fun onFrameDropped() { inFlight.set(false) }
+            override fun onFrame(frame: RealtimeVideoFrame, timestampMs: Long) {
+                CoroutineScope(Dispatchers.Default).launch {
+                    var sample: NativeCameraFrame? = null
+                    var transferred = false
+                    try {
+                        if (epoch.get() != ownerEpoch || onLocalFrame == null) return@launch
+                        val pixels = NativeCameraPixels.convert(frame.width, frame.height, frame.rotationDegrees,
+                            frame.yData, frame.uData, frame.vData, frame.yStride, frame.uStride, frame.vStride, 640)
+                        val bitmap = Bitmap.createBitmap(pixels.argb, pixels.width, pixels.height, Bitmap.Config.ARGB_8888)
+                        val owned = NativeCameraFrame(bitmap, timestampMs, ownerEpoch, { epoch.get() == ownerEpoch }) { inFlight.set(false) }
+                        sample = owned
+                        val receiver = onLocalFrame
+                        if (epoch.get() == ownerEpoch && receiver != null) {
+                            receiver(owned)
+                            transferred = true
+                            sample = null // Ownership transferred; inference releases capture backpressure.
+                        }
+                    } catch (_: Exception) {
+                        // Analysis never interrupts the RTC camera or the XMAX session.
+                    } finally {
+                        if (sample != null) sample.close()
+                        else if (!transferred) inFlight.set(false)
+                    }
+                }
+            }
+        })
     }
 
     private suspend fun observeErrors(
@@ -265,9 +316,20 @@ class NativeXmaxController(
         activeView.localTrack = null
         activeView = view
         try {
-            previous?.setStateListener(null)
-            previous?.setRemoteVideoFrameListener(null)
-            previous?.close()
+            var failure: Throwable? = null
+            val cleanup: List<suspend () -> Unit> = listOf(
+                { previous?.setLocalVideoFrameListener(null); Unit },
+                { previous?.setStateListener(null); Unit },
+                { previous?.setRemoteVideoFrameListener(null); Unit },
+                { previous?.close(); Unit },
+            )
+            for (operation in cleanup) {
+                try { operation() }
+                catch (error: Throwable) {
+                    if (failure == null) failure = error else if (failure !== error) failure.addSuppressed(error)
+                }
+            }
+            failure?.let { throw it }
         } catch (error: Throwable) {
             hasReleaseFailure = true
             throw error

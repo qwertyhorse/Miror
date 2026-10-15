@@ -87,6 +87,10 @@ internal class MediaController(
         cameraController.setPreviewReadyListener(listener)
     }
 
+    override fun setLocalVideoFrameListener(listener: ai.xmax.sdk.RealtimeLocalVideoFrameListener?) {
+        rtcManager.setLocalVideoFrameListener(listener)
+    }
+
     override suspend fun startInteraction(
         taskId: String,
         videoFormat: RealtimeVideoFormat,

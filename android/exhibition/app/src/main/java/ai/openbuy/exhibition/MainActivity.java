@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.SharedPreferences;
+import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -53,7 +54,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final int MIN_WEBVIEW_MAJOR = 111;
+    private static final int MIN_WEBVIEW_MAJOR = MirrorRuntime.MIN_WEBVIEW_MAJOR;
     private static final int CAMERA_PERMISSION = 41;
     private static final int PURPLE = Color.rgb(116, 82, 214);
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -79,6 +80,11 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (!MirrorRuntime.supportsWeb()) {
+            startActivity(new Intent(this, NativeExhibitionActivity.class));
+            finish();
+            return;
+        }
         preferences = getSharedPreferences("exhibition-device", MODE_PRIVATE);
         initializeTerminalIdentity();
         String savedScreenUrl = preferences.getString("screen-url", null);

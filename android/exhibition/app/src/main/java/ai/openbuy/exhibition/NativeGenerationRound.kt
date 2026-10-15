@@ -36,10 +36,13 @@ class NativeGenerationRound(
     private val onFirstFrame: () -> Unit,
     private val cameraPosition: CameraPosition = CameraPosition.BACK,
     private val cameraDeviceId: String? = null,
+    private val onBusyChanged: () -> Unit = {},
 ) {
     private var snapshot = JSONObject(state.toString())
     private var selection = JSONObject(look.toString())
     private val sessionNumber = snapshot.optLong("sessionNumber", -1)
+    // Published catalogs use server-owned bindings; only older backends accept client uploads.
+    private val publishedMaterials = snapshot.optJSONObject("publication") != null
     private val generationNumber get() = snapshot.optLong("generationNumber", -1)
     private val revision = snapshot.optLong("revision", -1)
     private val lookId get() = selection.optString("id")
@@ -54,6 +57,12 @@ class NativeGenerationRound(
     private var retryable = false
     private var renewing = false
     private var conditionBusy = false
+    var isBusy = true
+        private set(value) {
+            if (field == value) return
+            field = value
+            onBusyChanged()
+        }
     private var stopReason = "provider_rejected"
     private var leaseDeadline = 0L
     private var referencePreparation: Deferred<String?>? = null
@@ -69,6 +78,7 @@ class NativeGenerationRound(
         val nextKey = selectionKey(state, look)
         if (key == nextKey) return
         key = nextKey
+        isBusy = true
         retryable = false
         referencePreparation?.cancel()
         updates.trySend(JSONObject(state.toString()) to JSONObject(look.toString()))
@@ -76,6 +86,7 @@ class NativeGenerationRound(
 
     fun retryUpdate(): Boolean {
         if (!connected || !retryable) return false
+        isBusy = true
         retryable = false
         updates.trySend(JSONObject(snapshot.toString()) to JSONObject(selection.toString()))
         return true
@@ -101,8 +112,9 @@ class NativeGenerationRound(
                 val prompt = NativeRoundMetadata.prompt(selection)
                 status("准备素材")
                 // A bad or missing local asset must fail before requesting a paid credential.
-                val prepared = if (noReference || mode == "mox") null else preparedReference(selection)
-                var image = if (noReference || prepared != null) null else api.image(referenceImage!!)
+                val prepared = if (noReference || (!publishedMaterials && mode == "mox")) null else preparedReference(selection)
+                if (publishedMaterials && !noReference) requirePrepared(prepared)
+                var image = if (noReference || (prepared != null && mode != "mox")) null else api.image(referenceImage!!)
                 val mime = image?.let(NativeRoundMetadata::imageMime)
 
                 status("连接中")
@@ -124,7 +136,10 @@ class NativeGenerationRound(
                         }
                     }
                 }
-                val expiresAt = validateRecord(created, noReference, prompt, 0, "", null)
+                val prebound = publishedMaterials && !noReference && NativeRoundMetadata.integer(created, "referenceVersion") == 1L
+                val createdReference = if (prebound) created.optString("refImageUrl") else ""
+                if (prebound) NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(createdReference), "后台参考图无效。")
+                val expiresAt = validateRecord(created, noReference, prompt, if (prebound) 1 else 0, createdReference, null)
                 val token = created.optString("token")
                 NativeRoundMetadata.requireValid(NativeRoundMetadata.temporaryKey.matches(token), "临时连接凭证无效。")
                 NativeRoundMetadata.requireValid(created.optString("model") == "x2.0", "当前模型不支持展台体验。")
@@ -146,6 +161,7 @@ class NativeGenerationRound(
                             if (continuous && connected && !conditionBusy && !renewing &&
                                 (live.optBoolean("renewalDue", false) || expiresAt - System.currentTimeMillis() <= 15_000)) {
                                 renewing = true
+                                isBusy = true
                                 launch {
                                     val plan = api.prepareRenewal(mirrorId, id, deviceId, sessionNumber, generationNumber)
                                     val renewalId = plan.optString("renewalId")
@@ -183,6 +199,14 @@ class NativeGenerationRound(
 
                 val scope = created.optString("referenceScope")
                 val reference = if (!noReference) {
+                    if (publishedMaterials) {
+                        val binding = requirePrepared(prepared, scope)
+                        val bound = if (prebound) created else api.bindReference(mirrorId, id, deviceId, lookId, "", binding)
+                        val url = bound.optString("refImageUrl")
+                        NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(url), "后台参考图无效。")
+                        validateRecord(bound, false, prompt, 1, url, null)
+                        url
+                    } else {
                     val uploaded = if (prepared != null && scope.isNotEmpty() && prepared.optString("scope") == scope
                         && prepared.optLong("freshUntil") > System.currentTimeMillis()) prepared.getString("url") else {
                         if (image == null) image = api.image(referenceImage!!)
@@ -192,6 +216,7 @@ class NativeGenerationRound(
                     val bound = api.bindReference(mirrorId, id, deviceId, lookId, uploaded)
                     validateRecord(bound, false, prompt, 1, uploaded, null)
                     uploaded
+                    }
                 } else null
 
                 val providerId = controller.connect(
@@ -223,6 +248,7 @@ class NativeGenerationRound(
                 controller.generate(prompt, reference)
                 firstReceipt.await()
                 connected = true
+                isBusy = false
                 var version = if (noReference) 0L else 1L
                 var boundGeneration = generationNumber
                 val references = mutableMapOf<String, String>()
@@ -231,6 +257,7 @@ class NativeGenerationRound(
                     if (renewing) continue
                     conditionBusy = true
                     var dispatched = false
+                    var acknowledged = false
                     snapshot = next; selection = nextLook
                     val operationKey = selectionKey(next, nextLook)
                     try {
@@ -239,11 +266,12 @@ class NativeGenerationRound(
                         val nextReferenceImage = NativeRoundMetadata.referenceImage(selection)
                         val nextPrompt = NativeRoundMetadata.prompt(selection)
                         status("准备素材")
-                        val url = supervisorScope {
+                        val referenceValue = supervisorScope {
                             // Only independent image preparation is cancelled by a newer choice.
                             // Backend binding and SDK condition updates remain serialized.
                             val preparing = async {
-                                if (none) null else references[nextReferenceImage!!] ?: run {
+                                if (none) null else if (publishedMaterials) requirePrepared(preparedReference(selection), scope)
+                                else references[nextReferenceImage!!] ?: run {
                                     val ready = preparedReference(selection)
                                     val uploaded = if (ready != null && scope.isNotEmpty() && ready.optString("scope") == scope) ready.getString("url") else {
                                         val bytes = api.image(nextReferenceImage)
@@ -261,8 +289,11 @@ class NativeGenerationRound(
                         if (operationKey != key) continue
                         val intent = JSONObject().put("deviceId", deviceId).put("lookId", lookId)
                             .put("sessionNumber", sessionNumber).put("generationNumber", generationNumber)
-                        if (url != null) intent.put("refImageUrl", url)
+                        if (referenceValue != null) intent.put(if (publishedMaterials) "bindingId" else "refImageUrl", referenceValue)
                         val bound = api.condition(mirrorId, id, intent)
+                        val url = if (none) null else if (publishedMaterials) bound.optString("refImageUrl").also {
+                            NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(it), "后台参考图无效。")
+                        } else referenceValue
                         val nextVersion = NativeRoundMetadata.integer(bound, "referenceVersion") ?: -1
                         NativeRoundMetadata.requireValid(nextVersion > version || (nextVersion == version && boundGeneration == generationNumber), "素材版本未更新。")
                         validateRecord(bound, none, nextPrompt, nextVersion, url.orEmpty(), providerId)
@@ -276,6 +307,7 @@ class NativeGenerationRound(
                         }
                         if (operationKey != key) continue
                         api.conditionApplied(mirrorId, id, intent.put("referenceVersion", version))
+                        acknowledged = true
                         if (operationKey == key) status("实时生成")
                     } catch (cancelled: CancellationException) {
                         currentCoroutineContext().ensureActive()
@@ -287,7 +319,12 @@ class NativeGenerationRound(
                             retryable = true
                             onError(NativeRoundMetadata.safeMessage(error.message.orEmpty()))
                         }
-                    } finally { conditionBusy = false }
+                    } finally {
+                        conditionBusy = false
+                        // A newer manual choice remains pending in the conflated channel.
+                        // Only its server acknowledgement can reopen gesture input.
+                        if (operationKey == key && acknowledged && !retryable) isBusy = false
+                    }
                 }
                 throw CancellationException("Experience stopped")
             }
@@ -306,6 +343,7 @@ class NativeGenerationRound(
             }
             throw failure
         } finally {
+            isBusy = true
             connected = false
             updates.close()
             withContext(NonCancellable) {
@@ -335,7 +373,15 @@ class NativeGenerationRound(
                 && it.optLong("freshUntil") > System.currentTimeMillis()
         }
     } catch (cancelled: CancellationException) { throw cancelled }
-    catch (_: Exception) { null } // Older/offline preparation falls back to the ordinary SDK upload.
+    catch (_: Exception) { null } // Published catalogs reject unavailable bindings before allocating a credential.
+
+    private fun requirePrepared(value: JSONObject?, expectedScope: String? = null): String {
+        NativeRoundMetadata.requireValid(value != null && value.optString("bindingId").isNotBlank()
+            && value.optLong("freshUntil") > System.currentTimeMillis()
+            && (expectedScope == null || (expectedScope.isNotBlank() && value.optString("scope") == expectedScope)),
+            "这件素材暂不可用，请在后台检查。")
+        return value!!.getString("bindingId")
+    }
 
     private suspend fun status(value: String) = withContext(Dispatchers.Main.immediate) { onStatus(value) }
 

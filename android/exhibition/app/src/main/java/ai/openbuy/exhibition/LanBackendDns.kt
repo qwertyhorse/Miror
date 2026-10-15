@@ -44,6 +44,8 @@ private class LanNsdDiscovery(private val application: Context, private val host
     private var stopRequested = false
     private var result: InetAddress? = null
     private var resolution: NsdManager.ResolveListener? = null
+    private val candidates = linkedMapOf<String, NsdServiceInfo>()
+    private val seen = mutableSetOf<String>()
 
     private val discovery = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) {
@@ -66,43 +68,61 @@ private class LanNsdDiscovery(private val application: Context, private val host
             finish(null)
         }
 
-        override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
+        override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+            synchronized(monitor) { candidates.remove(serviceInfo.serviceName) }
+        }
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
             if (!isBackendService(serviceInfo)) return
             synchronized(monitor) {
-                if (closed || resolution != null) return
-                val listener = object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
-                        LanNsdResolutionGate.active.compareAndSet(this, null)
-                        finish(null)
-                    }
-
-                    override fun onServiceResolved(info: NsdServiceInfo) {
-                        LanNsdResolutionGate.active.compareAndSet(this, null)
-                        val addresses = if (supportsResolutionStop()) info.hostAddresses else listOfNotNull(info.host)
-                        // toString reads the name supplied by NSD without a blocking reverse DNS lookup.
-                        val address = addresses.firstOrNull { address ->
-                            LanBackendAddress.isPrivateIpv4(address) &&
-                                LanBackendAddress.isBackendServiceHost(hostname, address.toString().substringBefore('/'))
-                        }
-                        finish(address?.takeIf { isBackendService(info) && info.port in BACKEND_PORTS })
-                    }
-
-                    override fun onResolutionStopped(info: NsdServiceInfo) {
-                        LanNsdResolutionGate.active.compareAndSet(this, null)
-                    }
-                }
-                if (!LanNsdResolutionGate.active.compareAndSet(null, listener)) return
-                resolution = listener
-                try {
-                    nsd?.resolveService(serviceInfo, listener)
-                } catch (_: RuntimeException) {
-                    LanNsdResolutionGate.active.compareAndSet(listener, null)
-                    finish(null)
-                }
+                if (closed || !seen.add(serviceInfo.serviceName)) return
+                candidates[serviceInfo.serviceName] = serviceInfo
             }
+            resolveNext()
         }
+    }
+
+    private fun resolveNext() {
+        synchronized(monitor) {
+            if (closed || resolution != null) return
+            val candidate = candidates.values.firstOrNull { it.serviceName != "Miror" }
+                ?: candidates.values.firstOrNull() ?: return
+            val listener = object : NsdManager.ResolveListener {
+                override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) = resolved(this, null)
+
+                override fun onServiceResolved(info: NsdServiceInfo) {
+                    val addresses = if (supportsResolutionStop()) info.hostAddresses else listOfNotNull(info.host)
+                    val advertisedHostname = info.attributes["hostname"]?.toString(Charsets.UTF_8).orEmpty()
+                    // Read the announced name without performing a blocking reverse lookup.
+                    // Android 9 often exposes only the address, so our publisher also includes
+                    // the hostname as TXT. HTTPS still verifies the configured URL's TLS name.
+                    val address = addresses.firstOrNull { address ->
+                        LanBackendAddress.isPrivateIpv4(address) &&
+                            (LanBackendAddress.isBackendServiceHost(hostname, address.toString().substringBefore('/')) ||
+                                LanBackendAddress.isBackendServiceHost(hostname, advertisedHostname))
+                    }
+                    resolved(this, address?.takeIf { isBackendService(info) && info.port in BACKEND_PORTS })
+                }
+
+                override fun onResolutionStopped(info: NsdServiceInfo) = resolved(this, null)
+            }
+            if (!LanNsdResolutionGate.active.compareAndSet(null, listener)) return
+            candidates.remove(candidate.serviceName)
+            resolution = listener
+            try { nsd?.resolveService(candidate, listener) }
+            catch (_: RuntimeException) { resolved(listener, null) }
+        }
+    }
+
+    private fun resolved(listener: NsdManager.ResolveListener, address: InetAddress?) {
+        LanNsdResolutionGate.active.compareAndSet(listener, null)
+        synchronized(monitor) {
+            if (resolution !== listener) return
+            resolution = null
+            if (closed) return
+        }
+        // Another computer's legacy "Miror" service must not end discovery of this backend.
+        if (address != null) finish(address) else resolveNext()
     }
 
     fun discover(): InetAddress? {
@@ -176,7 +196,7 @@ private class LanNsdDiscovery(private val application: Context, private val host
 
     private fun isBackendService(info: NsdServiceInfo): Boolean {
         val type = info.serviceType.trimEnd('.')
-        return info.serviceName == "Miror" &&
+        return LanBackendAddress.isBackendServiceInstance(hostname, info.serviceName) &&
             (type.equals(SERVICE_TYPE, ignoreCase = true) || type.equals("$SERVICE_TYPE.local", ignoreCase = true))
     }
 

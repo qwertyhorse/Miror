@@ -100,6 +100,7 @@ fun main() = runBlocking {
         api.command("default", "end", 7)
         handler.set { exchange ->
             verify(exchange.requestURI.path == "$mirrorPath/live/session", "Create endpoint")
+            verify(exchange.requestHeaders.getFirst("X-Miror-Material") == "binding-v1", "Published material protocol")
             val body = exchange.jsonBody()
             verify(body.getString("terminalId") == terminal && body.getString("terminalToken") == token, "Allocation owner credentials")
             verify(body.getLong("generationNumber") == 9L && body.getLong("expectedRevision") == 7L, "Allocation generation")
@@ -115,6 +116,12 @@ fun main() = runBlocking {
             exchange.reply(JSONObject().put("referenceVersion", 1))
         }
         api.bindReference("default", session, "device-fixture", "commute", "https://fixture.invalid/garment.png")
+        handler.set { exchange ->
+            val body = exchange.jsonBody()
+            verify(body.getString("bindingId") == "binding-fixture" && !body.has("refImageUrl"), "Published binding has no client URL")
+            exchange.reply(JSONObject().put("referenceVersion", 1))
+        }
+        api.bindReference("default", session, "device-fixture", "commute", "", "binding-fixture")
         handler.set { exchange ->
             val body = exchange.jsonBody()
             when (exchange.requestURI.path) {

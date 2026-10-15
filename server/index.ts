@@ -11,6 +11,8 @@ import { TryOnService } from './service.ts';
 import { createApiServer } from './http.ts';
 import { ExhibitionMirrors } from './exhibitionMirrors.ts';
 import { MirrorCredentialStore } from './mirrorCredentials.ts';
+import { RemoteGestureCoordinator } from './remoteGestures.ts';
+import { createGestureInference } from './gestureInference.ts';
 
 process.umask(0o077);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,7 +37,8 @@ const origins = (process.env.OPENBUY_ALLOWED_ORIGINS ?? [
   'http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:4173', 'http://localhost:4173',
 ].join(',')).split(',').map(value => value.trim()).filter(Boolean);
 const exhibition = new ExhibitionMirrors(dataDirectory);
-const server = createApiServer(service, origins, undefined, exhibition);
+const gestures = new RemoteGestureCoordinator({ createInference: createGestureInference });
+const server = createApiServer(service, origins, undefined, exhibition, gestures);
 server.prependListener('request', (_request, response) => {
   response.setHeader('X-OpenBuy-Version', '1.1');
 });
@@ -88,6 +91,7 @@ async function shutdown() {
   clearInterval(interval);
   clearInterval(preparationInterval);
   server.close();
+  await gestures.closeAll();
   await exhibition.browserTests.destroy();
   await Promise.allSettled(store.unclosed().filter(row => row.tokenCipher).map(row => service.stop(row.id)));
   store.close();

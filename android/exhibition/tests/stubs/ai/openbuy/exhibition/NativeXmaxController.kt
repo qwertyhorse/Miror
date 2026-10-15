@@ -11,6 +11,7 @@ class NativeXmaxController(private val events: MutableList<String>) {
     var onError: ((String) -> Unit)? = null
     var failConnect = false
     var failUpload = false
+    var failGenerate = false
     var holdUpload = false
     var uploadCancelled = false
     val uploadEntered = CompletableDeferred<Unit>()
@@ -46,6 +47,7 @@ class NativeXmaxController(private val events: MutableList<String>) {
 
     suspend fun generate(prompt: String, refUrl: String? = null) {
         events.add("generate")
+        if (failGenerate) throw IOException("生成结果未确认")
         generatedPrompt = prompt
         generatedReference = refUrl
         events.add("remote-frame")

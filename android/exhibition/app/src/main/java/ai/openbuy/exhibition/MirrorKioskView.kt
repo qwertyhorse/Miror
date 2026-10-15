@@ -51,6 +51,12 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
     val home = MirrorActionButton(context, false).apply {
         contentDescription = "返回首页"; visibility = GONE
     }
+    val gestures = text("", Color.rgb(99, 83, 127)).apply {
+        visibility = GONE
+        isClickable = true
+        isFocusable = true
+        contentDescription = "手势识别"
+    }
     private var skinKey = ""
     private var geometryWidth = 0
     private var geometryHeight = 0
@@ -75,6 +81,7 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
         actions.addView(continueButton)
         stage.addView(actions)
         surface.addView(home)
+        surface.addView(gestures)
     }
 
     fun applySkin(preset: String, custom: Boolean) {
@@ -179,6 +186,8 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
         empty.setTextSize(TypedValue.COMPLEX_UNIT_PX, unit * 3.2f)
         pairing.arrange(sw)
         place(home, w * .045f, h * .96f, unit * 6, unit * 6)
+        place(gestures, w * .25f, h * .96f, w * .5f, unit * 6)
+        gestures.setTextSize(TypedValue.COMPLEX_UNIT_PX, unit * 2.4f)
         home.background = MirrorUiTheme.rounded(if (skinKey == "brand") 0x1fffffff else 0x80ffffff.toInt(), unit * 1.4f)
     }
 

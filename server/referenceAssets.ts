@@ -7,10 +7,10 @@ import { preparationFailureMessage, ReferencePreparationError } from './referenc
 
 export interface ReferenceSource { scope: string; bytes: Buffer; mime: string }
 export interface ReferenceIdentity { scope: string; sha256: string; mime: string }
+/** freshUntil is a numeric wire-compatibility field for existing Android clients, not a local TTL. */
 export interface ReadyReference { bindingId: string; url: string; sha256: string; scope: string; freshUntil: number; providerExpiresAt?: number }
 export interface ReferenceStorage {
   upload(bytes: Buffer, sha256: string, mime: string, onStage?: (stage: ReferencePreparationStage) => void): Promise<string | { url: string; providerExpiresAt?: number }>;
-  check(url: string): Promise<boolean>;
 }
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 export function safeReferenceUrl(value: string): boolean {
@@ -41,9 +41,17 @@ export class ReferenceAssets {
     const { id, sha256 } = this.identity(input);
     try {
       const record = JSON.parse(readFileSync(join(this.directory, id + '.json'), 'utf8'));
-      return record.schemaVersion === 2 && typeof record.bindingId === 'string' && /^[a-f0-9-]{36}$/.test(record.bindingId) && record.mime === input.mime && record.sha256 === sha256 && record.scope === input.scope
-        && (record.providerExpiresAt === undefined || Number.isFinite(record.providerExpiresAt)) && Number.isFinite(record.freshUntil) && typeof record.url === 'string' && safeReferenceUrl(record.url)
-        ? { bindingId: record.bindingId, url: record.url, sha256, scope: input.scope, freshUntil: Math.min(record.freshUntil, record.providerExpiresAt ?? Infinity), ...(record.providerExpiresAt !== undefined ? { providerExpiresAt: record.providerExpiresAt } : {}) } : null;
+      if (![2, 3].includes(record.schemaVersion) || typeof record.bindingId !== 'string' || !/^[a-f0-9-]{36}$/.test(record.bindingId)
+        || record.mime !== input.mime || record.sha256 !== sha256 || record.scope !== input.scope
+        || (record.providerExpiresAt !== undefined && !Number.isFinite(record.providerExpiresAt))
+        || (record.schemaVersion === 2 && !Number.isFinite(record.freshUntil))
+        || typeof record.url !== 'string' || !safeReferenceUrl(record.url)) return null;
+      // V2's one-hour window was local policy. Preserve actual supplier expiry; legacy
+      // Decart uploads without metadata stay bounded until replaced with persistent files.
+      const providerExpiresAt = record.providerExpiresAt ?? (record.schemaVersion === 2 && isDecartReference(record.url) ? record.freshUntil : undefined);
+      return { bindingId: record.bindingId, url: record.url, sha256, scope: input.scope,
+        freshUntil: providerExpiresAt ?? Number.MAX_SAFE_INTEGER,
+        ...(providerExpiresAt !== undefined ? { providerExpiresAt } : {}) };
     } catch { return null; } // Corrupt derived copies can be rebuilt from the source.
   }
   ready(input: ReferenceSource | ReferenceIdentity): ReadyReference | null {
@@ -63,9 +71,9 @@ export class ReferenceAssets {
     if (progress) return { ...progress };
     return { state: 'queued' };
   }
-  prepare(input: ReferenceSource, provider: ReferenceStorage): Promise<ReadyReference> {
+  prepare(input: ReferenceSource, provider: ReferenceStorage, options: { replace?: boolean } = {}): Promise<ReadyReference> {
     const ready = this.ready(input);
-    if (ready && ready.freshUntil > this.now() + 5 * 60_000) return Promise.resolve(ready);
+    if (!options.replace && ready && ready.freshUntil > this.now() + 5 * 60_000) return Promise.resolve(ready);
     const { id, sha256 } = this.identity(input);
     const existing = this.pending.get(id);
     if (existing) return existing;
@@ -77,16 +85,13 @@ export class ReferenceAssets {
     onStage('credentials');
     const task = (async () => {
       const previous = this.read(input);
-      // A transport failure throws; only a definite missing/denied object is reuploaded.
-      if (previous) onStage('availability');
-      const reusable = previous && (previous.providerExpiresAt ?? Infinity) > this.now() && await provider.check(previous.url);
-      if (previous && !reusable && this.read(input)?.bindingId === previous.bindingId) rmSync(join(this.directory, id + '.json'), { force: true });
-      const uploaded = reusable ? previous : await provider.upload(input.bytes, sha256, input.mime, onStage);
+      // Upload once, then reuse. Only explicit staff replacement or supplier hard
+      // expiry reaches this path; neither a timer nor a DNS/HEAD probe invalidates a file.
+      const uploaded = await provider.upload(input.bytes, sha256, input.mime, onStage);
       const url = typeof uploaded === 'string' ? uploaded : uploaded.url;
       const providerExpiresAt = typeof uploaded === 'string' ? undefined : uploaded.providerExpiresAt;
-      if (!safeReferenceUrl(url)) throw new ReferencePreparationError('check', 'malformed');
-      const freshUntil = Math.min(this.now() + 60 * 60_000, providerExpiresAt ?? Infinity);
-      if (!Number.isFinite(freshUntil) || freshUntil <= this.now()) throw new ReferencePreparationError('check', 'malformed');
+      if (!safeReferenceUrl(url) || (providerExpiresAt !== undefined
+        && (!Number.isFinite(providerExpiresAt) || providerExpiresAt <= this.now()))) throw new ReferencePreparationError('check', 'malformed');
       // A worker from an older process/source generation cannot replace a newer persisted replica.
       const concurrent = this.read(input);
       if (concurrent && concurrent.bindingId !== previous?.bindingId) {
@@ -94,15 +99,15 @@ export class ReferenceAssets {
         if (current) return current;
         throw new ReferencePreparationError('availability', 'status');
       }
-      const bindingId = reusable && previous.freshUntil > this.now() ? previous.bindingId : randomUUID();
-      const record = { schemaVersion: 2, bindingId, url, sha256, mime: input.mime, scope: input.scope, freshUntil, ...(providerExpiresAt !== undefined ? { providerExpiresAt } : {}) };
+      const bindingId = randomUUID();
+      const record = { schemaVersion: 3, bindingId, url, sha256, mime: input.mime, scope: input.scope, ...(providerExpiresAt !== undefined ? { providerExpiresAt } : {}) };
       const target = join(this.directory, id + '.json');
       const temporary = target + '.' + randomUUID() + '.tmp';
       try { writeFileSync(temporary, JSON.stringify(record), { mode: 0o600, flag: 'wx' }); renameSync(temporary, target); }
       finally { rmSync(temporary, { force: true }); }
       this.retryAfter.delete(id);
       this.progress.delete(id);
-      return { bindingId, url, sha256, scope: input.scope, freshUntil: record.freshUntil, ...(providerExpiresAt !== undefined ? { providerExpiresAt } : {}) };
+      return { bindingId, url, sha256, scope: input.scope, freshUntil: providerExpiresAt ?? Number.MAX_SAFE_INTEGER, ...(providerExpiresAt !== undefined ? { providerExpiresAt } : {}) };
     })().catch(error => {
       const retryAt = this.now() + 60_000;
       this.retryAfter.set(id, retryAt);

@@ -36,17 +36,15 @@ export class DecartProvider implements Provider {
   references(): ReferenceStorage {
     return {
       upload: async (bytes, _hash, mime) => {
-        const form = new FormData(); form.set('file', new Blob([new Uint8Array(bytes)], { type: mime }), 'reference'); form.set('ttl_seconds', '86400');
+        const form = new FormData(); form.set('file', new Blob([new Uint8Array(bytes)], { type: mime }), 'reference'); form.set('ttl_seconds', 'persistent');
         const data = await this.request('files', form);
         if (typeof data.id !== 'string' || !isDecartReference(data.id)) throw new ApiError('PROVIDER_INVALID_RESPONSE', 'Decart 未返回有效素材引用。', 502);
-        // A declared hard expiry bounds the local trust window; absence keeps the conservative local TTL.
-        const rawExpiry = data.expires_at ?? data.expiresAt;
-        const expiresAt = rawExpiry === undefined || rawExpiry === null ? undefined : typeof rawExpiry === 'string' ? Date.parse(rawExpiry) : NaN;
+        // Only explicit null confirms persistence; never treat missing expiry metadata as permanent.
+        const rawExpiry = 'expires_at' in data ? data.expires_at : data.expiresAt;
+        const expiresAt = rawExpiry === null ? undefined : typeof rawExpiry === 'string' ? Date.parse(rawExpiry) : NaN;
         if (expiresAt !== undefined && !Number.isFinite(expiresAt)) throw new ApiError('PROVIDER_INVALID_RESPONSE', 'Decart 素材到期信息无效。', 502);
         return { url: data.id, ...(expiresAt !== undefined ? { providerExpiresAt: expiresAt } : {}) };
       },
-      // Upload-derived references expire locally after one hour; do not extend their TTL by checking metadata.
-      check: async () => false,
     };
   }
 }

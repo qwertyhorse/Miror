@@ -234,9 +234,8 @@ describe('independent complete browser tests', () => {
   it('waits for an in-flight reference preparation before deleting local image resources', async () => {
     const f = fixture(); await upload(f.source); const created = f.manager.create(f.source); const context = f.manager.resolve(created.mirror.id, created.token);
     let release!: () => void; const waiting = new Promise<void>(resolve => { release = resolve; });
-    f.advance(55 * 60_000);
-    context.service.options.referenceStorage = () => ({ upload: async (_bytes, hash) => `https://browser-fixture-123.cos.ap-guangzhou.myqcloud.com/${hash}.webp`, check: async () => { await waiting; return false; } });
-    const preparing = context.exhibition.prepareReference(context.exhibition.read().selectedLookId!); const path = testPath(f, created.mirror.id)!;
+    context.service.options.referenceStorage = () => ({ upload: async (_bytes, hash) => { await waiting; return `https://browser-fixture-123.cos.ap-guangzhou.myqcloud.com/${hash}.webp`; }, check: async () => true });
+    const preparing = context.exhibition.prepareReference(context.exhibition.read().selectedLookId!, undefined, false, true); const path = testPath(f, created.mirror.id)!;
     await expect(f.manager.close(created.mirror.id, created.token)).rejects.toMatchObject({ code: 'BROWSER_TEST_STOP_PENDING' });
     expect(existsSync(path)).toBe(true); release(); await preparing; await f.manager.sweep();
     expect(existsSync(path)).toBe(false); expect(f.requests).toEqual([]);

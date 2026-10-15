@@ -1,5 +1,5 @@
 import { ReferenceAssets } from './referenceAssets.ts';
-import { ReferencePreparationQueue } from './referencePreparationQueue.ts';
+import { createMaterialPreparationQueue } from './materialPreparation.ts';
 import { chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -50,20 +50,7 @@ server.listen(port, '127.0.0.1', () => {
 });
 // One background upload at a time; selected and enabled materials take priority.
 // No RTC or temporary generation credential is allocated by preparation.
-const preparationQueue = new ReferencePreparationQueue(() => exhibition.list().mirrors.flatMap(mirror => {
-  const current = exhibition.getMirror(mirror.id); const state = current.get();
-  const settings = service.providerSettings(mirror.id);
-  const targets: ('xmax' | 'decart' | undefined)[] = settings?.pending ? [undefined, settings.desired] : [undefined];
-  return targets.flatMap(target => [true, false].map(published => {
-    const looks = published ? state.publication?.looks ?? [] : state.looks;
-    const publishedIds = state.publication?.looks.map(look => look.id) ?? [];
-    return { id: `${mirror.id}:${published ? 'published' : 'draft'}:${target ?? 'active'}`,
-      state: { looks, selectedLookId: state.selectedLookId, enabledLookIds: published ? publishedIds : state.enabledLookIds, live: state.live },
-      configured: target !== undefined || service.status(mirror.id).configured,
-      status: (lookId: string) => current.referencePreparationStatus(lookId, published, target),
-      prepare: (lookId: string) => current.prepareReference(lookId, target, published) };
-  }));
-}));
+const preparationQueue = createMaterialPreparationQueue(exhibition, service);
 const preparationInterval = setInterval(() => {
   if (!closing) void preparationQueue.runOnce().catch(() => { console.warn('Reference preparation queue could not read the material catalog.'); });
 }, 1_000);

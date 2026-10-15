@@ -42,6 +42,27 @@ fun main() = runBlocking {
         }
     }
     try {
+        RoundFixture("clothx", published = false).use { fixture ->
+            val running = startRound(fixture, NativeXmaxController(fixture.events))
+            try {
+                withTimeout(5_000) { running.failure.await(); running.job.join() }
+                verify(fixture.allocations.get() == 0, "Legacy catalog allocated despite the binding-v1 contract")
+                verify(fixture.events.none { it in listOf("prepare-reference", "image", "upload", "connect", "generate") },
+                    "Missing publication fell back to client material handling")
+                verify(running.errors.firstOrNull() == "请更新后台并发布素材后开始体验。", "Missing publication was not actionable")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
+        RoundFixture("clothx", prebound = true, referenceTtlMs = 9_007_199_254_740_991L - System.currentTimeMillis()).use { fixture ->
+            val controller = NativeXmaxController(fixture.events)
+            val running = startRound(fixture, controller)
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                verify(fixture.events.none { it in listOf("image", "upload", "bind") }, "Persistent prebound reference was not reused")
+                verify(controller.generatedReference == RoundFixture.REFERENCE_URL, "Persistent reference failed numeric compatibility")
+                fixture.checkHandler()
+            } finally { running.job.cancelAndJoin() }
+        }
         // Numeric offsets occur in real XMAX replies; exercise every metadata receipt.
         for (offset in listOf("+00:00", "+08:00", "-05:30")) {
             val expiry = Instant.now().plusSeconds(120).atOffset(ZoneOffset.of(offset))
@@ -160,7 +181,7 @@ fun main() = runBlocking {
             "reference version" to { it.put("referenceVersion", 2); Unit },
         )
         for ((label, mutation) in invalidPrebound) {
-            RoundFixture("clothx", ready = true, published = true, mutateCreated = mutation).use { fixture ->
+            RoundFixture("clothx", ready = true, published = true, prebound = true, mutateCreated = mutation).use { fixture ->
                 val running = startRound(fixture, NativeXmaxController(fixture.events))
                 try {
                     withTimeout(5_000) { running.failure.await(); running.job.join() }
@@ -189,7 +210,7 @@ fun main() = runBlocking {
                 "Published Free prompt-only stop leaked or reopened gesture input")
         }
 
-        // Legacy and separate-image catalogs exercise each supported input shape.
+        // Published catalogs with separate display images exercise each supported input shape.
         for (mode in listOf("clothx", "free", "mox")) for (separateReference in listOf(false, true)) {
             RoundFixture(mode, noReference = mode == "free", holdFirstFrame = mode == "clothx", separateReference = separateReference).use { fixture ->
                 val controller = NativeXmaxController(fixture.events)
@@ -211,11 +232,11 @@ fun main() = runBlocking {
                         verify(fixture.imagePaths.isEmpty(), "Free none fetched a material image")
                         verify(controller.generatedPrompt == "自定义提示词" && controller.generatedReference == null, "Free prompt-only payload")
                     } else {
-                        ordered(fixture.events, "image", "create", "upload", "bind", "connect", "link", "generate", "remote-frame", "report-first", "ui-first")
-                        verify(controller.uploadedBytes!!.contentEquals(fixture.imageBytes), "Downloaded reference was not uploaded")
-                        verify(controller.uploadedMime == "image/png", "Image MIME did not match its bytes")
+                        ordered(fixture.events, "prepare-reference", "create", "bind", "connect", "link", "generate", "remote-frame", "report-first", "ui-first")
+                        verify(fixture.events.none { it == "upload" }, "Published generation uploaded from native SDK")
                         verify(controller.generatedReference == RoundFixture.REFERENCE_URL, "Generation used an unbound reference")
-                        verify(fixture.imagePaths.toList() == listOf("/v1.1" + if (separateReference) "/assets/exhibition/reference.png" else "/assets/exhibition/commute-cutout.png"), "Generation fetched a display cover instead of its reference")
+                        val expectedPhotos = if (mode == "mox") listOf("/v1.1" + if (separateReference) "/assets/exhibition/reference.png" else "/assets/exhibition/commute-cutout.png") else emptyList()
+                        verify(fixture.imagePaths.toList() == expectedPhotos, "Generation fetched a display cover or downloaded a camera reference")
                     }
                     verify((controller.connectedImage != null) == (mode == "mox"), "MoX/photo versus camera source")
                     if (mode == "mox") verify(controller.connectedImage!!.contentEquals(fixture.imageBytes), "MoX did not use the selected image")
@@ -249,10 +270,8 @@ fun main() = runBlocking {
                     fixture.referenceAsset(secondLook.getString("referenceImage"))
                     running.round.update(next, secondLook)
                     withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
-                    val expectedImages = mutableListOf("/v1.1/assets/exhibition/reference.png")
-                    if (!sameReference) expectedImages.add("/v1.1/assets/exhibition/second-reference.png")
-                    verify(fixture.imagePaths.toList() == expectedImages, "Continuous reference cache used display covers")
-                    verify(fixture.events.count { it == "upload" } == expectedImages.size, "Continuous selection uploaded the wrong reference")
+                    verify(fixture.imagePaths.isEmpty(), "Continuous binding downloaded images")
+                    verify(fixture.events.none { it == "upload" }, "Continuous selection uploaded instead of using persistent bindings")
                     verify(fixture.allocations.get() == 1 && fixture.events.count { it == "connect" } == 1, "Separate-image selection reconnected")
                     verify(running.errors.isEmpty(), "Separate-image condition failed its session check")
                     fixture.checkHandler()
@@ -260,13 +279,13 @@ fun main() = runBlocking {
             }
         }
 
-        for (ready in listOf(false, true)) {
-            RoundFixture("clothx", ready = ready).use { fixture ->
+        for (prebound in listOf(false, true)) {
+            RoundFixture("clothx", prebound = prebound).use { fixture ->
                 val controller = NativeXmaxController(fixture.events)
                 val running = startRound(fixture, controller)
                 try {
                     withTimeout(5_000) { running.firstFrame.await() }
-                    if (ready) verify(fixture.events.none { it == "upload" || it == "image" }, "Prepared reference still uploaded")
+                    verify(fixture.events.none { it == "upload" || it == "image" }, "Prepared reference still uploaded")
                     val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
                     withTimeout(5_000) { while (!running.round.canReuse(next, fixture.look)) delay(5) }
                     running.round.update(next, fixture.look)
@@ -291,13 +310,13 @@ fun main() = runBlocking {
                 val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
                 val secondLook = JSONObject(fixture.look.toString()).put("image", "/assets/exhibition/second.png")
                 withTimeout(5_000) { while (!running.round.canReuse(next, secondLook)) delay(5) }
-                controller.failUpload = true
+                fixture.ready = false
                 fixture.referenceAsset(secondLook.getString("image"))
                 running.round.update(next, secondLook)
                 withTimeout(5_000) { while (running.errors.isEmpty()) delay(5) }
-                verify(fixture.stoppedIds.isEmpty() && !running.failure.isCompleted, "Upload failure tore down RTC")
+                verify(fixture.stoppedIds.isEmpty() && !running.failure.isCompleted, "Unavailable binding tore down RTC")
                 verify(running.round.isBusy, "Failed preparation must remain blocked until retry succeeds")
-                controller.failUpload = false
+                fixture.ready = true
                 verify(running.round.retryUpdate(), "Failed selection was not retryable")
                 verify(running.round.isBusy, "Retry reopened before a server confirmation")
                 withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
@@ -314,14 +333,14 @@ fun main() = runBlocking {
                 val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
                 val pendingLook = JSONObject(fixture.look.toString()).put("image", "/assets/exhibition/second.png")
                 withTimeout(5_000) { while (!running.round.canReuse(next, pendingLook)) delay(5) }
-                controller.holdUpload = true
+                fixture.holdReference = true
                 running.round.update(next, pendingLook)
-                withTimeout(5_000) { controller.uploadEntered.await() }
+                fixture.referenceEntered.awaitFixture()
                 running.round.update(JSONObject(next.toString()).put("generationNumber", 5), fixture.look)
                 withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
-                verify(fixture.events.count { it == "generate" } == 2, "Obsolete upload generated an extra outfit")
-                verify(controller.uploadCancelled, "Obsolete upload was not cancelled")
-                verify(fixture.stoppedIds.isEmpty() && running.errors.isEmpty(), "Superseded upload stopped or failed experience")
+                verify(fixture.events.count { it == "generate" } == 2, "Obsolete binding lookup generated an extra outfit")
+                verify(fixture.events.count { it == "condition" } == 1, "Obsolete binding reached condition update")
+                verify(fixture.stoppedIds.isEmpty() && running.errors.isEmpty(), "Superseded binding lookup stopped or failed experience")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
@@ -338,13 +357,13 @@ fun main() = runBlocking {
                 running.round.update(next, promptOnly)
                 withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
                 verify(controller.generatedReference == null, "Free prompt-only selection retained previous reference")
-                verify(fixture.events.count { it == "upload" } == 1, "Free prompt-only selection uploaded its cover")
+                verify(fixture.events.none { it == "upload" }, "Free prompt-only selection uploaded its cover")
                 verify(fixture.allocations.get() == 1, "Free condition change allocated a new key")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
 
-        // Manual choices still conflate while gestures remain blocked through upload,
+        // Manual choices still conflate while gestures remain blocked through binding lookup,
         // SDK submission and the latest server acknowledgement.
         RoundFixture("clothx").use { fixture ->
             val controller = NativeXmaxController(fixture.events)
@@ -354,12 +373,12 @@ fun main() = runBlocking {
                 running.busyTransitions.clear()
                 val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
                 val pending = JSONObject(fixture.look.toString()).put("image", "/assets/exhibition/second.png")
-                controller.holdUpload = true
+                fixture.holdReference = true
                 fixture.holdConditionApplied = true
                 running.round.update(next, pending)
                 verify(running.round.isBusy, "Submission did not synchronously block gestures")
-                withTimeout(5_000) { controller.uploadEntered.await() }
-                verify(running.round.isBusy, "Upload reopened gestures")
+                fixture.referenceEntered.awaitFixture()
+                verify(running.round.isBusy, "Binding lookup reopened gestures")
                 running.round.update(JSONObject(next.toString()).put("generationNumber", 5), fixture.look)
                 fixture.conditionAppliedEntered.awaitFixture()
                 verify(running.round.isBusy && running.busyTransitions.toList() == listOf(true),
@@ -367,7 +386,7 @@ fun main() = runBlocking {
                 fixture.releaseConditionApplied.countDown()
                 withTimeout(5_000) { while (running.round.isBusy) delay(5) }
                 verify(running.busyTransitions.toList() == listOf(true, false), "Latest acknowledgement did not reopen exactly once")
-                verify(controller.uploadCancelled && fixture.events.count { it == "generate" } == 2,
+                verify(fixture.events.count { it == "condition" } == 1 && fixture.events.count { it == "generate" } == 2,
                     "Manual latest-wins regression")
             } finally {
                 fixture.releaseConditionApplied.countDown()
@@ -472,6 +491,51 @@ fun main() = runBlocking {
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
+        RoundFixture("clothx", continuous = true).use { fixture ->
+            fixture.holdRenewal = true
+            val running = startRound(fixture, NativeXmaxController(fixture.events))
+            try {
+                withTimeout(5_000) { running.firstFrame.await() }
+                fixture.renewalEntered.awaitFixture()
+                fixture.renewalDue = false
+                val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
+                verify(running.round.canReuse(next, fixture.look), "Preparing a renewal prevented a manual material choice")
+                running.round.update(next, fixture.look)
+                withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
+                verify(running.round.isBusy, "Material acknowledgement reopened gestures before pending renewal resolved")
+                fixture.releaseRenewal.countDown()
+                withTimeout(5_000) { while (running.round.isBusy) delay(5) }
+                verify(fixture.events.none { it in listOf("stop", "disconnect", "renewal-commit", "report-error") },
+                    "Obsolete successful renewal plan stopped the newly selected material")
+                verify(fixture.allocations.get() == 1 && fixture.events.count { it == "generate" } == 2,
+                    "Manual selection during preparation duplicated or lost generation")
+                fixture.checkHandler()
+            } finally { fixture.releaseRenewal.countDown(); running.job.cancelAndJoin() }
+        }
+        for ((code, responseStatus) in listOf(
+            "TEMPORARY_ERROR" to 503,
+            "EXHIBITION_STALE_GENERATION" to 409,
+            "EXHIBITION_RENEWAL_UNAVAILABLE" to 409,
+        )) {
+            RoundFixture("clothx", continuous = true).use { fixture ->
+                fixture.renewalFailureCode = code
+                fixture.renewalFailureStatus = responseStatus
+                val running = startRound(fixture, NativeXmaxController(fixture.events))
+                try {
+                    withTimeout(5_000) { running.firstFrame.await() }
+                    withTimeout(8_000) { while (!fixture.events.contains("renewal-prepare") || running.round.isBusy) delay(20) }
+                    verify(!running.failure.isCompleted && fixture.stoppedIds.isEmpty() && !fixture.events.contains("disconnect"),
+                        "Pre-plan $code stopped healthy video")
+                    verify(fixture.errorReports.get() == 0 && running.errors.isEmpty(), "Pre-plan $code reported a terminal provider error")
+                    verify(running.round.canReuse(fixture.snapshot(), fixture.look), "Pre-plan $code disabled material switching")
+                    fixture.renewalFailureCode = null
+                    withTimeout(8_000) { while (!fixture.events.contains("renewal-commit")) delay(20) }
+                    ordered(fixture.events, "renewal-prepare", "disconnect", "stop", "renewal-commit")
+                    verify(fixture.allocations.get() == 1, "Renewal retry allocated an overlapping credential")
+                    fixture.checkHandler()
+                } finally { running.job.cancelAndJoin() }
+            }
+        }
         RoundFixture("clothx", continuous = true, separateReference = true).use { fixture ->
             val controller = NativeXmaxController(fixture.events)
             val running = startRound(fixture, controller)
@@ -482,7 +546,7 @@ fun main() = runBlocking {
                 verify(fixture.allocations.get() == 1, "Renewal allocated before confirmed handoff")
                 verify(fixture.errorReports.get() == 0, "Planned renewal was reported as a failure")
                 verify(controller.connectedCameraDeviceId == "usb-camera-fixture", "Renewal source lost exact camera identity")
-                verify(fixture.imagePaths.toList() == listOf("/v1.1/assets/exhibition/reference.png"), "Renewal used display cover")
+                verify(fixture.imagePaths.isEmpty(), "Renewal downloaded or uploaded an already prepared reference")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
@@ -542,9 +606,9 @@ private class RoundFixture(
     private val holdCreate: Boolean = false,
     private val recoveryOtherOwner: Boolean = false,
     private val stopConfirmed: Boolean = true,
-    @Volatile var ready: Boolean = false,
-    private val published: Boolean = false,
-    private val prebound: Boolean = true,
+    @Volatile var ready: Boolean = true,
+    private val published: Boolean = true,
+    private val prebound: Boolean = false,
     private val bindingAvailable: Boolean = true,
     private val preparedScope: String = "fixture-scope",
     private val referenceTtlMs: Long = 60_000,
@@ -558,6 +622,15 @@ private class RoundFixture(
     val allocations = AtomicInteger()
     val errorReports = AtomicInteger()
     val heartbeatFailures = AtomicInteger()
+    @Volatile var renewalFailureCode: String? = null
+    @Volatile var renewalFailureStatus = 409
+    @Volatile var renewalDue = true
+    @Volatile var holdRenewal = false
+    val renewalEntered = CountDownLatch(1)
+    val releaseRenewal = CountDownLatch(1)
+    @Volatile var holdReference = false
+    val referenceEntered = CountDownLatch(1)
+    val releaseReference = CountDownLatch(1)
     val stoppedIds = CopyOnWriteArrayList<String>()
     val createEntered = CountDownLatch(1)
     val releaseCreate = CountDownLatch(1)
@@ -637,18 +710,25 @@ private class RoundFixture(
             }
             path == "$MIRROR/references/commute" -> {
                 events.add("prepare-reference")
+                val held = holdReference
+                if (held) {
+                    holdReference = false
+                    referenceEntered.countDown()
+                    check(releaseReference.await(5, TimeUnit.SECONDS))
+                }
                 referenceFreshUntil = System.currentTimeMillis() + referenceTtlMs
-                exchange.json(JSONObject().put("reference", if (ready)
+                try { exchange.json(JSONObject().put("reference", if (ready)
                     JSONObject().put("url", REFERENCE_URL).put("scope", preparedScope).put("freshUntil", referenceFreshUntil)
                         .apply { if (bindingAvailable) put("bindingId", "binding-fixture") }
-                    else JSONObject.NULL))
+                    else JSONObject.NULL)) } catch (error: java.io.IOException) { if (!held) throw error }
             }
             path == "$MIRROR/live/session/$SESSION_ID/condition" -> {
                 val body = exchange.body()
                 check(body.getLong("generationNumber") in 4L..5L && body.optString("refImageUrl", REFERENCE_URL) == REFERENCE_URL)
-                if (published) check(body.optString("bindingId") == "binding-fixture" && !body.has("refImageUrl"))
+                val hasReference = synchronized(lock) { record.optString("referenceAsset").isNotBlank() }
+                check(!body.has("refImageUrl") && if (hasReference) body.optString("bindingId") == "binding-fixture" else !body.has("bindingId"))
                 val bound = synchronized(lock) {
-                    record.put("refImageUrl", if (published) REFERENCE_URL else body.optString("refImageUrl"))
+                    record.put("refImageUrl", if (hasReference) REFERENCE_URL else "")
                     record.getJSONObject("exhibition").put("generationNumber", body.getLong("generationNumber"))
                     record.put("referenceVersion", 2); JSONObject(record.toString())
                 }
@@ -668,12 +748,20 @@ private class RoundFixture(
                 val fails = heartbeatFailures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0
                 val reply = if (fails) JSONObject().put("code", "TEMPORARY_ERROR").put("message", "Temporary failure")
                     else snapshot().also {
-                        if (continuous && events.contains("report-first")) it.optJSONObject("live")?.put("renewalDue", true)
+                        if (continuous && renewalDue && events.contains("report-first")) it.optJSONObject("live")?.put("renewalDue", true)
                     }
                 try { exchange.json(reply, if (fails) 503 else 200) } catch (_: java.io.IOException) { }
             }
             path == "$MIRROR/live/session/$SESSION_ID/renewal" -> {
-                events.add("renewal-prepare"); exchange.json(JSONObject().put("renewalId", "fixture-renewal"))
+                events.add("renewal-prepare")
+                if (holdRenewal) {
+                    holdRenewal = false
+                    renewalEntered.countDown()
+                    check(releaseRenewal.await(5, TimeUnit.SECONDS))
+                }
+                val errorCode = renewalFailureCode
+                if (errorCode != null) exchange.json(JSONObject().put("code", errorCode).put("message", "Preparation retry"), renewalFailureStatus)
+                else exchange.json(JSONObject().put("renewalId", "fixture-renewal"))
             }
             path == "$MIRROR/live/session/$SESSION_ID/renewal/commit" -> {
                 check(events.contains("disconnect") && stoppedIds.contains(SESSION_ID))
@@ -720,6 +808,7 @@ private class RoundFixture(
         }
     }
     override fun close() {
+        releaseReference.countDown(); releaseRenewal.countDown()
         releaseCreate.countDown(); releaseFirstFrame.countDown()
         releaseConditionApplied.countDown(); releaseErrorReport.countDown()
         server.stop(0); executor.shutdownNow()

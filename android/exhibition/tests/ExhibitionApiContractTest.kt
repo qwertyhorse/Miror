@@ -112,16 +112,10 @@ fun main() = runBlocking {
             verify(exchange.requestURI.path == "$mirrorPath/live/session/$session/reference", "Reference endpoint")
             val body = exchange.jsonBody()
             verify(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute", "Reference owner")
-            verify(body.getString("refImageUrl") == "https://fixture.invalid/garment.png", "Reference URL")
-            exchange.reply(JSONObject().put("referenceVersion", 1))
-        }
-        api.bindReference("default", session, "device-fixture", "commute", "https://fixture.invalid/garment.png")
-        handler.set { exchange ->
-            val body = exchange.jsonBody()
             verify(body.getString("bindingId") == "binding-fixture" && !body.has("refImageUrl"), "Published binding has no client URL")
             exchange.reply(JSONObject().put("referenceVersion", 1))
         }
-        api.bindReference("default", session, "device-fixture", "commute", "", "binding-fixture")
+        api.bindReference("default", session, "device-fixture", "commute", "binding-fixture")
         handler.set { exchange ->
             val body = exchange.jsonBody()
             when (exchange.requestURI.path) {

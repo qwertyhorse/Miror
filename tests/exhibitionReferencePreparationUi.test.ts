@@ -161,3 +161,14 @@ describe('material reference status labels', () => {
     expect(host.find(node => node.getReactProps()['aria-label'] === '盔甲：状态不可用')).toBeDefined();
   });
 });
+
+it('keeps permanent references ready and offers explicit replacement without allowing duplicate repairs', async () => {
+  const fetcher = vi.fn((url: string, init: RequestInit) => Promise.resolve(init.method === 'POST'
+    ? Response.json({ status: { ...ready, freshUntil: Number.MAX_SAFE_INTEGER, refreshState: 'preparing' } })
+    : response({ a: { ...ready, freshUntil: Number.MAX_SAFE_INTEGER } })));
+  const f = await fixture(fetcher);
+  await act(async () => { await f.current.retry('a'); });
+  expect(JSON.parse(fetcher.mock.calls[1][1].body as string)).toEqual({ replace: true });
+  await act(async () => { await f.current.retry('a'); }); expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(f.current.references.a.state).toBe('ready');
+});

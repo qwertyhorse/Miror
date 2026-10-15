@@ -492,13 +492,13 @@ export class ExhibitionService {
     if (!ready || ready.freshUntil <= this.now() + 30_000 || !source) return null;
     try { this.liveService!.assertReferenceBinding(this.mirrorId, ready.bindingId, { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime }); return ready; } catch { return null; }
   }
-  async prepareReference(lookId: string, target?: 'xmax' | 'decart', published = false) {
+  async prepareReference(lookId: string, target?: 'xmax' | 'decart', published = false, replace = false) {
     let source: ReturnType<ExhibitionService['referenceSource']>;
     try { source = this.referenceSource(lookId, published); }
     catch (error) { if (this.stored.state.looks.some(look => look.id === lookId)) this.referenceSourceUnavailable(lookId); throw error; }
     this.preparationsInProgress += 1;
     try {
-      if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime, target);
+      if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime, target, replace);
       const latest = this.referenceSource(lookId, published);
       return latest ? this.liveService?.readyReference(this.mirrorId, latest.data, latest.mime, target) ?? null : null; // Re-read after await: removal/replacement must win.
     } finally { this.preparationsInProgress -= 1; }
@@ -550,13 +550,11 @@ export class ExhibitionService {
     for (const id of this.referenceSourceFailures.keys()) if (!retained.has(id)) this.referenceSourceFailures.delete(id);
     return Object.fromEntries([...ids].map(id => [id, this.referencePreparationStatus(id)]));
   }
-  retryReferencePreparation(lookId: string): ReferencePreparationStatus {
+  retryReferencePreparation(lookId: string, replace = false): ReferencePreparationStatus {
     const current = this.referencePreparationStatus(lookId);
-    if (current.state === 'unconfigured' || current.state === 'not_required' || current.state === 'preparing'
-      || (current.state === 'ready' && (current.freshUntil ?? 0) > this.now() + 5 * 60_000)
-      || (current.state === 'failed' && (current.retryAt ?? 0) > this.now())) return current;
+    if (current.refreshState === 'preparing' || (current.retryAt ?? 0) > this.now() || (current.state === 'ready' && !replace) || current.state === 'unconfigured' || current.state === 'not_required' || current.state === 'preparing') return current;
     // Preparation is shared with the idle worker and deduplicates by credential scope and bytes.
-    void this.prepareReference(lookId).catch(() => undefined);
+    void this.prepareReference(lookId, undefined, false, replace).catch(() => undefined);
     return this.referencePreparationStatus(lookId);
   }
   liveStatus(): ExhibitionLiveStatus {

@@ -21,7 +21,7 @@ async function fixture() {
     keyStatus: async () => ({ status: 'active', consumedCredit: 0, expireTimestamp: expiresAt }), deactivate: async () => ({ status: 'inactive', consumedCredit: 0, expireTimestamp: expiresAt }), sessionStatus: async (_, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 0 }) };
   const resolveHost = vi.fn(async () => { throw Error('DNS must not run during trusted acquisition'); });
   const service = new TryOnService({ provider, providerForApiKey: () => provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost,
-    referenceAssets: new ReferenceAssets(directory, { now: () => now }), referenceStorage: () => ({ upload: async () => 'https://fixture-123.cos.ap-test.myqcloud.com/reference.webp', check: async () => true }) });
+    referenceAssets: new ReferenceAssets(directory, { now: () => now }), referenceStorage: () => ({ upload: async () => ({ url: 'https://fixture-123.cos.ap-test.myqcloud.com/reference.webp', providerExpiresAt: now + 3_600_000 }), check: async () => true }) });
   const bytes = Buffer.from('exact-reference-content'); const expected = { sha256: createHash('sha256').update(bytes).digest('hex'), mime: 'image/webp' };
   const prepared = (await service.prepareReference('default', bytes, expected.mime))!; const session = await service.createExhibition(initial);
   return { service, store, session, prepared, expected, resolveHost, rotate: () => { currentKey = 'uk-rotated-fixture'; }, expire: () => { now += 3_600_001; } };

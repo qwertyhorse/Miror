@@ -44,7 +44,7 @@ async function fixture() {
   cleanup.push(async () => { const closed = once(server, 'close'); server.closeAllConnections(); server.close(); await closed; store.close(); rmSync(directory, { force: true, recursive: true }); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const get = (path: string) => fetch(base + path);
-  const post = (path: string) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://127.0.0.1:5173', 'Content-Type': 'application/json' }, body: '{}' });
+  const post = (path: string, replace = false) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://127.0.0.1:5173', 'Content-Type': 'application/json' }, body: JSON.stringify(replace ? { replace: true } : {}) });
   return { get, post, upload, check, issue, assets, provider, mirror: mirrors.getMirror(),
     advance: (amount: number) => { now += amount; }, now: () => now,
     rotate: () => { key = 'uk-private-fixture-rotated'; }, disable: () => { provider.configured = false; } };
@@ -62,7 +62,7 @@ it('reports queued → preparing → ready, deduplicates retries, and exposes no
   pending.resolve(cloudUrl);
   await vi.waitFor(() => expect(f.mirror.referencePreparationStatus('commute').state).toBe('ready'));
   const batch = await (await f.get('/references')).json();
-  expect(batch.references.commute).toMatchObject({ state: 'ready', freshUntil: f.now() + 3_600_000 });
+  expect(batch.references.commute).toMatchObject({ state: 'ready', freshUntil: Number.MAX_SAFE_INTEGER });
   expect(JSON.stringify(batch)).not.toMatch(/https:|myqcloud|uk-|tk-|sha256|scope/);
   expect((await (await f.post('/references/commute/retry')).json()).status.state).toBe('ready');
   expect(f.upload).toHaveBeenCalledOnce(); expect(f.issue).not.toHaveBeenCalled();
@@ -134,24 +134,19 @@ it('caches immutable source digests for repeated batch reads and bounds missing-
   expect(f.mirror.referencePreparationStatus(look.id)).toEqual({ state: 'queued' });
 });
 
-it('restores ready status after restart and reports revalidation failures without reuploading', async () => {
+it('restores persistent readiness after restart without availability probes', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'reference-status-reopen-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   let now = 1_000;
   const source = { scope: 'cn-fixture', bytes: Buffer.from('image'), mime: 'image/png' };
   const identity = { scope: source.scope, sha256: createHash('sha256').update(source.bytes).digest('hex'), mime: source.mime };
-  const storage = { upload: vi.fn(async () => cloudUrl), check: vi.fn(async () => true) };
+  const storage = { upload: vi.fn(async () => cloudUrl), check: vi.fn(async () => { throw new Error('offline'); }) };
   await new ReferenceAssets(directory, { now: () => now }).prepare(source, storage);
+  now += 90 * 86400_000;
   const reopened = new ReferenceAssets(directory, { now: () => now });
-  expect(reopened.status(identity)).toEqual({ state: 'ready', freshUntil: now + 3_600_000 });
-  now += 3_600_001;
-  storage.check.mockRejectedValueOnce(new ReferencePreparationError('availability', 'network'));
-  await expect(reopened.prepare(source, storage)).rejects.toThrow();
-  expect(reopened.status(identity)).toMatchObject({ state: 'failed', stage: 'availability', retryAt: now + 60_000 });
-  expect(storage.upload).toHaveBeenCalledOnce();
-  now += 60_001; await reopened.prepare(source, storage);
-  expect(reopened.status(identity).state).toBe('ready');
-  expect(storage.upload).toHaveBeenCalledOnce();
+  await reopened.prepare(source, storage);
+  expect(reopened.status(identity)).toEqual({ state: 'ready', freshUntil: Number.MAX_SAFE_INTEGER });
+  expect(storage.upload).toHaveBeenCalledOnce(); expect(storage.check).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -167,4 +162,22 @@ it.each([
   await expect(referenceStorage('uk-private', 'cn', call, async () => ['8.8.8.8']).upload(bytes, sha, 'image/png', onStage)).rejects.toMatchObject({ stage, failure: reason, message: 'Reference preparation failed' });
   expect(onStage).toHaveBeenLastCalledWith(stage);
   expect(call).toHaveBeenCalledTimes(index + 1);
+});
+
+it('only explicit replacement uploads a ready reference and preserves it while replacement is pending or failed', async () => {
+  const f = await fixture(); await f.mirror.prepareReference('commute');
+  const before = (await (await f.get('/references/commute')).json()).reference;
+  const pending = deferred<string>(); f.upload.mockImplementationOnce(() => pending.promise);
+  expect(await (await f.post('/references/commute/retry', true)).json()).toMatchObject({ status: { state: 'ready', refreshState: 'preparing' } });
+  await f.post('/references/commute/retry', true); expect(f.upload).toHaveBeenCalledTimes(2);
+  expect((await (await f.get('/references/commute')).json()).reference).toEqual(before);
+  pending.resolve(cloudUrl);
+  await vi.waitFor(() => expect(f.mirror.referencePreparationStatus('commute').refreshState).toBeUndefined());
+  const after = (await (await f.get('/references/commute')).json()).reference;
+  expect(after.bindingId).not.toBe(before.bindingId);
+  f.upload.mockRejectedValueOnce(Error('offline'));
+  await f.post('/references/commute/retry', true);
+  await vi.waitFor(() => expect(f.mirror.referencePreparationStatus('commute').refreshState).toBe('failed'));
+  expect((await (await f.get('/references/commute')).json()).reference).toEqual(after);
+  expect(f.issue).not.toHaveBeenCalled();
 });

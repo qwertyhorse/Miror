@@ -189,11 +189,10 @@ class ExhibitionApi(
         sessionId: String,
         deviceId: String,
         lookId: String,
-        refImageUrl: String,
-        bindingId: String? = null,
+        bindingId: String,
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/reference", "POST",
         JSONObject().put("deviceId", deviceId).put("lookId", lookId)
-            .apply { if (bindingId != null) put("bindingId", bindingId) else put("refImageUrl", refImageUrl) }, 20_000)
+            .put("bindingId", bindingId), 20_000)
 
     suspend fun readyReference(mirrorId: String, lookId: String): JSONObject? {
         require(Regex("[A-Za-z0-9_-]{1,100}").matches(lookId)) { "素材编号无效。" }

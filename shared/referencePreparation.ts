@@ -3,6 +3,7 @@ export type ReferencePreparationStage = 'credentials' | 'upload' | 'check' | 'av
 /** Safe, URL-free progress for the staff material library. */
 export interface ReferencePreparationStatus {
   state: 'queued' | 'preparing' | 'ready' | 'failed' | 'unconfigured' | 'not_required';
+  refreshState?: 'preparing' | 'failed';
   message?: string;
   retryAt?: number;
   updatedAt?: number;

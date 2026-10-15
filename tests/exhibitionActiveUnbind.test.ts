@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -31,7 +32,7 @@ async function fixture() {
     keyStatus: async () => ({ ...stopped(), status: 'active' }), deactivate: token => deactivate(credential, token),
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 1 }),
   });
-  const service = new TryOnService({ provider: provider(key), providerForApiKey: provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
+  const service = new LifecycleTryOnService({ provider: provider(key), providerForApiKey: provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
   const mirrors = new ExhibitionMirrors(directory, { now: () => now }); mirrors.attachLiveService(service);
   const mirror = mirrors.getMirror(); mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
   const device = terminal(); const pairing = mirrors.connectDevice(device); mirrors.bindDevice('default', { code: pairing.code });
@@ -39,7 +40,7 @@ async function fixture() {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); resources.push({ server, store, directory });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const request = (path: string, input: unknown, method = 'POST') => fetch(base + path, { method,
-    headers: { Origin: 'http://xuminghong.local:10200', 'Content-Type': 'application/json', 'x-miror-protocol': '2' }, body: JSON.stringify(input) });
+    headers: { Origin: 'http://xuminghong.local:10200', 'Content-Type': 'application/json', 'x-miror-protocol': '2', 'x-miror-material': 'binding-v1' }, body: JSON.stringify(input) });
   const start = () => request('/live/session', { terminalId: device.terminalId, terminalToken: device.token, deviceId: 'active-unbind-browser',
     lookId: mirror.get().selectedLookId, generationNumber: mirror.get().generationNumber });
   const unbind = (id = device.terminalId) => request('/binding', { terminalId: id }, 'DELETE');

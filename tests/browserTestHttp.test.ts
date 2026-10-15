@@ -59,7 +59,7 @@ async function fixture() {
   const base = `http://127.0.0.1:${address(server)}`;
   const request = (path: string, input?: unknown, options: { cookie?: string; method?: string; origin?: string; signal?: AbortSignal } = {}) => fetch(base + path, {
     method: options.method ?? (input === undefined ? 'GET' : 'POST'), signal: options.signal,
-    headers: { Origin: options.origin ?? origin, 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', ...(options.cookie ? { Cookie: options.cookie } : {}) },
+    headers: { Origin: options.origin ?? origin, 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', ...(options.cookie ? { Cookie: options.cookie } : {}) },
     ...(input === undefined ? {} : { body: JSON.stringify(input) }),
   });
   const source = mirrors.getMirror();
@@ -75,6 +75,8 @@ async function fixture() {
     advance: (milliseconds: number) => { now += milliseconds; }, now: () => now };
 }
 async function start(f: Awaited<ReturnType<typeof fixture>>, test: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['create']>>) {
+  const context = f.mirrors.browserTests.resolve(test.mirror.id, test.token);
+  await context.exhibition.prepareReference(context.exhibition.read().selectedLookId!, undefined, true);
   const begun = await f.request(test.path + '/command', { action: 'begin' }, test); expect(begun.status).toBe(200);
   const state = await begun.json() as ExhibitionState;
   const response = await f.request(test.path + '/live/session', { deviceId: 'isolated-browser', lookId: state.selectedLookId, generationNumber: state.generationNumber }, test);
@@ -127,6 +129,7 @@ describe('isolated browser test HTTP context', () => {
     const image = async (color: string) => (await sharp({ create: { width: 512, height: 512, channels: 3, background: color } }).png().toBuffer()).toString('base64');
     const uploaded = await f.source.upload({ name: '双图隔离', mode: 'clothx', imageBase64: await image('red'), referenceImageBase64: await image('blue') });
     const look = uploaded.looks.at(-1)!;
+    await f.source.preparePublication({ lookIds: [look.id] }); await vi.waitFor(() => expect(f.source.readyReference(look.id)).not.toBeNull()); f.source.publishPublication({ lookIds: [look.id] });
     f.source.command({ action: 'configure', enabledLookIds: [look.id] });
     const test = await f.create(); const state = await (await f.request(test.path, undefined, test)).json() as ExhibitionState;
     const copied = state.looks.find(row => row.name === look.name)!;
@@ -138,14 +141,15 @@ describe('isolated browser test HTTP context', () => {
     expect((await f.request(copied.referenceImage!, undefined, { ...test, method: 'HEAD' })).status).toBe(200);
     const prepared = await f.request(test.path + `/references/${copied.id}`, {}, test); expect(prepared.status).toBe(200);
     expect((await prepared.json()).reference).toMatchObject({ scope: expect.any(String), sha256: expect.any(String) });
-    expect(f.storage).toHaveBeenCalledWith(sourceKey, 'global'); expect(f.upload).toHaveBeenCalledOnce();
+    expect(f.storage).toHaveBeenCalledWith(sourceKey, 'global'); const uploadCount = f.upload.mock.calls.length; expect(uploadCount).toBeGreaterThan(0);
     expect((await f.request(test.path + `/references/${copied.id}`, undefined, test)).status).toBe(200);
-    expect((await f.request(test.path + '/references', undefined, test)).status).toBe(200);
+    expect((await f.request(test.path + '/references', undefined, test)).status).toBe(200); expect(f.upload).toHaveBeenCalledTimes(uploadCount);
     expect(f.issue).not.toHaveBeenCalled();
   });
 
   it('routes session reads, links, first frames and stopping through the isolated service and rejects foreign session IDs', async () => {
     const f = await fixture();
+    await f.source.prepareReference(f.source.read().selectedLookId!, undefined, true);
     const running = f.source.command({ action: 'begin' });
     const realSession = await f.source.createLiveSession({ deviceId: 'real-screen', lookId: running.selectedLookId, generationNumber: running.generationNumber });
     const realState = f.source.read();
@@ -158,7 +162,7 @@ describe('isolated browser test HTTP context', () => {
     const foreign = await f.request(test.path + `/sessions/${otherSession.id}`, undefined, test);
     expect(foreign.status).toBe(409); expect(await foreign.json()).toMatchObject({ code: 'EXHIBITION_MIRROR_MISMATCH' });
     expect((await f.request(test.path + `/sessions/${session.id}`, undefined, test)).status).toBe(200);
-    expect((await f.request(test.path + `/live/session/${session.id}/reference`, { deviceId: 'isolated-browser', lookId: session.exhibition.lookId, refImageUrl: 'https://uploads.example/browser-test.png' }, test)).status).toBe(200);
+    expect((await f.request(test.path + `/live/session/${session.id}/reference`, { deviceId: 'isolated-browser', lookId: session.exhibition.lookId, bindingId: context.exhibition.readyReference(session.exhibition.lookId, true)!.bindingId }, test)).status).toBe(409);
     expect((await f.request(test.path + `/sessions/${session.id}/link`, { providerSessionId: 'ums-browser-test-fixture' }, test)).status).toBe(200);
     expect((await f.request(test.path + `/sessions/${session.id}/first-frame`, { firstFrameMs: 100 }, test)).status).toBe(200);
     expect((await f.request(test.path + '/live/heartbeat', { deviceId: 'isolated-browser', sessionId: session.id }, test)).status).toBe(200);

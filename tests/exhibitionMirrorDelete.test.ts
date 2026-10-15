@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -27,7 +28,7 @@ async function fixture() {
     keyStatus: async () => ({ status: 'active', consumedCredit: 0, expireTimestamp: new Date(now() + 120_000).toISOString() }),
     deactivate: async () => ({ status: 'inactive', consumedCredit: 0, expireTimestamp: new Date(now() + 120_000).toISOString() }),
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 0 }) };
-  const service = new TryOnService({ provider, providerForApiKey: () => provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
+  const service = new LifecycleTryOnService({ provider, providerForApiKey: () => provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
   const mirrors = new ExhibitionMirrors(directory, { now });
   const id = mirrors.create({ name: '待删除智能镜' }).id;
   const mirror = mirrors.getMirror(id);

@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
@@ -33,7 +34,7 @@ async function fixture() {
     issueKey: issue, keyStatus: async () => ({ status: 'active', consumedCredit: 1, expireTimestamp: new Date(now + 120_000).toISOString() }),
     deactivate: token => deactivate(credential, token), sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 1 }),
   });
-  const service = new TryOnService({ provider: provider(key), providerForApiKey: provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
+  const service = new LifecycleTryOnService({ provider: provider(key), providerForApiKey: provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
   const mirrors = new ExhibitionMirrors(directory, { now: () => now });
   mirrors.attachLiveService(service);
   const mirror = mirrors.getMirror('default');
@@ -42,7 +43,7 @@ async function fixture() {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   resources.push({ server, store, directory });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
-  const post = (path: string, input: unknown) => fetch(base + path, { method: 'POST', headers: { origin, 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  const post = (path: string, input: unknown) => fetch(base + path, { method: 'POST', headers: { origin, 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
   const begin = async () => { const response = await post('/command', { action: 'begin' }); expect(response.status).toBe(200); return response.json(); };
   const start = () => post('/live/session', { deviceId: 'manual-http-screen', lookId: mirror.get().selectedLookId, generationNumber: mirror.get().generationNumber });
   return { directory, store, service, mirror, mirrors, issue, deactivate, base, post, begin, start, advance: (milliseconds: number) => { now += milliseconds; } };

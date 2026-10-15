@@ -1,3 +1,4 @@
+import { withLifecycleReferenceDelivery } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it } from 'vitest';
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -76,10 +77,10 @@ describe('built-in exhibition UI skins', () => {
     checkPhase(); advance(2_200); checkPhase(); service.command({ action: 'pause' }); checkPhase();
     service.command({ action: 'end' });
     const session = { id: 'skin-test-session', status: 'active', expiresAt: new Date(now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0 };
-    service.attachLiveService({ status: () => ({ configured: true }),
+    service.attachLiveService(withLifecycleReferenceDelivery({ status: () => ({ configured: true }),
       createExhibition: async (_input: unknown, hooks: { onReserved: (id: string) => void }) => { hooks.onReserved(session.id); return session; },
       cancelExhibitionSession: () => { session.status = 'stopping'; },
-    } as unknown as TryOnService);
+    } as unknown as TryOnService));
     service.command({ action: 'configure', providerMode: 'xmax' }); const generating = service.command({ action: 'begin' });
     await service.createLiveSession({ deviceId: 'skin-screen-001', lookId: generating.selectedLookId, generationNumber: generating.generationNumber });
     for (const action of ['end', 'idle']) {

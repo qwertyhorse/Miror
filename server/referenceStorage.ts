@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+import { isBenchmarkAddress, resolveMediaHost } from './network.ts';
 import { createHash, createHmac } from 'node:crypto';
 import type { ReferenceStorage } from './referenceAssets.ts';
 import { safeReferenceUrl } from './referenceAssets.ts';
@@ -49,6 +51,7 @@ export function createReferenceCosProvider(options: {
   now?: () => number;
   timeoutMs?: number;
   baseUrl?: string;
+  validateUrl?: (url: string) => Promise<void>;
 }): ReferenceReplicaProvider {
   const call = options.fetch ?? fetch;
   const timeout = options.timeoutMs ?? 20_000;
@@ -139,6 +142,7 @@ export function createReferenceCosProvider(options: {
           const key = `${s.prefix}${s.prefix && !s.prefix.endsWith('/') ? '/' : ''}miror-reference-${sha256}.${mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : 'webp'}`;
           const host = `${s.bucket}.cos.${s.region}.myqcloud.com`;
           const url = `https://${host}/${key.split('/').map(encode).join('/')}`;
+          await options.validateUrl?.(url);
           const authorization = cosPutAuthorization({
             secretId: s.credentials.accessKeyId,
             secretKey: s.credentials.secretAccessKey,
@@ -165,7 +169,8 @@ export function createReferenceCosProvider(options: {
             continue;
           }
           return { ok: false, error: errorFor(put.status) };
-        } catch {
+        } catch (error) {
+          if (error instanceof ReferencePreparationError) throw error;
           return { ok: false, error: signal.aborted ? 'timeout' : 'network' };
         }
       }
@@ -201,9 +206,37 @@ export function createReferenceCosProvider(options: {
 }
 
 /** Preserve the SDK upload + safety-check contract while preparing server-side. */
-export function referenceStorage(apiKey: string, region: 'cn' | 'global', call: typeof fetch = fetch): ReferenceStorage {
+export function referenceStorage(apiKey: string, region: 'cn' | 'global', call: typeof fetch = fetch, resolveHost: (host: string) => Promise<string[]> = resolveMediaHost, options: { dnsTimeoutMs?: number } = {}): ReferenceStorage {
+  const dnsTimeoutMs = options.dnsTimeoutMs ?? 8_000;
+  if (!Number.isFinite(dnsTimeoutMs) || dnsTimeoutMs <= 0 || dnsTimeoutMs > 30_000) throw new Error('Invalid reference DNS timeout');
   const baseUrl = region === 'cn' ? 'https://api.xmaxai.com/open/api/v1' : 'https://api.xmax.ai/open/api/v1';
-  const provider = createReferenceCosProvider({ apiKey, baseUrl, fetch: call });
+  const provider = createReferenceCosProvider({ apiKey, baseUrl, fetch: call, validateUrl: url => validateAddress(url) });
+  const validateAddress = async (url: string) => {
+    if (!safeReferenceUrl(url) || url.startsWith('file_')) throw new ReferencePreparationError('availability', 'malformed');
+    let addresses: string[];
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      addresses = await Promise.race([
+        Promise.resolve().then(() => resolveHost(new URL(url).hostname)),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new ReferencePreparationError('availability', 'timeout')), dnsTimeoutMs);
+          deadline.unref();
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof ReferencePreparationError) throw error;
+      throw new ReferencePreparationError('availability', 'network');
+    } finally { if (deadline) clearTimeout(deadline); }
+    const publicAddress = (address: string) => {
+      if (isBenchmarkAddress(address)) return false;
+      if (isIP(address) === 4) {
+        const [a, b] = address.split('.').map(Number);
+        return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0)) || (a === 100 && b >= 64 && b <= 127));
+      }
+      return isIP(address) === 6 && !/^(::|fc|fd|fe[89ab]|ff|2001:db8)/.test(address.toLowerCase());
+    };
+    if (!addresses.length || addresses.some(address => !publicAddress(address))) throw new ReferencePreparationError('availability', 'unsafe');
+  };
   return {
     async upload(bytes, sha256, mime, onStage) {
       let stage: ReferencePreparationStage = 'credentials';
@@ -224,9 +257,11 @@ export function referenceStorage(apiKey: string, region: 'cn' | 'global', call: 
       try { value = await response.json(); } catch { throw new ReferencePreparationError('check', 'malformed'); }
       if (value?.data?.safe === false) throw new ReferencePreparationError('check', 'unsafe');
       if (value?.success !== true || typeof value.data?.url !== 'string' || !safeReferenceUrl(value.data.url)) throw new ReferencePreparationError('check', 'malformed');
+      await validateAddress(value.data.url);
       return value.data.url;
     },
     async check(url) {
+      await validateAddress(url);
       const result = await provider.check(url);
       if (result.ok) return true;
       if (['not_found', 'denied'].includes(result.error)) return false;

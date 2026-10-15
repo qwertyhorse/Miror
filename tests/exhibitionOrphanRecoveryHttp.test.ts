@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -50,7 +51,7 @@ async function fixture() {
     keyStatus: token => keyStatus(credential, token), deactivate: token => deactivate(credential, token),
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 1 }),
   });
-  const service = new TryOnService({ provider: provider(currentKey), providerForApiKey: provider, store, secrets });
+  const service = new LifecycleTryOnService({ provider: provider(currentKey), providerForApiKey: provider, store, secrets });
   const mirrors = new ExhibitionMirrors(directory, { now: () => now }); mirrors.attachLiveService(service);
   const mirror = mirrors.getMirror('default');
   mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
@@ -61,7 +62,7 @@ async function fixture() {
   resources.push({ server, store, directory });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const post = (path: string, input: unknown) => fetch(base + path, {
-    method: 'POST', headers: { origin, 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' },
+    method: 'POST', headers: { origin, 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' },
     body: JSON.stringify(input), signal: AbortSignal.timeout(2_000),
   });
   const resume = () => post('/command', { action: 'resume', commandId: randomUUID(), expectedRevision: mirror.get().revision });
@@ -88,7 +89,7 @@ async function fixture() {
     advance: (milliseconds: number) => { now += milliseconds; } };
 }
 
-describe('Android 0.3.3 recovery from detached historical sessions over HTTP', () => {
+describe('updated material-capable client recovery from detached historical sessions over HTTP', () => {
   it('resumes a paused mirror past tokenless unknown history without claiming revocation or replacing its signing key', async () => {
     const f = await fixture(); const old = f.seedOrphan(false); const paused = f.mirror.get();
     expect(paused).toMatchObject({ phase: 'paused', live: null });

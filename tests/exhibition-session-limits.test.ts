@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
@@ -34,7 +35,7 @@ function fixture(defaults: Pick<ServiceOptions, 'perSessionLimit' | 'expireSecon
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!, deactivate,
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 0 }) };
   const options: ServiceOptions = { provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost: async () => ['8.8.8.8'], ...defaults };
-  const service = new TryOnService(options);
+  const service = new LifecycleTryOnService(options);
   const mirrors = new ExhibitionMirrors(directory, { now: () => time }); mirrors.attachLiveService(service);
   const exhibition = mirrors.getMirror();
   return { directory, store, keys, issue, deactivate, provider, options, service, mirrors, exhibition, now: () => time,
@@ -103,7 +104,7 @@ describe('per-mirror session limits', () => {
 
   it('accepts the finite boundaries without clamping service or mirror values', async () => {
     const { options, exhibition, issue, store } = fixture();
-    const upper = new TryOnService({ ...options, perSessionLimit: SESSION_CREDIT_MAX, expireSeconds: SESSION_EXPIRY_MAX });
+    const upper = new LifecycleTryOnService({ ...options, perSessionLimit: SESSION_CREDIT_MAX, expireSeconds: SESSION_EXPIRY_MAX });
     expect(upper.perSessionLimit).toBe(SESSION_CREDIT_MAX); expect(upper.expireSeconds).toBe(SESSION_EXPIRY_MAX);
     for (const value of [{ credits: 1, expireSeconds: 1 }, { credits: SESSION_CREDIT_MAX, expireSeconds: SESSION_EXPIRY_MAX }]) {
       expect(exhibition.command({ action: 'configure', sessionLimits: value }).settings.sessionLimits).toEqual(value);
@@ -120,7 +121,7 @@ describe('per-mirror session limits', () => {
     { expireSeconds: Infinity }, { expireSeconds: SESSION_EXPIRY_MAX + 1 },
   ])('rejects invalid service defaults %j', invalid => {
     const { options } = fixture();
-    expect(() => new TryOnService({ ...options, ...invalid })).toThrow('Invalid temporary credential configuration');
+    expect(() => new LifecycleTryOnService({ ...options, ...invalid })).toThrow('Invalid temporary credential configuration');
   });
 
   it('rejects invalid and incomplete settings without touching memory or disk', () => {
@@ -210,7 +211,7 @@ describe('per-mirror session limits', () => {
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
     const post = (path: string, value: unknown, headers: Record<string, string> = {}) => fetch(base + path, {
-      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
+      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
     });
     try {
       expect(await (await fetch(base)).json()).toMatchObject({ settings: { sessionLimits: { credits: null, expireSeconds: 200 } } });
@@ -237,7 +238,6 @@ async function runningContinuous() {
   const context = fixture(); const { exhibition, service } = context;
   exhibition.command({ action: 'configure', sessionLimits: { credits: null, expireSeconds: 120 } });
   start(exhibition); const session = await create(exhibition);
-  await exhibition.bindLiveReference(session.id, { deviceId, lookId: 'commute', refImageUrl: 'https://uploads.example/garment.webp' });
   await service.link(session.id, 'ums-continuous-test'); await service.firstFrame(session.id, 400); exhibition.liveFirstFrame(session.id, 400);
   return { ...context, session };
 }
@@ -329,7 +329,7 @@ describe('continuous experience renewal', () => {
     const server = createApiServer(service, [origin], undefined, mirrors); server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors`;
     const post = (mirrorId: string, path: string, input: unknown, requestOrigin = origin) => fetch(`${base}/${mirrorId}${path}`, {
-      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'Content-Type': 'application/json', Origin: requestOrigin }, body: JSON.stringify(input),
+      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: requestOrigin }, body: JSON.stringify(input),
     });
     try {
       const state = exhibition.get(); const path = `/live/session/${session.id}/renewal`;

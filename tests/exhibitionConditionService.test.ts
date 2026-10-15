@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ReferenceAssets } from '../server/referenceAssets.ts';
+import { createHash, randomBytes } from 'node:crypto';
 import { TryOnService } from '../server/service.ts';
 import { SecretBox, SessionStore } from '../server/store.ts';
-import type { Provider, SessionRecord } from '../server/types.ts';
+import type { Provider } from '../server/types.ts';
 import type { ExhibitionExperienceMode } from '../shared/exhibition.ts';
 
 const cleanup: (() => void)[] = [];
 beforeEach(() => { vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network calls are forbidden in condition service fixtures')); });
 afterEach(() => { cleanup.splice(0).forEach(fn => fn()); vi.restoreAllMocks(); });
-function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function fixture(mode: ExhibitionExperienceMode = 'clothx') {
   const store = new SessionStore(':memory:'); cleanup.push(() => store.close());
   const expiresAt = new Date(Date.now() + 120000).toISOString();
@@ -18,15 +21,20 @@ async function fixture(mode: ExhibitionExperienceMode = 'clothx') {
     keyStatus: async () => ({ status: 'active', consumedCredit: 4, expireTimestamp: expiresAt }),
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 4 }) };
   const resolveHost = vi.fn(async () => ['8.8.8.8']);
-  const service = new TryOnService({ provider, providerForApiKey: () => provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost });
+  const dir = mkdtempSync(join(tmpdir(), 'condition-trusted-')); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  const bytes = Buffer.from('reference'); const expected = { sha256: createHash('sha256').update(bytes).digest('hex'), mime: 'image/webp' };
+  const service = new TryOnService({ referenceAssets: new ReferenceAssets(dir), referenceStorage: () => ({ upload: async () => 'https://fixture-123.cos.ap-test.myqcloud.com/image.webp', check: async () => true }), provider, providerForApiKey: () => provider, store, secrets: new SecretBox(randomBytes(32)), resolveHost });
   const session = await service.createExhibition({ lookId: 'commute', deviceId: 'screen-condition', name: '通勤', referenceAsset: '/assets/exhibition/commute-cutout.png', mode,
     prompt: mode === 'free' ? '初始水彩风格' : undefined, sessionNumber: 3, generationNumber: 5 });
-  await service.bindExhibitionReference(session.id, { deviceId: 'screen-condition', lookId: 'commute', refImageUrl: 'https://uploads.example/commute.webp' });
+  const prepared = (await service.prepareReference('default', bytes, expected.mime))!;
+  await service.bindExhibitionReference(session.id, { deviceId: 'screen-condition', lookId: 'commute', bindingId: prepared.bindingId }, expected);
   await service.link(session.id, 'ums-condition-fixture');
   store.update(session.id, { firstFrameMs: 750, resultAvailable: true, resultUrl: 'https://results.example/old.mp4', verification: 'sdk-reported' });
   resolveHost.mockClear();
   const input = { deviceId: 'screen-condition', lookId: 'city', sessionNumber: 3, generationNumber: 6, mode,
-    prompt: mode === 'free' ? '  新的油画风格  ' : undefined, referenceAsset: '/assets/exhibition/city-cutout.png', refImageUrl: 'https://uploads.example/city.webp' };
+    prompt: mode === 'free' ? '  新的油画风格  ' : undefined, referenceAsset: '/assets/exhibition/city-cutout.png', bindingId: prepared.bindingId, refImageUrl: prepared.url };
+  const update = service.updateExhibitionCondition.bind(service);
+  service.updateExhibitionCondition = (id, input, current) => update(id, input, current, expected);
   return { store, service, session, input, resolveHost, issueKey, deactivate };
 }
 
@@ -48,9 +56,9 @@ describe('camera exhibition condition updates', () => {
     const { store, service, session, input, resolveHost } = await fixture();
     const accepted = await service.updateExhibitionCondition(session.id, input, () => true);
     await expect(service.updateExhibitionCondition(session.id, input, () => true)).resolves.toEqual(accepted);
-    expect(resolveHost).toHaveBeenCalledTimes(1);
+    expect(resolveHost).not.toHaveBeenCalled();
     await expect(service.updateExhibitionCondition(session.id, { ...input, generationNumber: 5 }, () => true)).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION', statusCode: 409 });
-    await expect(service.updateExhibitionCondition(session.id, { ...input, refImageUrl: 'https://uploads.example/changed.webp' }, () => true)).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' });
+    await expect(service.updateExhibitionCondition(session.id, { ...input, bindingId: 'unknown' }, () => true)).rejects.toMatchObject({ code: 'REFERENCE_NOT_READY' });
     await expect(service.updateExhibitionCondition(session.id, input, () => false)).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' });
     expect(store.get(session.id).referenceVersion).toBe(2);
   });
@@ -91,16 +99,12 @@ describe('camera exhibition condition updates', () => {
   });
 
   it.each([
-    ['HTTP', { refImageUrl: 'http://uploads.example/city.webp' }, ['8.8.8.8'], 'INVALID_REMOTE_URL'],
-    ['private address', {}, ['127.0.0.1'], 'REFERENCE_ADDRESS_BLOCKED'],
-    ['mixed DNS', {}, ['8.8.8.8', '192.168.1.2'], 'REFERENCE_ADDRESS_BLOCKED'],
-    ['empty DNS', {}, [], 'REFERENCE_ADDRESS_BLOCKED'],
-    ['foreign upload', { referenceAsset: '/api/exhibition/mirrors/other/assets/upload-12345678-1234-1234-1234-123456789012' }, ['8.8.8.8'], 'EXHIBITION_INVALID_REFERENCE'],
-    ['missing image', { refImageUrl: undefined }, ['8.8.8.8'], 'INVALID_INPUT'],
-    ['no image outside Free', { referenceKind: 'none', referenceAsset: '', refImageUrl: '' }, ['8.8.8.8'], 'EXHIBITION_INVALID_REFERENCE'],
-  ] as const)('rejects %s references without replacing the accepted condition', async (_name, patch, addresses, code) => {
-    const { store, service, session, input, resolveHost } = await fixture(); const original = store.get(session.id);
-    resolveHost.mockResolvedValue([...addresses]);
+    ['unknown binding', { bindingId: 'unknown' }, 'REFERENCE_NOT_READY'],
+    ['missing binding', { bindingId: undefined }, 'REFERENCE_BINDING_INVALID'],
+    ['foreign upload', { referenceAsset: '/api/exhibition/mirrors/other/assets/upload-12345678-1234-1234-1234-123456789012' }, 'EXHIBITION_INVALID_REFERENCE'],
+    ['no image outside Free', { referenceKind: 'none', referenceAsset: '', refImageUrl: '' }, 'EXHIBITION_INVALID_REFERENCE'],
+  ] as const)('rejects %s without replacing accepted condition', async (_name, patch, code) => {
+    const { store, service, session, input } = await fixture(); const original = store.get(session.id);
     await expect(service.updateExhibitionCondition(session.id, { ...input, ...patch }, () => true)).rejects.toMatchObject({ code });
     expect(store.get(session.id)).toEqual(original);
   });
@@ -117,36 +121,15 @@ describe('camera exhibition condition updates', () => {
     await expect(service.updateExhibitionCondition(session.id, { ...promptOnly, generationNumber: 8, prompt: '  ' }, () => true)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PROMPT' });
   });
 
-  it('discards a delayed DNS validation after a newer selection', async () => {
+  it('rejects a newer selection before mutation without asynchronous DNS', async () => {
     const { store, service, session, input, resolveHost } = await fixture(); const original = store.get(session.id);
-    const dns = deferred<string[]>(); resolveHost.mockReturnValue(dns.promise); let current = true;
-    const pending = service.updateExhibitionCondition(session.id, input, () => current); current = false; dns.resolve(['8.8.8.8']);
-    await expect(pending).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' }); expect(store.get(session.id)).toEqual(original);
-  });
-
-  it.each([
-    ['stop', { status: 'stopping' }, 'SESSION_INACTIVE'],
-    ['RTC ownership', { providerSessionId: 'ums-other-fixture' }, 'EXHIBITION_STALE_GENERATION'],
-    ['source kind', { sourceKind: 'photo' }, 'EXHIBITION_STALE_GENERATION'],
-  ] satisfies readonly [string, Partial<SessionRecord>, string][])('discards delayed validation after %s changes', async (_name, patch, code) => {
-    const { store, service, session, input, resolveHost } = await fixture(); const dns = deferred<string[]>(); resolveHost.mockReturnValue(dns.promise);
-    const pending = service.updateExhibitionCondition(session.id, input, () => true); store.update(session.id, patch); const concurrent = store.get(session.id); dns.resolve(['8.8.8.8']);
-    await expect(pending).rejects.toMatchObject({ code }); expect(store.get(session.id)).toEqual(concurrent);
-  });
-
-  it('lets a newer validated condition win while an older DNS check is pending', async () => {
-    const { store, service, session, input, resolveHost } = await fixture(); const dns = deferred<string[]>(); resolveHost.mockReturnValueOnce(dns.promise);
-    const older = service.updateExhibitionCondition(session.id, input, () => true);
-    const newer = { ...input, lookId: 'evening', generationNumber: 7, referenceAsset: '/assets/exhibition/evening-cutout.png', refImageUrl: 'https://uploads.example/evening.webp' };
-    await service.updateExhibitionCondition(session.id, newer, () => true); dns.resolve(['8.8.8.8']);
-    await expect(older).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' });
-    expect(store.get(session.id)).toMatchObject({ referenceVersion: 2, targetItemId: 'evening', exhibition: { generationNumber: 7 } });
+    await expect(service.updateExhibitionCondition(session.id, input, () => false)).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' });
+    expect(store.get(session.id)).toEqual(original); expect(resolveHost).not.toHaveBeenCalled();
   });
 
   it('coalesces concurrent identical accepted conditions to a single version', async () => {
-    const { store, service, session, input, resolveHost } = await fixture(); const dns = deferred<string[]>(); resolveHost.mockReturnValue(dns.promise);
-    const first = service.updateExhibitionCondition(session.id, input, () => true); const second = service.updateExhibitionCondition(session.id, input, () => true);
-    dns.resolve(['8.8.8.8']); const results = await Promise.all([first, second]); expect(results[0]).toEqual(results[1]);
-    expect(store.get(session.id).referenceVersion).toBe(2);
+    const { store, service, session, input, resolveHost } = await fixture();
+    const results = await Promise.all([service.updateExhibitionCondition(session.id, input, () => true), service.updateExhibitionCondition(session.id, input, () => true)]);
+    expect(results[0]).toEqual(results[1]); expect(store.get(session.id).referenceVersion).toBe(2); expect(resolveHost).not.toHaveBeenCalled();
   });
 });

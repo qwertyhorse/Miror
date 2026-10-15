@@ -6,9 +6,10 @@ export const exhibitionLooks: ExhibitionLook[] = [
   { id: 'evening', name: '优雅礼服', description: '气场加持，重要时刻', image: '/assets/exhibition/evening-cutout.png', palette: '经典黑 · 象牙白', category: '礼服', tags: ['优雅'], mode: 'clothx', source: 'sample' },
 ];
 export const looksFor = (state: ExhibitionState) => state.looks ?? exhibitionLooks;
-export const lookById = (state: ExhibitionState, id: string | null) => looksFor(state).find(look => look.id === id);
-export const enabledLooksForMode = (state: ExhibitionState) => state.enabledLookIds.flatMap(id => {
-  const look = lookById(state, id);
+export const runtimeLooksFor = (state: ExhibitionState) => state.providerMode === 'xmax' && state.publication ? state.publication.looks : looksFor(state);
+export const lookById = (state: ExhibitionState, id: string | null) => runtimeLooksFor(state).find(look => look.id === id);
+export const enabledLooksForMode = (state: ExhibitionState) => (state.providerMode === 'xmax' && state.publication ? state.publication.looks.map(look => look.id) : state.enabledLookIds).flatMap(id => {
+  const look = runtimeLooksFor(state).find(item => item.id === id);
   return look && (look.mode ?? 'clothx') === (state.experienceMode ?? 'clothx') ? [look] : [];
 });
 export const phaseLabel: Record<ExhibitionPhase, string> = {

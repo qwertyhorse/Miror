@@ -100,7 +100,7 @@ describe('exhibition upload validation and persistence', () => {
     expect(migrated).toMatchObject({ selectedLookId: 'evening', enabledLookIds: ['evening', 'city'], sessionNumber: 1,
       settings: { autoReturnSeconds: 180, uploadLimits: EXHIBITION_DEFAULT_UPLOAD_LIMITS } });
     expect(migrated.looks).toHaveLength(3); expect(migrated.revision).toBe(old.state.revision + 1);
-    expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).schemaVersion).toBe(3);
+    expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).schemaVersion).toBe(5);
   });
 
   it('rejects fake, truncated, unsupported and malformed images independently of the client MIME or filename', async () => {
@@ -256,7 +256,8 @@ describe('exhibition flat classification and metadata', () => {
     expect(service.get()).toEqual(initial);
     service.command({ action: 'begin' });
     expect(() => service.taxonomy({ categories: initial.categories, tags: initial.tags })).toThrow(errorCode('EXHIBITION_INVALID_PHASE'));
-    expect(() => service.updateLook('commute', { name: '名字' })).toThrow(errorCode('EXHIBITION_INVALID_PHASE'));
+    expect(service.updateLook('commute', { name: '名字' })).toMatchObject({ phase: 'generating' });
+    expect(service.get().publication!.looks[0].name).toBe(initial.looks[0].name);
     expect((await service.upload(uploadInput(await image()))).phase).toBe('generating');
   });
 });

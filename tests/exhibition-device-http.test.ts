@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CONTINUOUS_SEGMENT_CREDITS } from '../shared/sessionLimits';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -43,12 +44,12 @@ async function fixture() {
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async token => keys.get(token)!,
     deactivate: async token => { const value = { ...keys.get(token)!, status: 'inactive' as const }; keys.set(token, value); return value; },
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 0 }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [] });
   const mirrors = new ExhibitionMirrors(directory, { now: () => time });
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const headers = { Origin: 'http://xuminghong.local:10200', 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' };
+  const headers = { Origin: 'http://xuminghong.local:10200', 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' };
   const request = (path: string, input?: unknown, method = input === undefined ? 'GET' : 'POST', origin = headers.Origin) => fetch(base + path, {
     method, headers: { ...headers, Origin: origin }, ...(input === undefined ? {} : { body: JSON.stringify(input) }),
   });

@@ -56,7 +56,7 @@ describe('dual images with SQLite mirror state', () => {
     expect(restored.read()).toEqual(mirror.read());
     for (const url of urls(next)) expect(asset(restored, url)).toEqual(asset(mirror, url));
     expect(() => asset(restored, look.image)).toThrow();
-    expect(f.store.mirrorState('default')).toMatchObject({ schemaVersion: 4, uploadLimitsVersion: 2,
+    expect(f.store.mirrorState('default')).toMatchObject({ schemaVersion: 5, uploadLimitsVersion: 2,
       state: { settings: { uploadLimits: { minWidth: 256, maxWidth: 8192 } } } });
   });
 
@@ -90,7 +90,7 @@ describe('dual images with SQLite mirror state', () => {
     restored.attachLiveService(storeService(restoredStore));
     expect(restored.read().looks).toEqual(before.looks);
     for (const url of urls(previous)) expect(asset(restored, url)).toEqual(readFileSync(join(backup, 'exhibition-assets', filename(url))));
-    expect(restoredStore.mirrorState(id)).toMatchObject({ schemaVersion: 4, state: { looks: JSON.parse(JSON.stringify(before.looks)) } });
+    expect(restoredStore.mirrorState(id)).toMatchObject({ schemaVersion: 5, state: { looks: JSON.parse(JSON.stringify(before.looks)) } });
   });
 
   it('preserves the target and a complete recovery backup when a copied-state SQLite transaction fails', async () => {

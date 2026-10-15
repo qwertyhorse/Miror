@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { ReferenceAssets } from '../server/referenceAssets.ts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -64,6 +66,7 @@ async function fixture() {
   const providerFactory = vi.fn((key: string, region: XmaxRegion = 'global') => new XmaxProvider(key, fetcher, region));
   const createService = (currentStore = store, currentSecrets = secrets, currentCredentials = credentials) => new TryOnService({
     provider, store: currentStore, secrets: currentSecrets, mirrorCredentials: currentCredentials, providerForApiKey: providerFactory,
+    referenceAssets: new ReferenceAssets(directory), referenceStorage: () => ({ upload: async () => 'https://fixture-123.cos.ap-test.myqcloud.com/reference.png', check: async () => true }),
     resolveHost: async () => ['93.184.216.34'],
   });
   const service = createService();
@@ -71,6 +74,10 @@ async function fixture() {
   return { directory, database, secrets, store, credentials, requests, issued, provider, providerFactory, service, createService, save };
 }
 
+async function bindPrepared(service: TryOnService, id: string, mirrorId: string) {
+  const bytes = Buffer.from('fixture'); const mime = 'image/png'; const prepared = (await service.prepareReference(mirrorId, bytes, mime))!;
+  return service.bindExhibitionReference(id, { mirrorId, deviceId: `screen-${mirrorId}`, lookId: 'commute', bindingId: prepared.bindingId }, { sha256: createHash('sha256').update(bytes).digest('hex'), mime });
+}
 function create(service: TryOnService, mirrorId: string, hooks?: Parameters<TryOnService['createExhibition']>[1]) {
   return service.createExhibition({ mirrorId, lookId: 'commute', deviceId: `screen-${mirrorId}`, name: '隔离测试服装', referenceAsset: '/assets/exhibition/commute-cutout.png', mode: 'clothx', sessionNumber: 1, generationNumber: 1 }, hooks);
 }
@@ -92,7 +99,7 @@ describe('per-mirror credential routing and persistent session history', () => {
     f.provider.setApiKey('');
     for (const [session, mirrorId, originalKey] of [[east, 'east', keyA], [west, 'west', keyB]] as const) {
       expect(await f.service.get(session.id)).toMatchObject({ consumedCredits: 3, status: 'active' });
-      await f.service.bindExhibitionReference(session.id, { mirrorId, deviceId: `screen-${mirrorId}`, lookId: 'commute', refImageUrl: 'https://uploads.example/commute.png' });
+      await bindPrepared(f.service, session.id, mirrorId);
       const providerSessionId = `ums-routing-${mirrorId}`;
       await f.service.link(session.id, providerSessionId);
       // Linking is idempotent and still verifies the session with its frozen credential.
@@ -130,7 +137,7 @@ describe('per-mirror credential routing and persistent session history', () => {
   it('queries historical usage with the original key after its mirror rotates to another key', async () => {
     const f = await fixture(); f.save('east', keyA);
     const old = await create(f.service, 'east');
-    await f.service.bindExhibitionReference(old.id, { mirrorId: 'east', deviceId: 'screen-east', lookId: 'commute', refImageUrl: 'https://uploads.example/commute.png' });
+    await bindPrepared(f.service, old.id, 'east');
     await f.service.link(old.id, 'ums-routing-historical');
     await f.service.stop(old.id);
     f.save('east', keyB);
@@ -205,7 +212,7 @@ describe('per-mirror credential routing and persistent session history', () => {
       return current;
     };
     const exhibition = new ExhibitionService(join(f.directory, 'east'), { mirrorId: 'east' }); exhibition.attachLiveService(f.service);
-    exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 }); exhibition.command({ action: 'begin' });
+    exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 }); await exhibition.prepareReference('commute'); exhibition.command({ action: 'begin' });
     const createLive = () => exhibition.createLiveSession({ deviceId: 'screen-east', lookId: 'commute', generationNumber: exhibition.get().generationNumber });
     await expect(createLive()).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR' });
     const record = f.store.list()[0]; const paused = exhibition.get();

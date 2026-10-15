@@ -1,3 +1,4 @@
+import { withLifecycleReferenceDelivery } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -43,7 +44,7 @@ describe('per-mirror gesture settings', () => {
   it('persists a complete update atomically, clones the input, and does not start a generation', () => {
     const { service, directory, now, advance } = fixture(); const before = service.get();
     const createExhibition = vi.fn();
-    service.attachLiveService({ status: () => ({ configured: true }), createExhibition } as unknown as TryOnService);
+    service.attachLiveService(withLifecycleReferenceDelivery({ status: () => ({ configured: true }), createExhibition } as unknown as TryOnService));
     const submitted = structuredClone(configured);
     const saved = service.command({ action: 'configure', gestureRecognition: submitted, expectedRevision: before.revision });
     expect(saved).toMatchObject({ revision: before.revision + 1, phase: before.phase, settings: { ...before.settings, gestureRecognition: configured },
@@ -121,10 +122,10 @@ describe('per-mirror gesture settings', () => {
     service.command({ action: 'end' });
     expect(service.command({ action: 'configure', gestureRecognition: configured }).settings.gestureRecognition).toEqual(configured);
     const session = { id: 'gesture-test-session', status: 'active', expiresAt: new Date(now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0 };
-    service.attachLiveService({ status: () => ({ configured: true }),
+    service.attachLiveService(withLifecycleReferenceDelivery({ status: () => ({ configured: true }),
       createExhibition: async (_input: unknown, hooks: { onReserved: (id: string) => void }) => { hooks.onReserved(session.id); return session; },
       cancelExhibitionSession: () => { session.status = 'stopping'; },
-    } as unknown as TryOnService);
+    } as unknown as TryOnService));
     service.command({ action: 'configure', providerMode: 'xmax' }); const generating = service.command({ action: 'begin' });
     await service.createLiveSession({ deviceId: 'gesture-screen-001', lookId: generating.selectedLookId, generationNumber: generating.generationNumber });
     for (const action of ['end', 'idle']) {
@@ -138,7 +139,7 @@ describe('per-mirror gesture settings', () => {
     service.command({ action: 'configure', autoReturnSeconds: 180, switchMode: 'auto', autoSwitchSeconds: 45, enabledLookIds: ['evening', 'city'] });
     const file = join(directory, 'exhibition.json'); const stored = JSON.parse(readFileSync(file, 'utf8'));
     const uploadId = `upload-${randomUUID()}`;
-    stored.state.looks.push({ ...stored.state.looks[0], id: uploadId, name: '自定义素材', source: 'upload', image: `/api/exhibition/assets/${uploadId}`,
+    stored.state.looks.push({ ...stored.state.looks[0], id: uploadId, name: '自定义素材', source: 'upload', image: `/api/exhibition/assets/${uploadId}`, referenceImage: `/api/exhibition/assets/${uploadId}`,
       width: 512, height: 768, bytes: 100, mime: 'image/webp' });
     stored.state.enabledLookIds.push(uploadId); stored.state.selectedLookId = uploadId;
     stored.state.settings.gestureRecognition = kind === 'invalid' ? { ...configured, gestures: ['unknown'] } : undefined;

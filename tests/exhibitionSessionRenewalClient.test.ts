@@ -1,3 +1,4 @@
+import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import { exhibitionPromptForLook } from '../shared/exhibition';
@@ -37,10 +38,10 @@ function fixture(continuous: boolean | 'legacy' = true) {
     disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const deps = {
     create: vi.fn(async () => ({ ...record })), reference: vi.fn(async (value: Input) => new File(['garment'], value.image.split('/').pop()!, { type: 'image/png' })),
-    prepare: vi.fn(async () => {}), upload: vi.fn(async (file: File) => `https://reference.fixture/${file.name}`),
-    bind: vi.fn(async (_id, value) => { record = { ...record, refImageUrl: value.refImageUrl, referenceVersion: 1 }; return { ...record }; }),
+    prepare: vi.fn(async () => {}), readyLookup: vi.fn(async (file: File) => `https://reference.fixture/${file.name}`),
+    bind: vi.fn(async (_id, value) => { record = { ...record, refImageUrl: resolvedBinding(value.bindingId), referenceVersion: 1 }; return { ...record }; }),
     updateCondition: vi.fn(async (_id, value) => {
-      record = { ...record, referenceAsset: `/assets/${value.lookId}.png`, refImageUrl: value.refImageUrl ?? '', referenceVersion: record.referenceVersion + 1,
+      record = { ...record, referenceAsset: `/assets/${value.lookId}.png`, refImageUrl: resolvedBinding(value.bindingId) ?? '', referenceVersion: record.referenceVersion + 1,
         exhibition: { ...record.exhibition, lookId: value.lookId, generationNumber: value.generationNumber } };
       return { ...record };
     }), conditionApplied: vi.fn(async () => ({})),
@@ -51,7 +52,8 @@ function fixture(continuous: boolean | 'legacy' = true) {
     prepareRenewal: vi.fn(async (_id: string, _value: { deviceId: string; sessionNumber: number; generationNumber: number }, _signal: AbortSignal) => ({ renewalId: 'planned-renewal' })),
     commitRenewal: vi.fn(async (_id: string, _value: { deviceId: string; renewalId: string }, _signal: AbortSignal) => ({})),
     clone: vi.fn(() => clone), now: vi.fn(() => performance.now()),
-  } satisfies ExhibitionLiveDeps;
+  } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
+  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), updateError: vi.fn() };
   const controller = new ExhibitionLiveConnection(input, events, deps); connections.push(controller);
   const showFirstFrame = () => { callbacks.onRemoteStream(output); controller.reportRenderedFrame(output); };

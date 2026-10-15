@@ -86,7 +86,7 @@ describe('six-mode console presentation', () => {
     expect(preset).not.toContain('素材名称'); expect(preset).not.toContain('type="text"');
     expect(preset).toMatch(/checked="" value="charx"|value="charx" checked=""/);
     expect(preset).not.toContain('<textarea'); expect(preset).not.toContain('Free 提示词');
-    expect(preset).toContain('aria-label="展示图文件"'); expect(preset).toContain('aria-label="XMAX 参考图文件"');
+    expect(preset).toContain('aria-label="展示图文件"'); expect(preset).toContain('aria-label="模型参考图文件"');
     const blank = renderToStaticMarkup(createElement(LookEditor, {
       controller: controller(state()), look: { ...material('editing', 'free'), prompt: '   ' }, initialMode: 'free', close: vi.fn(), saved: vi.fn(), deleted: vi.fn(),
     }));
@@ -114,13 +114,13 @@ describe('six-mode console presentation', () => {
     try {
       await host.render(createElement(LookEditor, { controller: control, look, initialMode: 'free', close: vi.fn(), saved, deleted: vi.fn() }));
       expect(host.find(node => node.nodeName === 'span' && node.textContent === '仅提示词')).toBeDefined();
-      expect(host.find(node => node.getReactProps()['aria-label'] === 'XMAX 参考图文件')!.getReactProps().required).toBe(false);
+      expect(host.find(node => node.getReactProps()['aria-label'] === '模型参考图文件')!.getReactProps().required).toBe(false);
       if (mode !== 'free') await act(async () => { host.find(node => node.getReactProps().type === 'radio' && node.getReactProps().value === mode)!.getReactProps().onChange(); });
       await act(async () => { host.find(node => node.nodeName === 'form')!.getReactProps().onSubmit({ preventDefault: vi.fn() }); });
       await flushReact();
       if (mode !== 'free') {
         expect(host.find(node => node.nodeName === 'button' && node.textContent === '保存素材')!.getReactProps().disabled).toBe(true);
-        expect(host.find(node => node.getReactProps()['aria-label'] === 'XMAX 参考图文件')!.getReactProps().required).toBe(true);
+        expect(host.find(node => node.getReactProps()['aria-label'] === '模型参考图文件')!.getReactProps().required).toBe(true);
         expect(control.updateLook).not.toHaveBeenCalled(); expect(saved).not.toHaveBeenCalled();
         return;
       }

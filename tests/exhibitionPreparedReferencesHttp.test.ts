@@ -24,14 +24,14 @@ async function fixture() {
     sessionStatus: async (_, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 0 }) };
   const upload = vi.fn(async () => 'https://fixture-123.cos.ap-test.myqcloud.com/ready.png');
   const storage = vi.fn(() => ({ upload, check: async () => true }));
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), referenceAssets: new ReferenceAssets(directory), referenceStorage: storage });
+  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), referenceAssets: new ReferenceAssets(directory), referenceStorage: storage, resolveMediaHost: async () => ['93.184.216.34'] });
   const mirrors = new ExhibitionMirrors(directory);
   const server = createApiServer(service, undefined, undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   cleanup.push(async () => { const closed = once(server, 'close'); server.closeAllConnections(); server.close(); await closed; store.close(); await rm(directory, { force: true, recursive: true }); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const get = (path: string, signal?: AbortSignal) => fetch(base + path, { signal });
-  const post = (path: string, body = {}) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://127.0.0.1:5173', 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const post = (path: string, body = {}) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://127.0.0.1:5173', 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return { get, post, upload, storage, issue, mirror: mirrors.getMirror(), rotate: () => { key = 'uk-fixture-account-b'; } };
 }
 it('prepares original material without a generation key, persists its scope into a session, and isolates account rotation', async () => {
@@ -73,7 +73,9 @@ it('prepares only the independent XMAX image and binds its immutable asset to th
   expect(expected).not.toEqual(f.mirror.asset(look.id).data);
   expect((await f.post(`/references/${look.id}`)).status).toBe(200);
   expect(f.upload).toHaveBeenCalledOnce(); expect(f.upload.mock.calls[0][0]).toEqual(expected);
-  f.mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0, enabledLookIds: [look.id] }); f.mirror.command({ action: 'begin' });
+  f.mirror.command({ action: 'configure', autoReturnSeconds: 0, enabledLookIds: [look.id] });
+  expect((await f.post('/publication/publish')).status).toBe(200);
+  f.mirror.command({ action: 'configure', providerMode: 'xmax' }); f.mirror.command({ action: 'begin' });
   const result = await f.post('/live/session', { deviceId: 'dual-image-device', lookId: look.id, generationNumber: f.mirror.get().generationNumber });
   expect(result.status).toBe(201); expect((await result.json()).referenceAsset).toBe(look.referenceImage);
 });

@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
@@ -36,7 +37,7 @@ async function fixture() {
   const provider: Provider = { configured: true, issueKey: issue, deactivate,
     keyStatus: async () => ({ status: 'active', consumedCredit: 1, expireTimestamp: expiresAt }),
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'active', consumedCredit: 1 }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)) });
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)) });
   const mirrors = new ExhibitionMirrors(directory, { now: () => now });
   const mirror = mirrors.getMirror(); mirrors.attachLiveService(service);
   mirror.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
@@ -46,7 +47,7 @@ async function fixture() {
   resources.push({ server, store, directory });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
   const post = (path: string, input: unknown) => fetch(base + path, { method: 'POST',
-    headers: { origin, 'X-Miror-Protocol': '2', 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(1_500) });
+    headers: { origin, 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(1_500) });
   const get = (path = '') => fetch(base + path, { signal: AbortSignal.timeout(1_500) });
   const start = (lookId = mirror.get().selectedLookId, generationNumber = mirror.get().generationNumber) =>
     post('/live/session', { deviceId: 'continuous-http-screen', lookId, generationNumber });

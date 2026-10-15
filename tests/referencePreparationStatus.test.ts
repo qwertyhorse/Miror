@@ -164,7 +164,7 @@ it.each([
   responses[index] = failure;
   const call = vi.fn<typeof fetch>(async () => responses.shift()!);
   const onStage = vi.fn();
-  await expect(referenceStorage('uk-private', 'cn', call).upload(bytes, sha, 'image/png', onStage)).rejects.toMatchObject({ stage, failure: reason, message: 'Reference preparation failed' });
+  await expect(referenceStorage('uk-private', 'cn', call, async () => ['8.8.8.8']).upload(bytes, sha, 'image/png', onStage)).rejects.toMatchObject({ stage, failure: reason, message: 'Reference preparation failed' });
   expect(onStage).toHaveBeenLastCalledWith(stage);
   expect(call).toHaveBeenCalledTimes(index + 1);
 });

@@ -18,7 +18,7 @@ const legacy: ExhibitionLook = { id: 'outfit', name: '测试套装', description
   palette: '', category: '', tags: [], source: 'upload' };
 const dual: ExhibitionLook = { ...legacy, referenceImage: '/reference-original.webp', referenceKind: 'image' };
 const promptOnly: ExhibitionLook = { ...legacy, mode: 'free', referenceKind: 'none', prompt: '保留人物表情' };
-type ImageSide = '展示图' | 'XMAX 参考图';
+type ImageSide = '展示图' | '模型参考图';
 const file = (name: string) => new File([name], name, { type: 'image/png' });
 const base64 = (name: string) => `data:image/png;base64,${Buffer.from(name).toString('base64')}`;
 
@@ -86,7 +86,7 @@ describe('dual-image material editor', () => {
   it('allows 432 × 768 images in both upload fields', async () => {
     const f = await fixture(); f.holdImages = true;
     await f.choose('展示图', file('cover.png'));
-    await f.choose('XMAX 参考图', file('reference.png'));
+    await f.choose('模型参考图', file('reference.png'));
     await act(async () => { for (const image of f.images) { image.naturalWidth = 432; image.naturalHeight = 768; image.onload?.(); } });
     expect(host!.find(node => node.getReactProps().role === 'alert')).toBeUndefined();
     expect(f.saveButton().disabled).toBe(false);
@@ -101,8 +101,8 @@ describe('dual-image material editor', () => {
     await f.choose('展示图', file('person.png'));
     expect(f.saveButton().disabled).toBe(true);
     await f.submit(); expect(f.upload).not.toHaveBeenCalled();
-    await f.choose('XMAX 参考图', file('white-outfit.png'));
-    expect(f.preview('展示图')).toContain('person.png'); expect(f.preview('XMAX 参考图')).toContain('white-outfit.png');
+    await f.choose('模型参考图', file('white-outfit.png'));
+    expect(f.preview('展示图')).toContain('person.png'); expect(f.preview('模型参考图')).toContain('white-outfit.png');
     expect(f.saveButton().disabled).toBe(false);
     await f.submit();
     expect(f.upload).toHaveBeenCalledExactlyOnceWith({ name: 'person', description: '', mode: 'clothx', prompt: '',
@@ -116,13 +116,13 @@ describe('dual-image material editor', () => {
     ['衣'.repeat(39) + '👗.png', '衣'.repeat(39)],
   ])('derives a valid internal name from display filename %j', async (filename, expectedName) => {
     const f = await fixture();
-    await f.choose('展示图', file(filename)); await f.choose('XMAX 参考图', file('reference.png')); await f.submit();
+    await f.choose('展示图', file(filename)); await f.choose('模型参考图', file('reference.png')); await f.submit();
     expect(f.upload.mock.calls[0][0].name).toBe(expectedName);
   });
 
-  it.each(['展示图', 'XMAX 参考图'] as const)('only replaces %s and preserves the opened revision and other image', async side => {
+  it.each(['展示图', '模型参考图'] as const)('only replaces %s and preserves the opened revision and other image', async side => {
     const f = await fixture(dual);
-    expect(f.preview('展示图')).toBe(appUrl(dual.image)); expect(f.preview('XMAX 参考图')).toBe(appUrl(dual.referenceImage!));
+    expect(f.preview('展示图')).toBe(appUrl(dual.image)); expect(f.preview('模型参考图')).toBe(appUrl(dual.referenceImage!));
     await f.choose(side, file('replacement.png'));
     f.state.revision = 19; await f.render(); await f.submit();
     expect(f.updateLook).toHaveBeenCalledExactlyOnceWith('outfit', { name: '测试套装', description: '原有说明', mode: 'clothx', prompt: '', expectedRevision: 7,
@@ -132,20 +132,20 @@ describe('dual-image material editor', () => {
 
   it('preserves a legacy material name and images when changing its mode', async () => {
     const f = await fixture(legacy);
-    expect(f.preview('XMAX 参考图')).toBe(appUrl(legacy.image));
+    expect(f.preview('模型参考图')).toBe(appUrl(legacy.image));
     await f.chooseMode('charx'); await f.submit();
     expect(f.updateLook).toHaveBeenCalledExactlyOnceWith('outfit', { name: '测试套装', description: '原有说明', mode: 'charx', prompt: '', expectedRevision: 7 });
   });
 
   it('keeps a legacy reference preview fixed while only the display image is replaced', async () => {
     const f = await fixture(legacy); await f.choose('展示图', file('new-person.png'));
-    expect(f.preview('展示图')).toContain('new-person.png'); expect(f.preview('XMAX 参考图')).toBe(appUrl(legacy.image));
+    expect(f.preview('展示图')).toContain('new-person.png'); expect(f.preview('模型参考图')).toBe(appUrl(legacy.image));
     await f.submit(); expect(f.updateLook.mock.calls[0][1]).not.toHaveProperty('referenceImageBase64');
   });
 
   it('keeps prompt-only Free materials image-free when editing their display picture', async () => {
     const f = await fixture(promptOnly);
-    expect(f.preview('XMAX 参考图')).toBeUndefined(); expect(f.saveButton().disabled).toBe(false);
+    expect(f.preview('模型参考图')).toBeUndefined(); expect(f.saveButton().disabled).toBe(false);
     await f.choose('展示图', file('new-cover.png')); await f.submit();
     expect(f.updateLook.mock.calls[0][1]).toMatchObject({ referenceKind: 'none', mode: 'free', prompt: '保留人物表情', imageBase64: base64('new-cover.png') });
     expect(f.updateLook.mock.calls[0][1]).not.toHaveProperty('referenceImageBase64');
@@ -156,12 +156,12 @@ describe('dual-image material editor', () => {
     await act(async () => host!.find(node => node.nodeName === 'textarea')!.getReactProps().onChange({ target: { value: '保留人物表情' } }));
     await f.choose('展示图', file('cover.png'));
     expect(f.saveButton().disabled).toBe(true); await f.submit(); expect(f.upload).not.toHaveBeenCalled();
-    await f.choose('XMAX 参考图', file('outfit.png')); await f.submit();
+    await f.choose('模型参考图', file('outfit.png')); await f.submit();
     expect(f.upload.mock.calls[0][0]).toMatchObject({ mode: 'free', prompt: '保留人物表情', imageBase64: base64('cover.png'), referenceImageBase64: base64('outfit.png') });
   });
 
   it('upgrades a prompt-only Free material only when a reference image is supplied', async () => {
-    const f = await fixture(promptOnly); await f.choose('XMAX 参考图', file('outfit.png')); await f.submit();
+    const f = await fixture(promptOnly); await f.choose('模型参考图', file('outfit.png')); await f.submit();
     expect(f.updateLook.mock.calls[0][1]).toMatchObject({ referenceKind: 'image', mode: 'free', referenceImageBase64: base64('outfit.png') });
     expect(f.updateLook.mock.calls[0][1]).not.toHaveProperty('imageBase64');
   });
@@ -169,7 +169,7 @@ describe('dual-image material editor', () => {
   it('requires an explicit reference to move a prompt-only material into another mode', async () => {
     const f = await fixture(promptOnly); await f.chooseMode('clothx');
     expect(f.saveButton().disabled).toBe(true); await f.submit(); expect(f.updateLook).not.toHaveBeenCalled();
-    await f.choose('XMAX 参考图', file('outfit.png')); await f.submit();
+    await f.choose('模型参考图', file('outfit.png')); await f.submit();
     expect(f.updateLook.mock.calls[0][1]).toMatchObject({ referenceKind: 'image', mode: 'clothx', prompt: '', referenceImageBase64: base64('outfit.png') });
   });
 
@@ -177,25 +177,25 @@ describe('dual-image material editor', () => {
     ['empty.png', 0, '图片为空'], ['wrong.gif', 8, '请选择 JPG'], ['huge.png', 10 * 1024 * 1024 + 1, '图片不能超过'],
     ['small.png', 8, '宽度需为'], ['corrupt.png', 8, '无法读取这张图片'],
   ])('blocks an invalid replacement %s without discarding the other image', async (name, bytes, error) => {
-    const f = await fixture(dual); await f.choose('XMAX 参考图', new File([new Uint8Array(bytes)], name, { type: 'image/png' }));
+    const f = await fixture(dual); await f.choose('模型参考图', new File([new Uint8Array(bytes)], name, { type: 'image/png' }));
     expect(f.saveButton().disabled).toBe(true); expect(f.preview('展示图')).toBe(appUrl(dual.image));
     expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toContain(error);
     await f.submit(); expect(f.updateLook).not.toHaveBeenCalled();
-    await act(async () => f.button('撤销更换XMAX 参考图').onClick());
-    expect(f.preview('XMAX 参考图')).toBe(appUrl(dual.referenceImage!)); expect(f.saveButton().disabled).toBe(false);
+    await act(async () => f.button('撤销更换模型参考图').onClick());
+    expect(f.preview('模型参考图')).toBe(appUrl(dual.referenceImage!)); expect(f.saveButton().disabled).toBe(false);
   });
 
   it('ignores a cancelled picker and restores prompt-only mode when the unsaved reference is removed', async () => {
-    const f = await fixture(promptOnly); await f.choose('XMAX 参考图', file('outfit.png')); await f.choose('XMAX 参考图', undefined);
-    expect(f.preview('XMAX 参考图')).toContain('outfit.png');
-    await act(async () => f.button('移除XMAX 参考图').onClick()); await f.submit();
+    const f = await fixture(promptOnly); await f.choose('模型参考图', file('outfit.png')); await f.choose('模型参考图', undefined);
+    expect(f.preview('模型参考图')).toContain('outfit.png');
+    await act(async () => f.button('移除模型参考图').onClick()); await f.submit();
     expect(f.updateLook.mock.calls[0][1]).toMatchObject({ referenceKind: 'none' });
     expect(f.updateLook.mock.calls[0][1]).not.toHaveProperty('referenceImageBase64');
   });
 
   it('does not accept a late size result for a superseded selection', async () => {
     const f = await fixture(dual); f.holdImages = true;
-    await f.choose('XMAX 参考图', file('old.png')); await f.choose('XMAX 参考图', file('latest.png'));
+    await f.choose('模型参考图', file('old.png')); await f.choose('模型参考图', file('latest.png'));
     expect(f.saveButton().disabled).toBe(true);
     await act(async () => f.images[0].onload?.()); expect(f.saveButton().disabled).toBe(true);
     await act(async () => f.images[1].onload?.()); expect(f.saveButton().disabled).toBe(false);
@@ -204,14 +204,14 @@ describe('dual-image material editor', () => {
   });
 
   it('retains both selected images after a failed save and allows retry', async () => {
-    const f = await fixture(dual); await f.choose('展示图', file('cover.png')); await f.choose('XMAX 参考图', file('outfit.png'));
+    const f = await fixture(dual); await f.choose('展示图', file('cover.png')); await f.choose('模型参考图', file('outfit.png'));
     f.updateLook.mockResolvedValueOnce(false); await f.submit();
-    expect(f.saved).not.toHaveBeenCalled(); expect(f.preview('展示图')).toContain('cover.png'); expect(f.preview('XMAX 参考图')).toContain('outfit.png');
+    expect(f.saved).not.toHaveBeenCalled(); expect(f.preview('展示图')).toContain('cover.png'); expect(f.preview('模型参考图')).toContain('outfit.png');
     expect(f.saveButton().disabled).toBe(false); await f.submit(); expect(f.saved).toHaveBeenCalledOnce();
   });
 
   it('guards duplicate submissions while files are being read and sends nothing after unmount', async () => {
-    const f = await fixture(dual); await f.choose('展示图', file('cover.png')); await f.choose('XMAX 参考图', file('outfit.png'));
+    const f = await fixture(dual); await f.choose('展示图', file('cover.png')); await f.choose('模型参考图', file('outfit.png'));
     const finish: (() => void)[] = [];
     vi.stubGlobal('FileReader', class {
       result = 'data:image/png;base64,fixture'; onload: (() => void) | null = null;
@@ -223,7 +223,16 @@ describe('dual-image material editor', () => {
     expect(f.updateLook).not.toHaveBeenCalled(); expect(f.revoke).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['live', 'generating', 'pending', 'disconnected'] as const)('blocks editing images when %s', async reason => {
+  it.each(['live', 'generating'] as const)('allows draft edits while %s without altering published snapshots', async reason => {
+    const f = await fixture(dual);
+    const published = { ...dual };
+    f.state.publication = { revision: 1, publishedAt: Date.now(), legacy: false, looks: [published] };
+    if (reason === 'live') f.state.live = { status: 'running' } as ExhibitionState['live']; else f.state.phase = 'generating';
+    await f.render(); await f.choose('展示图', file('cover.png')); await f.submit();
+    expect(f.updateLook).toHaveBeenCalledOnce(); expect(published.image).toBe(dual.image);
+  });
+
+  it.each(['pending', 'disconnected'] as const)('blocks editing images when %s', async reason => {
     const f = await fixture(dual);
     if (reason === 'live') f.state.live = { status: 'stopping' } as ExhibitionState['live'];
     else if (reason === 'generating') f.state.phase = 'generating';
@@ -239,11 +248,11 @@ describe('dual-image material editor', () => {
       .mockImplementation(async () => Response.json({ references: { outfit: { state: 'queued' } } }));
     vi.stubGlobal('fetch', fetcher);
     const render = () => host!.render(createElement(WardrobePanel, { controller: f.controller }));
-    await render(); await flushReact(); expect(fetcher).toHaveBeenCalledOnce();
+    await render(); await flushReact(); expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/references'))).toHaveLength(1);
     f.state.looks = [{ ...dual, image: '/new-cover.webp' }]; await render(); await flushReact();
-    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/references'))).toHaveLength(1);
     f.state.looks = [{ ...f.state.looks[0], referenceImage: '/new-outfit.webp' }]; await render(); await flushReact();
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/references'))).toHaveLength(2);
     expect(host!.find(node => node.getReactProps()['aria-label'] === '测试套装：待准备')).toBeDefined();
     expect(host!.find(node => node.nodeName === 'img' && node.getReactProps().src === appUrl('/new-cover.webp'))).toBeDefined();
   });

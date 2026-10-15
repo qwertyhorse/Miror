@@ -1,3 +1,4 @@
+import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -47,8 +48,9 @@ async function fixture(initial = state(), renderKiosk = false, initialSelectionP
     return session;
   });
   mocks.api.mockImplementation(async (url: string, _method: string, input: any) => {
+    if (url.includes('/references/')) return { reference: readyReferenceFixture('https://mock.test/ref.png') };
     if (url.endsWith('/live/session')) return create(input);
-    if (url.endsWith('/reference')) return { ...session, refImageUrl: input.refImageUrl, referenceVersion: 1 };
+    if (url.endsWith('/reference')) return { ...session, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 };
     if (url.endsWith('/link')) return { ...session, providerSessionId: input.providerSessionId, referenceVersion: session.referenceAsset ? 1 : 0 };
     if (url.endsWith('/stop')) return { ...session, status: 'stopped' };
     return {};
@@ -115,10 +117,10 @@ describe('live hook effects for MoX and mode changes', () => {
     const initial = state(); initial.looks[0].referenceImage = '/generation-reference.png';
     const f = await fixture(initial);
     expect(fetch).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\/generation-reference\.png$/), expect.any(Object));
-    expect(f.upload).toHaveBeenCalledOnce();
+    expect(f.upload).not.toHaveBeenCalled();
     const source = f.connect.mock.calls[0][0] as File;
     expect(source).toBeInstanceOf(File);
-    expect(source).toBe(f.upload.mock.calls[0][0]);
+    expect(source).toBeInstanceOf(File);
     expect(await source.text()).toBe('fixture');
     expect(f.live.error).toBe(''); expect(f.media.getUserMedia).not.toHaveBeenCalled();
   });

@@ -1,3 +1,4 @@
+import { LifecycleTryOnService } from './support/lifecycleReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -28,7 +29,7 @@ function fixture() {
   const issue = vi.fn(async (): Promise<IssuedKey> => ({ token: 'tk-isolated-manual-stop', expiresAt }));
   const provider: Provider = { configured: true, issueKey: issue, keyStatus: async () => state('active'), deactivate: revoke,
     sessionStatus: async (_token, sessionUid) => ({ sessionUid, status: 'ACTIVE', consumedCredit: 1 }) };
-  const service = new TryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], resolveHost: async () => ['93.184.216.34'] });
+  const service = new LifecycleTryOnService({ provider, store, secrets: new SecretBox(randomBytes(32)), catalog: async () => [], resolveHost: async () => ['93.184.216.34'] });
   const exhibition = new ExhibitionService(directory); exhibition.attachLiveService(service);
   exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0, switchMode: 'auto', autoSwitchSeconds: 5 });
   exhibition.command({ action: 'begin' });
@@ -87,22 +88,21 @@ describe('manual stop races', () => {
     expect(f.revoke).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['end', 'idle'] as const)('invalidates pending reference binding immediately on %s, before revocation starts', async action => {
+  it.each(['end', 'idle'] as const)('rejects redundant binding and preserves frozen reference through %s before revocation', async action => {
     const f = fixture(); const session = await f.create();
-    const address = deferred<string[]>(); f.service.options.resolveHost = () => address.promise;
+    const dns = vi.fn(async () => { throw new Error('DNS unavailable'); }); f.service.options.resolveHost = dns;
     const binding = f.exhibition.bindLiveReference(session.id, { deviceId: 'isolated-stop-screen', lookId: 'commute', refImageUrl: 'https://uploads.example/isolated.webp' });
     const ended = f.exhibition.command({ action });
     expect(ended).toMatchObject({ autoSwitchAt: null, live: { status: 'stopping' } });
     expect(f.store.get(session.id).status).toBe('stopping'); expect(f.revoke).not.toHaveBeenCalled();
-    address.resolve(['93.184.216.34']);
+    expect(dns).not.toHaveBeenCalled();
     await expect(binding).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
-    expect(f.store.get(session.id).refImageUrl).toBe('');
+    expect(f.store.get(session.id).refImageUrl).toBe(session.refImageUrl);
     await f.exhibition.reconcileLive(); expect(f.exhibition.get().live).toBeNull();
   });
 
   it('rejects delayed linking and first-frame completion immediately after ending', async () => {
     const f = fixture(); const session = await f.create();
-    await f.exhibition.bindLiveReference(session.id, { deviceId: 'isolated-stop-screen', lookId: 'commute', refImageUrl: 'https://uploads.example/isolated.webp' });
     const info = deferred<ProviderSessionStatus>(); f.provider.sessionStatus = () => info.promise;
     const linking = f.service.link(session.id, 'ums-isolated-late-link');
     f.exhibition.command({ action: 'end' });

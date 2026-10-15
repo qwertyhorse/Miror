@@ -1,3 +1,4 @@
+import { validateMaterialImport } from './materialImport.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { ApiError } from './types.ts';
 import { TryOnService } from './service.ts';
@@ -108,10 +109,17 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (mirrorRoute && !path && request.method === 'DELETE') return json(response, 200, mirrors!.remove(mirrorId, await readBody()));
         if (mirrorRoute && path === '/provider-settings' && !browserTest) {
           if (request.method === 'GET') return json(response, 200, currentService.providerSettings(mirrorId));
-          if (request.method === 'PUT') return json(response, 200, currentService.saveProviderSettings(mirrorId, await readBody(2048), current.credentialsEditable()));
+          if (request.method === 'PUT') {
+            const input = await readBody(2048); let ready = false;
+            if (!input.apiKey && (input.provider === 'xmax' || input.provider === 'decart')) { try { current.assertProviderPublicationReady(input.provider); ready = true; } catch { /* Save target configuration before preparation. */ } }
+            return json(response, 200, currentService.saveProviderSettings(mirrorId, input, current.credentialsEditable(), ready));
+          }
         }
         if (mirrorRoute && path === '/provider-settings/apply' && !browserTest && request.method === 'POST') {
-          const input = await readBody(2048); currentService.requestProviderSwitch(mirrorId, input.expectedRevision);
+          const input = await readBody(2048);
+          const target = currentService.providerSettings(mirrorId)?.desired;
+          if (target) current.assertProviderPublicationReady(target);
+          currentService.requestProviderSwitch(mirrorId, input.expectedRevision);
           current.command({ action: 'end' }); await current.reconcileLive();
           return json(response, 200, currentService.providerSettings(mirrorId));
         }
@@ -159,6 +167,10 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           return;
         }
         if (request.method === 'GET' && path === '/diagnostics') return json(response, 200, { mirrorId, state: current.read().lifecycle, policy: { sessionLimits: current.sessionLimits(), autoReturnSeconds: current.read().settings.autoReturnSeconds, leaseTtlMs: 20000 }, events: current.diagnosticTimeline() });
+        if (request.method === 'POST' && path === '/imports/validate') return json(response, 200, validateMaterialImport(await readBody(131072)));
+        if (request.method === 'GET' && path === '/publication') return json(response, 200, current.publicationStatus());
+        if (request.method === 'POST' && path === '/publication/prepare') return json(response, 202, await current.preparePublication(await readBody()));
+        if (request.method === 'POST' && path === '/publication/publish') return json(response, 200, current.publishPublication(await readBody()));
         if (request.method === 'GET' && path === '/references') return json(response, 200, { references: current.referencePreparationStatuses() });
         const retryReference = /^\/references\/([^/]+)\/retry$/.exec(path);
         if (request.method === 'POST' && retryReference) {
@@ -166,7 +178,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           return json(response, 202, { status: current.retryReferencePreparation(retryReference[1]) });
         }
         const preparedReference = /^\/references\/([^/]+)$/.exec(path);
-        if (preparedReference && request.method === 'GET') return json(response, 200, { reference: current.readyReference(preparedReference[1]) });
+        if (preparedReference && request.method === 'GET') return json(response, 200, { reference: current.readyReference(preparedReference[1], true) });
         if (preparedReference && request.method === 'POST') {
           await readBody();
           return json(response, 200, { reference: await current.prepareReference(preparedReference[1]) });
@@ -184,6 +196,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'POST' && path === '/live/error') return json(response, 200, await current.reportLiveError(await readBody()));
         if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await readBody()));
         if (request.method === 'POST' && path === '/live/session') {
+          if (request.headers['x-miror-material'] !== 'binding-v1') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           if (current.liveStatus().providerId === 'decart' && request.headers['x-miror-realtime'] !== 'decart-v1') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请升级镜端以使用 Decart。', 426);
           const input = await readBody(); let localId: string | undefined;

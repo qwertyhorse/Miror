@@ -1,3 +1,4 @@
+import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import type { XmaxRegion } from '../shared/xmax';
@@ -37,8 +38,9 @@ function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion, pref
     exhibition: { mirrorId: 'default', deviceId: 'device-fixture', lookId: 'look-fixture', sessionNumber: 1, generationNumber: 1 },
   };
   const deps = {
+    preparedReference: async () => readyReferenceFixture(`https://${providerRegion ?? 'global'}.fixture.test/reference.png`),
     create: vi.fn(async () => ({ ...created })), reference: vi.fn(async () => new File(['fixture'], 'reference.png', { type: 'image/png' })),
-    bind: vi.fn(async (_id, input) => ({ ...created, providerRegion: boundRegion, refImageUrl: input.refImageUrl, referenceVersion: 1 })),
+    bind: vi.fn(async (_id, input) => ({ ...created, providerRegion: boundRegion, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 })),
     link: vi.fn(async (_id, providerSessionId) => ({ ...created, providerSessionId, referenceVersion: 1 })),
     firstFrame: vi.fn(async () => created), stop: vi.fn(async () => ({ ...created, status: 'stopped' })),
     heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => cloned), now: () => 0,
@@ -58,55 +60,55 @@ function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion, pref
 }
 
 describe('exhibition session SDK region', () => {
-  it.each(['cn', 'global'] as const)('reuses one %s files client for multiple images while keeping realtime separate', async region => {
+  it.each(['cn', 'global'] as const)('uses one %s realtime client without uploading neighbouring materials', async region => {
     const f = fixture(region, region, ['/second.png', '/third.png']); await f.ready();
-    expect(sdkMocks[region].uploadAndCheckImage).toHaveBeenCalledTimes(3);
-    expect(sdkMocks[region].createXmaxClient).toHaveBeenCalledTimes(2);
+    expect(sdkMocks[region].uploadAndCheckImage).not.toHaveBeenCalled();
+    expect(sdkMocks[region].createXmaxClient).toHaveBeenCalledTimes(1);
     expect(sdkMocks[region].connect).toHaveBeenCalledOnce();
     expect(f.deps.create).toHaveBeenCalledOnce();
   });
 
-  it('does not share the files client between connections even with the same token', async () => {
+  it('keeps realtime clients separate between connections and never creates files clients', async () => {
     await fixture('global', 'global', ['/second.png']).ready();
     await fixture('global', 'global', ['/second.png']).ready();
-    expect(sdkMocks.global.uploadAndCheckImage).toHaveBeenCalledTimes(4);
-    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledTimes(4);
+    expect(sdkMocks.global.uploadAndCheckImage).not.toHaveBeenCalled();
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledTimes(2);
     expect(sdkMocks.global.connect).toHaveBeenCalledTimes(2);
   });
 
-  it('creates a new files client after a temporary-token replacement', async () => {
+  it('does not upload after a temporary-token replacement', async () => {
     const f = fixture('global', 'global', ['/second.png', '/third.png']);
     f.deps.link.mockResolvedValueOnce({ ...f.created, token: 'replacement-fixture', providerSessionId: 'provider-fixture', referenceVersion: 1 });
     await f.ready();
-    expect(sdkMocks.global.uploadAndCheckImage).toHaveBeenCalledTimes(3);
-    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledTimes(3);
-    expect(sdkMocks.global.createXmaxClient).toHaveBeenLastCalledWith(expect.objectContaining({ apiKey: 'replacement-fixture' }));
+    expect(sdkMocks.global.uploadAndCheckImage).not.toHaveBeenCalled();
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledTimes(1);
+    expect(sdkMocks.global.createXmaxClient).toHaveBeenLastCalledWith(expect.objectContaining({ apiKey: 'temporary-fixture' }));
     expect(sdkMocks.global.connect).toHaveBeenCalledOnce();
   });
 
-  it('creates a regional files client if the same token is later paired with another region', async () => {
+  it('does not send upload credentials to a region reported by a later link', async () => {
     const f = fixture('cn', 'cn', ['/second.png', '/third.png']);
     f.deps.link.mockResolvedValueOnce({ ...f.created, providerRegion: 'global', providerSessionId: 'provider-fixture', referenceVersion: 1 });
     await f.ready();
-    expect(sdkMocks.cn.uploadAndCheckImage).toHaveBeenCalledOnce();
-    expect(sdkMocks.cn.createXmaxClient).toHaveBeenCalledTimes(2);
-    expect(sdkMocks.global.uploadAndCheckImage).toHaveBeenCalledTimes(2);
-    expect(sdkMocks.global.createXmaxClient).toHaveBeenCalledOnce();
+    expect(sdkMocks.cn.uploadAndCheckImage).not.toHaveBeenCalled();
+    expect(sdkMocks.cn.createXmaxClient).toHaveBeenCalledTimes(1);
+    expect(sdkMocks.global.uploadAndCheckImage).not.toHaveBeenCalled();
+    expect(sdkMocks.global.createXmaxClient).not.toHaveBeenCalled();
     expect(sdkMocks.global.connect).not.toHaveBeenCalled();
   });
 
   it.each([
     ['cn', 'cn'], ['global', 'global'], [undefined, 'global'],
-  ] as const)('uses the %s session region for both upload and realtime connection', async (providerRegion, expectedRegion) => {
+  ] as const)('uses the %s session region for realtime connection with a backend prepared reference', async (providerRegion, expectedRegion) => {
     const f = fixture(providerRegion);
     await f.connection.start();
 
     const selected = sdkMocks[expectedRegion];
     const unused = sdkMocks[expectedRegion === 'cn' ? 'global' : 'cn'];
-    expect(selected.createXmaxClient).toHaveBeenCalledTimes(2);
+    expect(selected.createXmaxClient).toHaveBeenCalledTimes(1);
     for (const [options] of selected.createXmaxClient.mock.calls)
       expect(options).toEqual({ apiKey: 'temporary-fixture', locale: 'zh-CN', telemetry: false });
-    expect(selected.uploadAndCheckImage).toHaveBeenCalledOnce();
+    expect(selected.uploadAndCheckImage).not.toHaveBeenCalled();
     expect(selected.connect).toHaveBeenCalledWith(f.cloned, expect.objectContaining({ autoStart: false,
       context: expect.objectContaining({ refImageUrl: `https://${expectedRegion}.fixture.test/reference.png` }) }));
     expect(selected.models.realtime).toHaveBeenCalledWith('x2.0');
@@ -121,7 +123,7 @@ describe('exhibition session SDK region', () => {
     const f = fixture('cn', 'global');
     await f.connection.start();
 
-    expect(sdkMocks.cn.createXmaxClient).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.cn.createXmaxClient).toHaveBeenCalledTimes(1);
     expect(sdkMocks.cn.connect).toHaveBeenCalledOnce();
     expect(sdkMocks.global.createXmaxClient).not.toHaveBeenCalled();
     expect(f.deps.reportError).not.toHaveBeenCalled();

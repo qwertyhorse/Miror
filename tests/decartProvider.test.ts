@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,6 +12,10 @@ import { ReferenceAssets } from '../server/referenceAssets';
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { cleanup.splice(0).forEach(fn => fn()); vi.useRealTimers(); });
+async function bindPrepared(service: TryOnService, id: string, deviceId = 'screen-fixture') {
+  const bytes = Buffer.from('fixture'); const mime = 'image/png'; const prepared = (await service.prepareReference('default', bytes, mime))!;
+  return service.bindExhibitionReference(id, { deviceId, lookId: 'commute', bindingId: prepared.bindingId }, { sha256: createHash('sha256').update(bytes).digest('hex'), mime });
+}
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'miror-decart-')); const secrets = SecretBox.forDirectory(dir); const store = new SessionStore(join(dir, 'state.sqlite'));
   cleanup.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -23,7 +28,7 @@ function fixture() {
   const xmaxFetch = vi.fn<typeof fetch>(async () => { throw Error('Unexpected XMAX request'); });
   const service = new TryOnService({ provider: new XmaxProvider('uk-fixture', xmaxFetch), store, secrets, mirrorCredentials: credentials,
     referenceAssets: new ReferenceAssets(dir), decartProvider: key => new DecartProvider(key, fetcher) });
-  const save = (provider: 'xmax' | 'decart', editable = true, apiKey?: string) => service.saveProviderSettings('default', { provider, apiKey, expectedRevision: service.providerSettings('default')!.revision }, editable);
+  const save = (provider: 'xmax' | 'decart', editable = true, apiKey?: string) => service.saveProviderSettings('default', { provider, apiKey, expectedRevision: service.providerSettings('default')!.revision }, editable, true);
   const create = () => service.createExhibition({ lookId: 'commute', deviceId: 'screen-fixture', name: '衣服', referenceAsset: '/assets/exhibition/commute-cutout.png', mode: 'clothx', sessionNumber: 1, generationNumber: 1, sessionLimits: { credits: null, expireSeconds: 120 } });
   return { dir, secrets, store, credentials, fetcher, xmaxFetch, service, save, create };
 }
@@ -66,12 +71,12 @@ describe('Decart segment contract', () => {
     const row = await f.create(); expect(row).toMatchObject({ providerId: 'decart', model: 'lucy-vton-3.6', token: '', usageStatus: 'unavailable' });
     expect(f.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/client/tokens'))).toHaveLength(0);
     expect(f.service.public(f.store.get(row.id))).not.toHaveProperty('clientReleaseHash');
-    await f.service.bindExhibitionReference(row.id, { deviceId: 'screen-fixture', lookId: 'commute', refImageUrl: 'file_fixture' });
+    await bindPrepared(f.service, row.id);
     const grant = await f.service.decartDial(row.id, row.releaseKey); expect(grant.token).toBe('ek_fixture');
     await expect(f.service.decartDial(row.id, row.releaseKey)).rejects.toThrow();
     await f.service.link(row.id, 'decart-session-fixture');
     await f.service.firstFrame(row.id, 100);
-    await f.service.updateExhibitionCondition(row.id, { deviceId: 'screen-fixture', lookId: 'city', sessionNumber: 1, generationNumber: 2, referenceAsset: '/assets/exhibition/city-cutout.png', mode: 'clothx', refImageUrl: 'file_second' }, () => true);
+    await f.service.updateExhibitionCondition(row.id, { deviceId: 'screen-fixture', lookId: 'city', sessionNumber: 1, generationNumber: 2, referenceAsset: '/assets/exhibition/city-cutout.png', mode: 'clothx', bindingId: prepared!.bindingId }, () => true, { sha256: prepared!.sha256, mime: 'image/png' });
     expect((await f.service.stop(row.id)).status).toBe('stopping');
     expect(() => f.service.clientReleased(row.id, 'wrong')).toThrow();
     expect(f.service.clientReleased(row.id, row.releaseKey)).toMatchObject({ status: 'stopped', releaseEvidence: 'client_transport_closed', usageStatus: 'unavailable' });
@@ -79,7 +84,7 @@ describe('Decart segment contract', () => {
   });
   it('does not confuse token expiry with active session termination; retains a conservative release deadline', async () => {
     vi.useFakeTimers(); const f = fixture(); f.save('decart', true, 'dct_fixture'); const row = await f.create();
-    await f.service.bindExhibitionReference(row.id, { deviceId: 'screen-fixture', lookId: 'commute', refImageUrl: 'file_fixture' });
+    await bindPrepared(f.service, row.id);
     await f.service.decartDial(row.id, row.releaseKey);
     vi.setSystemTime(Date.now() + 31_000); expect((await f.service.get(row.id)).status).toBe('active');
     expect((await f.service.stop(row.id)).status).toBe('stopping');
@@ -87,7 +92,7 @@ describe('Decart segment contract', () => {
   });
   it('does not deliver a late token after an end while minting', async () => {
     const f = fixture(); f.save('decart', true, 'dct_fixture'); const row = await f.create();
-    await f.service.bindExhibitionReference(row.id, { deviceId: 'screen-fixture', lookId: 'commute', refImageUrl: 'file_fixture' });
+    await bindPrepared(f.service, row.id);
     let finish!: (response: Response) => void; f.fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const pending = f.service.decartDial(row.id, row.releaseKey); await f.service.stop(row.id);
     finish(Response.json({ apiKey: 'ek_late', expiresAt: new Date(Date.now() + 30_000).toISOString(), constraints: { realtime: { maxSessionDuration: 120 } } }));
@@ -106,7 +111,7 @@ describe('Decart segment contract', () => {
 
 it('persists stop-and-switch intent, waits for release, then applies once', async () => {
   const f = fixture(); f.save('decart', true, 'dct_fixture'); const row = await f.create();
-  await f.service.bindExhibitionReference(row.id, { deviceId: 'screen-fixture', lookId: 'commute', refImageUrl: 'file_fixture' });
+  await bindPrepared(f.service, row.id);
   await f.service.decartDial(row.id, row.releaseKey); f.save('xmax', false);
   f.service.requestProviderSwitch('default', f.service.providerSettings('default')!.revision);
   const reopened = new MirrorCredentialStore(f.dir, f.secrets); expect(reopened.providerSettings('default').applyAfterStop).toBe(true);
@@ -118,7 +123,16 @@ it('persists stop-and-switch intent, waits for release, then applies once', asyn
 it('browser-test issuance and preparation use the frozen Decart account after source changes', async () => {
   const f = fixture(); f.save('decart', true, 'dct_first'); const browser = f.service.forBrowserTest('default'); f.save('xmax');
   const row = await browser.createExhibition({ lookId: 'commute', deviceId: 'screen-browser', name: '衣服', referenceAsset: '/assets/exhibition/commute-cutout.png', mode: 'clothx', sessionNumber: 1, generationNumber: 1 });
-  await browser.bindExhibitionReference(row.id, { deviceId: 'screen-browser', lookId: 'commute', refImageUrl: 'file_fixture' });
+  await bindPrepared(browser, row.id, 'screen-browser');
   await browser.decartDial(row.id, row.releaseKey);
   expect(new Headers(f.fetcher.mock.calls.at(-1)![1]!.headers).get('x-api-key')).toBe('dct_first');
+});
+it.each(['expires_at', 'expiresAt'])('respects Decart upload %s hard expiry rather than assuming one hour', async expiryField => {
+  const expiresAt = Date.now() + 90_000;
+  const provider = new DecartProvider('dct_fixture', vi.fn(async () => Response.json({ id: 'file_fixture', [expiryField]: new Date(expiresAt).toISOString() })));
+  await expect(provider.references().upload(Buffer.from('fixture'), 'fixture', 'image/png')).resolves.toMatchObject({ url: 'file_fixture', providerExpiresAt: expiresAt });
+});
+it('rejects malformed declared Decart file expiry', async () => {
+  const provider = new DecartProvider('dct_fixture', vi.fn(async () => Response.json({ id: 'file_fixture', expires_at: 'invalid' })));
+  await expect(provider.references().upload(Buffer.from('fixture'), 'fixture', 'image/png')).rejects.toMatchObject({ code: 'PROVIDER_INVALID_RESPONSE' });
 });

@@ -13,6 +13,8 @@ import { MaterialActionsMenu } from './MaterialActionsMenu';
 import { ReferencePreparationBadge } from './ReferencePreparationBadge';
 import { useReferencePreparation } from './useReferencePreparation';
 import './wardrobe.css';
+import { MaterialPublication } from './MaterialPublication';
+import { MaterialBatchImport } from './MaterialBatchImport';
 
 function validateFile(file: File, limits: ExhibitionUploadLimits) {
   if (!/\.(jpe?g|png|webp)$/i.test(file.name)) return '请选择 JPG、PNG 或 WebP 图片。';
@@ -133,12 +135,12 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
   const promptOnly = look?.referenceKind === 'none' && mode === 'free' && !referenceImage.file;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const configurable = ['idle', 'select'].includes(state!.phase) && !state!.live;
-  const unavailable = pending || submitting || !connected || (!!look && !configurable);
+  const unavailable = pending || submitting || !connected;
   const valid = mode !== 'free' || !!prompt.trim();
   const displayValid = displayImage.file ? displayImage.valid : !!look?.image;
   const referenceValid = referenceImage.file ? referenceImage.valid : !!existingReference || promptOnly;
   async function remove() {
-    if (!look || unavailable || saving.current) return;
+    if (!look || unavailable || !configurable || saving.current) return;
     saving.current = true;
     setSubmitting(true); setError('');
     try { if (await deleteLook(look.id, { expectedRevision: baseline }) && alive.current) deleted(); }
@@ -147,7 +149,7 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
   async function submit(event: FormEvent) {
     event.preventDefault(); setError('');
     if (unavailable || saving.current || deleteConfirm || !valid) return;
-    if (!displayValid || !referenceValid) { setError(`请选择符合限制的${!displayValid ? '展示图' : ' XMAX 参考图'}。`); return; }
+    if (!displayValid || !referenceValid) { setError(`请选择符合限制的${!displayValid ? '展示图' : ' 模型参考图'}。`); return; }
     saving.current = true;
     setSubmitting(true);
     try {
@@ -172,7 +174,7 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
       <div className="ex-editor-images">
         <div className="ex-image-pair">
           <MaterialImageField label="展示图" image={displayImage} existing={look?.image} disabled={unavailable} required={!look} onChange={() => setError('')} />
-          <MaterialImageField label="XMAX 参考图" image={referenceImage} existing={existingReference} disabled={unavailable} required={!promptOnly} promptOnly={promptOnly} onChange={() => setError('')} />
+          <MaterialImageField label="模型参考图" image={referenceImage} existing={existingReference} disabled={unavailable} required={!promptOnly} promptOnly={promptOnly} onChange={() => setError('')} />
         </div>
         <p className="ex-form-note">JPG / PNG / WebP · 每张 ≤ {limits.maxFileSizeMB} MB<br />宽 {limits.minWidth}–{limits.maxWidth} px · 高 {limits.minHeight}–{limits.maxHeight} px</p>
       </div>
@@ -182,8 +184,8 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
       </fieldset>
     </div>}
     {(error || controller.error) && <p className="ex-field-error" role="alert">{error || controller.error}</p>}
-    {deleteConfirm && look ? <div className="ex-delete-confirm" role="group" aria-label="删除素材确认"><strong>确认删除「{look.name}」？</strong><p>删除后将从本设备素材库移除，无法撤销。{state!.enabledLookIds.includes(look.id) && '大屏将同步停止提供这份素材。'}</p>{!configurable && <p role="status">体验进行中，请结束体验并等待实时会话停止后再删除。</p>}<div><button type="button" className="ex-button" autoFocus disabled={submitting || pending} onClick={() => initialDelete ? close() : setDeleteConfirm(false)}>保留素材</button><button type="button" className="ex-button ex-delete-button" disabled={unavailable} onClick={() => void remove()}>{submitting || pending ? '正在删除…' : '确认删除'}</button></div></div>
-      : <div className="ex-editor-footer">{look && <button type="button" className="ex-button ex-delete-button" disabled={unavailable} onClick={() => setDeleteConfirm(true)}><Trash2 size={15} />删除素材</button>}<button type="button" className="ex-button" disabled={submitting || pending} onClick={close}>取消</button><button className="ex-button ex-primary" disabled={unavailable || !valid || !displayValid || !referenceValid}>{submitting || pending ? '正在保存…' : look ? '保存素材' : '上传并保存'}</button></div>}
+    {deleteConfirm && look ? <div className="ex-delete-confirm" role="group" aria-label="删除素材确认"><strong>确认删除「{look.name}」？</strong><p>删除后将从本设备素材库移除，无法撤销。{state!.enabledLookIds.includes(look.id) && '大屏将同步停止提供这份素材。'}</p>{!configurable && <p role="status">体验进行中，请结束体验并等待实时会话停止后再删除。</p>}<div><button type="button" className="ex-button" autoFocus disabled={submitting || pending} onClick={() => initialDelete ? close() : setDeleteConfirm(false)}>保留素材</button><button type="button" className="ex-button ex-delete-button" disabled={unavailable || !configurable} onClick={() => void remove()}>{submitting || pending ? '正在删除…' : '确认删除'}</button></div></div>
+      : <div className="ex-editor-footer">{look && <button type="button" className="ex-button ex-delete-button" disabled={unavailable || !configurable} onClick={() => setDeleteConfirm(true)}><Trash2 size={15} />删除素材</button>}<button type="button" className="ex-button" disabled={submitting || pending} onClick={close}>取消</button><button className="ex-button ex-primary" disabled={unavailable || !valid || !displayValid || !referenceValid}>{submitting || pending ? '正在保存…' : look ? '保存素材' : '上传并保存'}</button></div>}
   </form></dialog>;
 }
 
@@ -234,14 +236,15 @@ function WardrobeContent({ controller, registry, onSummaryChange }: WardrobePane
     {preparation.error && <div className="ex-reference-fetch-error" role="alert"><span>{preparation.error}</span><button type="button" onClick={preparation.refresh}>刷新状态</button></div>}
     {editor && <LookEditor key={editor} controller={controller} look={editorLook} initialMode={mode} initialDelete={initialDelete} close={() => setEditor(null)} saved={savedEditor} deleted={() => { setNotice('素材已删除。'); setEditor(null); }} />}
     {copyLook && registry && <CopyDialog source={{ id: controller.mirrorId, name: registry.data?.mirrors.find(item => item.id === controller.mirrorId)?.name ?? '当前智能镜' }} registry={registry} look={copyLook} close={() => setCopyLook(null)} copied={(id, message) => { setNotice(message); if (id === controller.mirrorId) void controller.refresh(); }} />}
+    <MaterialPublication controller={controller} /><MaterialBatchImport controller={controller} />
     <div className="ex-library-filters"><ExperienceModeChips label="按模式筛选素材" value={mode} onChange={setMode} /><label className="ex-library-search"><Search size={16} /><input aria-label="搜索素材" placeholder="搜索素材名称、说明" value={query} onChange={event => setQuery(event.target.value)} /></label><div className="ex-library-actions"><button className="ex-button ex-primary" disabled={pending || !connected} onClick={() => openEditor('upload')}><Plus size={17} />上传素材</button></div></div>
     <span id={orderHintId} className="ex-sr-only">{query.trim() ? '清空搜索后可拖动排序。' : '拖动图片或手柄排序；手柄支持方向键、Home 和 End。'}</span><span className="ex-sr-only" role="status" aria-live="polite">{order.message}</span>
     <div ref={results} className="ex-library-results" role="region" aria-label={`${experienceModeLabel(mode)} 素材列表，可纵向滚动`} tabIndex={0} {...order.regionProps}>
       {filtered.length > 0 ? <div className="ex-library-grid">{filtered.map(item => <article className={`ex-library-card${order.draggedId === item.id ? ' ex-library-card-dragging' : ''}`} key={item.id} data-material-id={item.id}>
         <div className="ex-library-image" data-material-drag-image data-draggable={!orderDisabled && !order.saving && modeLooks.length > 1} {...order.imageProps(item.id)}><img src={appUrl(item.image)} alt={`${item.name}素材`} loading="lazy" draggable={false} /><button type="button" className="ex-material-drag-handle" data-material-order-id={item.id} aria-label={`调整${item.name}顺序`} aria-describedby={orderHintId} title="调整顺序" disabled={orderDisabled || order.saving || modeLooks.length < 2} {...order.handleProps(item.id)}><GripVertical size={17} aria-hidden="true" /></button></div>
         <div className="ex-library-card-body">
-          <div className="ex-library-card-title"><h3>{item.name}</h3><div className="ex-library-card-tools"><MaterialActionsMenu name={item.name} open={openMenuId === item.id} onOpenChange={open => setOpenMenuId(open ? item.id : null)} onEdit={() => openEditor(item.id)} onCopy={() => { setCopyLook({ ...item }); setNotice(''); }} onDelete={() => openEditor(item.id, true)} editDisabled={disabled} copyDisabled={!registry?.data} deleteDisabled={disabled} disabled={!connected || order.saving || !!order.draggedId} /></div></div>
-          <span className="ex-material-mode">{experienceModeLabel(item.mode)}{item.referenceKind === 'none' && ' · 仅提示词'}</span>
+          <div className="ex-library-card-title"><h3>{item.name}</h3><div className="ex-library-card-tools"><MaterialActionsMenu name={item.name} open={openMenuId === item.id} onOpenChange={open => setOpenMenuId(open ? item.id : null)} onEdit={() => openEditor(item.id)} onCopy={() => { setCopyLook({ ...item }); setNotice(''); }} onDelete={() => openEditor(item.id, true)} editDisabled={pending || !connected} copyDisabled={!registry?.data} deleteDisabled={disabled} disabled={!connected || order.saving || !!order.draggedId} /></div></div>
+          <span className="ex-material-mode">{experienceModeLabel(item.mode)}{item.referenceKind === 'none' && ' · 仅提示词'} · {state.publication?.looks.some(published => published.id === item.id) ? JSON.stringify(state.publication.looks.find(published => published.id === item.id)) === JSON.stringify(item) ? '已发布' : '草稿已修改' : '草稿'}</span>
           <ReferencePreparationBadge name={item.name} status={preparation.references[item.id]} unavailable={!!preparation.error} retrying={preparation.retrying.has(item.id)} retryError={preparation.retryErrors[item.id]} now={preparation.now} onRetry={() => { void preparation.retry(item.id); }} />
           <div className="ex-library-file-row"><p className="ex-library-file-info">{item.width ? `${item.width} × ${item.height} px · ${((item.bytes ?? 0) / 1024 / 1024).toFixed(2)} MB` : '预设示例素材'}</p><label className="ex-material-enabled-control" title={state.enabledLookIds.includes(item.id) ? '已启用' : '未启用'}><input aria-label={`启用${item.name}`} role="switch" type="checkbox" checked={state.enabledLookIds.includes(item.id)} disabled={disabled || order.saving || !!order.draggedId} onChange={event => { void send({ action: 'configure', enabledLookIds: event.target.checked ? enableLookInOrder(looks, state.enabledLookIds, item) : state.enabledLookIds.filter(id => id !== item.id) }); }} /><span aria-hidden="true" /></label></div>
         </div>

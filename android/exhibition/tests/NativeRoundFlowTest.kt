@@ -64,14 +64,18 @@ fun main() = runBlocking {
             } finally { running.job.cancelAndJoin() }
         }
         // The correction belongs to the camera source; a photo must retain its own orientation.
-        for (rotation in listOf(0, 90, 270)) for (mode in listOf("clothx", "free", "mox")) {
+        val capture4k = NativeCameraCaptureSelection(NativeCameraSize(3840, 2160))
+        for (rotation in listOf(0, 90, 180, 270)) for (mode in listOf("clothx", "free", "mox")) {
             RoundFixture(mode, published = true, ready = true, noReference = mode == "free").use { fixture ->
                 val controller = NativeXmaxController(fixture.events)
-                val running = startRound(fixture, controller, cameraRotationDegrees = rotation)
+                val running = startRound(fixture, controller, cameraRotationDegrees = rotation,
+                    cameraCaptureSelection = capture4k)
                 try {
                     withTimeout(5_000) { running.firstFrame.await(); while (running.round.isBusy) delay(5) }
                     verify(controller.connectedCameraRotationDegrees == if (mode == "mox") 0 else rotation,
                         "$mode input lost camera rotation $rotation or rotated a MoX photo")
+                    verify(controller.connectedCaptureSelection == if (mode == "mox") NativeCameraCaptureSelection.Automatic else capture4k,
+                        "$mode input lost 4K capture selection or applied it to a MoX photo")
                     verify((controller.connectedImage != null) == (mode == "mox"),
                         "Rotation selection changed the input source")
                     verify(fixture.events.none { it == "upload" } && fixture.imagePaths.isEmpty() == (mode != "mox"),
@@ -86,6 +90,8 @@ fun main() = runBlocking {
                         verify(controller.connectedCameraRotationDegrees == rotation
                             && fixture.events.count { it == "connect" } == 1,
                             "Outfit update reset camera correction or reconnected RTC")
+                        verify(controller.connectedCaptureSelection == capture4k,
+                            "Outfit update reset 4K capture selection")
                     }
                     fixture.checkHandler()
                 } finally { running.job.cancelAndJoin() }
@@ -583,7 +589,8 @@ fun main() = runBlocking {
         }
         RoundFixture("clothx", continuous = true, separateReference = true).use { fixture ->
             val controller = NativeXmaxController(fixture.events)
-            val running = startRound(fixture, controller, cameraRotationDegrees = 270)
+            val running = startRound(fixture, controller, cameraRotationDegrees = 270,
+                cameraCaptureSelection = capture4k)
             try {
                 withTimeout(5_000) { running.firstFrame.await() }
                 withTimeout(8_000) { while (!fixture.events.contains("renewal-commit")) delay(20) }
@@ -593,15 +600,19 @@ fun main() = runBlocking {
                 verify(controller.connectedCameraDeviceId == "usb-camera-fixture", "Renewal source lost exact camera identity")
                 verify(fixture.imagePaths.isEmpty(), "Renewal downloaded or uploaded an already prepared reference")
                 verify(controller.connectedCameraRotationDegrees == 270, "Renewal source lost camera correction")
+                verify(controller.connectedCaptureSelection == capture4k, "Renewal source lost 4K capture selection")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
             // Renewal hands control back to the activity, which supplies the saved camera settings again.
             RoundFixture("clothx", separateReference = true).use { renewedFixture ->
-                val renewed = startRound(renewedFixture, controller, cameraRotationDegrees = 270)
+                val renewed = startRound(renewedFixture, controller, cameraRotationDegrees = 270,
+                    cameraCaptureSelection = capture4k)
                 try {
                     withTimeout(5_000) { renewed.firstFrame.await() }
                     verify(controller.connectedCameraRotationDegrees == 270,
                         "Renewed connection did not preserve camera correction")
+                    verify(controller.connectedCaptureSelection == capture4k,
+                        "Renewed connection did not preserve 4K capture selection")
                     verify(fixture.events.count { it == "connect" } == 2,
                         "Renewal did not establish exactly one replacement connection")
                     renewedFixture.checkHandler()
@@ -637,6 +648,7 @@ private fun CoroutineScope.startRound(
     fixture: RoundFixture,
     controller: NativeXmaxController,
     cameraRotationDegrees: Int = 0,
+    cameraCaptureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
 ): RunningRound {
     val firstFrame = CompletableDeferred<Unit>()
     val failure = CompletableDeferred<Throwable>()
@@ -652,6 +664,7 @@ private fun CoroutineScope.startRound(
         cameraPosition = CameraPosition.FRONT,
         cameraDeviceId = "usb-camera-fixture",
         cameraRotationDegrees = cameraRotationDegrees,
+        cameraCaptureSelection = cameraCaptureSelection,
         onBusyChanged = { busy.add(round.isBusy) },
     )
     val job = launch {

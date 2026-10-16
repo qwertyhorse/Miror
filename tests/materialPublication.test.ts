@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { ExhibitionService } from '../server/exhibition';
 import { TryOnService } from '../server/service';
@@ -24,7 +24,7 @@ async function fixture() {
     referenceStorage: () => ({ upload: async () => { if (fail) throw new Error('fixture unavailable'); return 'https://fixture-123.cos.ap-test.myqcloud.com/reference.png'; }, check: async () => true }) });
   const mirror = new ExhibitionService(directory); mirror.attachLiveService(service);
   const image = async (color: string) => (await sharp({ create: { width: 512, height: 512, channels: 3, background: color } }).png().toBuffer()).toString('base64');
-  const add = async (sku: string, color: string) => (await mirror.upload({ sku, name: sku, imageBase64: await image('white'), referenceImageBase64: await image(color) })).looks.at(-1)!;
+  const add = async (sku: string, color: string) => (await mirror.upload({ sku, name: sku, imageBase64: await image('white'), referenceImageBase64: await image(color) })).looks[0]!;
   return { directory, mirror, service, issue, dns, image, add, fail: () => { fail = true; } };
 }
 it('keeps prior published versions on failed full publication and only publishes explicit ready subset', async () => {
@@ -68,7 +68,28 @@ it('recovers response-lost SKU uploads idempotently and rejects conflicting byte
   const first = await f.mirror.upload(input); const second = await f.mirror.upload(input);
   expect(second).toEqual(first); expect(second.looks.filter(look => look.sku === 'SAME')).toHaveLength(1);
   await expect(f.mirror.upload({ ...input, referenceImageBase64: await f.image('blue') })).rejects.toMatchObject({ code: 'EXHIBITION_DUPLICATE_SKU' });
-  const look = first.looks.at(-1)!; expect(f.mirror.updateLook(look.id, { name: 'Renamed' })).toMatchObject({ looks: expect.arrayContaining([expect.objectContaining({ sku: 'SAME', name: 'Renamed' })]) });
+  const look = first.looks[0]!; expect(f.mirror.updateLook(look.id, { name: 'Renamed' })).toMatchObject({ looks: expect.arrayContaining([expect.objectContaining({ sku: 'SAME', name: 'Renamed' })]) });
+});
+it('prepares and publishes more than 100 materials and reloads the entire publication', async () => {
+  const f = await fixture(); const template = await f.add('TEMPLATE', 'red');
+  const filename = join(f.directory, 'exhibition.json');
+  const saved = JSON.parse(readFileSync(filename, 'utf8'));
+  const looks = Array.from({ length: 101 }, (_, index) => {
+    const id = `upload-${randomUUID()}`;
+    return { ...template, id, sku: `FREE-${index}`, mode: 'free', prompt: `背景 ${index}`, referenceKind: 'none',
+      image: template.image.replace(template.id, id), referenceImage: undefined, referenceImageInfo: undefined };
+  });
+  saved.state.looks.unshift(...looks);
+  writeFileSync(filename, JSON.stringify(saved));
+  const mirror = new ExhibitionService(f.directory, { strictStorage: true });
+  const lookIds = looks.map(look => look.id);
+  mirror.command({ action: 'configure', enabledLookIds: lookIds });
+  await mirror.preparePublication({ lookIds });
+  await vi.waitFor(() => expect(mirror.publicationStatus().preparing).toBe(false));
+  expect(mirror.publishPublication({ lookIds }).publication.lookIds).toEqual(lookIds);
+  const published = mirror.read();
+  expect(published.publication!.looks).toHaveLength(101);
+  expect(new ExhibitionService(f.directory, { strictStorage: true }).read()).toEqual(published);
 });
 it('retains published selection order across draft enable edits and rejects corrupted new-schema publication', async () => {
   const f = await fixture(); const a = await f.add('A', 'red'); const b = await f.add('B', 'blue');

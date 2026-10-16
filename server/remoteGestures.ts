@@ -193,18 +193,20 @@ export class RemoteGestureCoordinator {
         this.invalidate(session, true);
         throw this.stale();
       }
-      if (!Array.isArray(result.hands) || !Number.isFinite(result.width) || !Number.isFinite(result.height)
+      if (!Array.isArray(result.hands) || !Array.isArray(result.poses) || !Number.isFinite(result.width) || !Number.isFinite(result.height)
         || result.width <= 0 || result.height <= 0 || !Number.isFinite(result.inferenceMs) || result.inferenceMs < 0) {
         void this.dispose(session);
         throw new RemoteGestureError(503, 'GESTURE_INFERENCE_FAILED', '手势识别失败，请重试。');
       }
-      // Both native and Linux inference use the unmirrored camera image; mirror landmarks exactly once,
-      // as NativeExhibitionActivity does before its local detector. Do not send pose results for this A/B mode.
+      // Match the mirrored browser preview: transform both models' coordinates exactly once
+      // so the shared detector can associate both hands with the same person's wrists.
       const hands = result.hands.map(hand => ({ ...hand,
         landmarks: hand.landmarks.map(point => ({ ...point, x: 1 - point.x })) }));
+      const poses = result.poses.map(pose => ({ ...pose,
+        landmarks: pose.landmarks.map(point => ({ ...point, x: 1 - point.x })) }));
       const fenced = session.releaseRequired;
       session.detector.setBlocked(this.blocked(session));
-      const event = session.detector.update([], hands, metadata.timestamp, result.width / result.height);
+      const event = session.detector.update(poses, hands, metadata.timestamp, result.width / result.height);
       if (fenced) {
         const continuous = session.lastObservedTime !== null
           && metadata.timestamp - session.lastObservedTime < RELEASE_MAX_FRAME_GAP_MS;
@@ -272,12 +274,17 @@ export class RemoteGestureCoordinator {
 
   private invalidate(session: Session, requireRelease: boolean): void {
     session.revision++;
-    // Consume a currently visible palm before reset clears ownership and geometry evidence.
-    session.detector.setBlocked(true);
-    session.detector.reset(true);
-    if (requireRelease) session.releaseRequired = true;
-    session.absentSince = null;
-    session.lastObservedTime = null;
+    if (requireRelease) {
+      // Reset/configuration changes and discarded in-flight images have unknown gesture evidence.
+      // Consume the visible palm before clearing ownership, then require observed release.
+      session.detector.setBlocked(true);
+      session.detector.reset(true);
+      session.releaseRequired = true;
+      session.absentSince = null;
+      session.lastObservedTime = null;
+    }
+    // Like the browser's busy boundary, preserve the body lock and observed lowering.
+    // Reacquiring the person here would discard a valid release while an outfit is changing.
     session.detector.setBlocked(this.blocked(session));
   }
 

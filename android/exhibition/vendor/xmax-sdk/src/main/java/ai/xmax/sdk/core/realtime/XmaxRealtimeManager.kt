@@ -95,17 +95,21 @@ internal class XmaxRealtimeManager(
     override suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice> =
         execute(OperationKind.SETTING) { _, c -> c.media.enumerateCameraDevices() }
 
+    override suspend fun cameraCaptureInfo(): RealtimeCameraCaptureInfo? =
+        runtime?.components?.media?.cameraCaptureInfo()
+
     override suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean,
         cameraDeviceId: String?,
         cameraRotationDegrees: Int,
+        captureFormat: RealtimeCameraCaptureFormat?,
     ): RealtimeMediaStream = mediaOperation(
         sourceRemoteAudioVolume = 0f,
         waitForCameraPreview = true,
     ) {
-        it.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId, cameraRotationDegrees)
+        it.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId, cameraRotationDegrees, captureFormat)
     }
     override suspend fun createLocalImageStream(imageData: ByteArray, videoFormat: RealtimeVideoFormat?): RealtimeMediaStream =
         mediaOperation(sourceRemoteAudioVolume = 0f) { it.createLocalImageStream(imageData, videoFormat) }
@@ -269,8 +273,10 @@ internal class XmaxRealtimeManager(
         resetGeneration: Boolean = true,
     ): RealtimeMediaStream {
         requireDisconnected(c)
-        val videoFormat = localStream.videoTrack?.videoFormat
-        if (videoFormat == null || !c.media.owns(localStream)) throw invalid("The local stream must be created and started by this realtime manager")
+        if (!c.media.owns(localStream)) throw invalid("The local stream must be created and started by this realtime manager")
+        val videoFormat = c.media.prepareConnectionVideoFormat()
+            ?: throw invalid("The local stream must have a valid video format")
+        token.ensureCurrent()
         token.setFailureScope(TerminationScope.CONNECTION)
         token.commit(RealtimeState(RealtimeConnectionState.CONNECTING))
         try {

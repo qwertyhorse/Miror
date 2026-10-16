@@ -56,6 +56,9 @@ public interface XmaxRealtimeManaging {
     /** 重新枚举 RTC 可用摄像头；须先取得相机权限，不启动采集或网络连接。 */
     public suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice>
 
+    /** 当前相机最近报告的实际帧信息；尚无有效帧信息或当前源不是相机时返回 null，不启动采集。 */
+    public suspend fun cameraCaptureInfo(): RealtimeCameraCaptureInfo? = null
+
     /**
      * 使用当前模型的默认视频规格创建并启动相机输入。
      * 麦克风默认关闭；接入方须先取得所需权限。
@@ -65,12 +68,14 @@ public interface XmaxRealtimeManaging {
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
         cameraRotationDegrees: Int = 0,
+        captureFormat: RealtimeCameraCaptureFormat? = null,
     ): RealtimeMediaStream = createLocalCameraStream(
         videoFormat = options.model.defaultCameraVideoFormat,
         position = position,
         useMicrophone = useMicrophone,
         cameraDeviceId = cameraDeviceId,
         cameraRotationDegrees = cameraRotationDegrees,
+        captureFormat = captureFormat,
     )
 
     /**
@@ -79,6 +84,8 @@ public interface XmaxRealtimeManaging {
      * cameraDeviceId 来自 enumerateCameraDevices；指定后优先于 position，设备缺失时失败。
      * cameraRotationDegrees 为相机安装方向的顺时针修正量，仅支持 0、90、180、270；
      * 在采集开始前交由 RTC 应用，本地预览和发送的视频共用该设置。
+     * captureFormat 指定独立的相机采集请求；null 延用模型调整后的 videoFormat。
+     * 采集规格不改变模型限制；模型和编码尺寸仍按实际相机帧计算，帧率沿用 videoFormat。
      */
     public suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
@@ -86,6 +93,7 @@ public interface XmaxRealtimeManaging {
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
         cameraRotationDegrees: Int = 0,
+        captureFormat: RealtimeCameraCaptureFormat? = null,
     ): RealtimeMediaStream
 
     /** 停止当前相机输入并释放其资源；当前源不是相机时不执行释放。 */

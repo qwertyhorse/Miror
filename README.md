@@ -36,6 +36,8 @@ Windows 可双击 `启动展会.cmd`。首次安装需联网；其他电脑需�
 
 ## 技术接手
 
+后台“换装服务”切换区域暂时隐藏，XMAX SK 配置继续显示，已有服务配置与密钥保留。恢复显示时，在构建环境设置 `VITE_EXHIBITION_SHOW_PROVIDER_SETTINGS=true` 后重新构建（例如 `VITE_EXHIBITION_SHOW_PROVIDER_SETTINGS=true npm run build`）。此开关同时作用于 HTTP 后台内嵌表单和 HTTPS 配置页。
+
 - `src/`：独立智能镜和后台界面。
 - `server/`：多镜、素材、设备、凭证和实时会话 API。
 - `shared/`：前后端共享类型与命令协议。

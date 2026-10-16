@@ -8,6 +8,7 @@ vi.mock('node:child_process', () => ({ spawn }));
 const settings = { minHandDetectionConfidence: .5, minHandPresenceConfidence: .5, minTrackingConfidence: .5 };
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]); // Decoder behavior is covered by the real Python tests.
 const result: GestureInferenceResult = { hands: [], poses: [], width: 640, height: 480, inferenceMs: 12 };
+const pose = { landmarks: Array.from({ length: 33 }, () => ({ x: .4, y: .5, z: -.1, visibility: .9 })) };
 function worker(ready = true) {
   const process = new EventEmitter() as EventEmitter & {
     stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: ReturnType<typeof vi.fn>;
@@ -19,9 +20,41 @@ function worker(ready = true) {
   spawn.mockImplementationOnce(() => { if (ready) queueMicrotask(() => process.stdout.write('{"type":"ready"}\n')); return process; });
   return { process, requests, reply(value: unknown) { process.stdout.write(`${JSON.stringify(value)}\n`); } };
 }
-afterEach(() => { spawn.mockReset(); });
+afterEach(() => { spawn.mockReset(); vi.unstubAllEnvs(); });
 
 describe('Linux gesture inference process lifecycle', () => {
+  it('starts with the full pose model and supports explicit model path overrides', async () => {
+    worker();
+    const defaults = await createGestureInference();
+    expect(spawn.mock.calls[0][1]).toEqual([
+      '-u', expect.stringContaining('scripts/gesture-worker.py'),
+      '--model', expect.stringContaining('public/assets/exhibition-gestures/hand_landmarker.task'),
+      '--pose-model', expect.stringContaining('public/assets/body-scan/pose_landmarker_full.task'),
+    ]);
+    await defaults.close();
+    vi.stubEnv('MIROR_GESTURE_POSE_MODEL', '/models/environment-pose.task');
+    worker();
+    const environment = await createGestureInference();
+    expect(spawn.mock.calls[1][1]).toContain('/models/environment-pose.task');
+    await environment.close();
+    worker();
+    const override = await createGestureInference({ poseModelPath: '/models/explicit-pose.task' });
+    expect(spawn.mock.calls[2][1]).toContain('/models/explicit-pose.task');
+    await override.close();
+  });
+
+  it('preserves both poses and visibility alongside hand landmarks', async () => {
+    const child = worker(); const runtime = await createGestureInference();
+    const detected: GestureInferenceResult = {
+      ...result, width: 960, height: 960, poses: [pose, pose],
+      hands: [{ handedness: 'Right', landmarks: Array.from({ length: 21 }, () => ({ x: .4, y: .5, z: -.1 })) }],
+    };
+    const pending = runtime.infer(jpeg, 1, settings);
+    child.reply({ type: 'result', id: 1, result: detected });
+    await expect(pending).resolves.toEqual(detected);
+    await runtime.close();
+  });
+
   it('waits for model readiness and rejects overlapping frames without writing or replaying them', async () => {
     const child = worker(false);
     let resolved = false;
@@ -95,7 +128,16 @@ describe('Linux gesture inference process lifecycle', () => {
   it.each([
     { type: 'result', id: 99, result },
     { type: 'result', id: 1, result: { ...result, width: 10000 } },
+    { type: 'result', id: 1, result: { ...result, width: 961 } },
+    { type: 'result', id: 1, result: { ...result, height: 961 } },
     { type: 'result', id: 1, result: { ...result, hands: [{ handedness: 'Left', landmarks: [] }] } },
+    { type: 'result', id: 1, result: { ...result, poses: [pose, pose, pose] } },
+    { type: 'result', id: 1, result: { ...result, poses: [{ landmarks: pose.landmarks.slice(1) }] } },
+    { type: 'result', id: 1, result: { ...result, poses: [{ landmarks: [...pose.landmarks, pose.landmarks[0]] }] } },
+    { type: 'result', id: 1, result: { ...result, poses: [{ landmarks: pose.landmarks.map(({ visibility: _visibility, ...point }) => point) }] } },
+    { type: 'result', id: 1, result: { ...result, poses: [{ landmarks: pose.landmarks.map(point => ({ ...point, visibility: Infinity })) }] } },
+    { type: 'result', id: 1, result: { ...result, poses: [{ landmarks: pose.landmarks.map(point => ({ ...point, z: NaN })) }] } },
+    { type: 'result', id: 1, result: { ...result, poses: [null] } },
   ])('does not accept corrupt or mismatched worker output', async reply => {
     const child = worker(); const runtime = await createGestureInference();
     const pending = runtime.infer(jpeg, 1, settings); child.reply(reply);

@@ -2,6 +2,8 @@ package ai.xmax.sdk.media
 
 import ai.xmax.sdk.CameraPosition
 import ai.xmax.sdk.RealtimeCameraDevice
+import ai.xmax.sdk.RealtimeCameraCaptureFormat
+import ai.xmax.sdk.RealtimeCameraCaptureInfo
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.RealtimeMediaStream
 import ai.xmax.sdk.RealtimeReferenceVideo
@@ -18,6 +20,8 @@ internal interface MediaControlling : InteractionControlling {
     val currentTrack: RealtimeVideoTrack?
 
     val currentVideoFormat: RealtimeVideoFormat?
+
+    suspend fun prepareConnectionVideoFormat(): RealtimeVideoFormat?
 
     val hasAudio: Boolean
 
@@ -40,12 +44,15 @@ internal interface MediaControlling : InteractionControlling {
 
     suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice>
 
+    fun cameraCaptureInfo(): RealtimeCameraCaptureInfo? = null
+
     suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
         cameraRotationDegrees: Int = 0,
+        captureFormat: RealtimeCameraCaptureFormat? = null,
     ): RealtimeMediaStream
 
     fun startMicrophoneCapture()

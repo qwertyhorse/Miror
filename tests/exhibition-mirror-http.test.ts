@@ -217,7 +217,7 @@ describe('mirror-scoped exhibition HTTP APIs', () => {
     const a = mirrors.create({ name: '左镜' }); const b = mirrors.create({ name: '右镜' });
     const bytes = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#aa88ff' } }).png().toBuffer();
     const uploaded = await request(root(a.id) + '/looks', { name: '临时素材', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), referenceImageBase64: bytes.toString('base64') });
-    expect(uploaded.status).toBe(201); const state = await uploaded.json(); const look = state.looks.at(-1)!;
+    expect(uploaded.status).toBe(201); const state = await uploaded.json(); const look = state.looks[0];
     expect(look.image).toMatch(new RegExp(`^${root(a.id)}/assets/${look.id}/display/[a-f0-9-]+$`));
     expect((await request(look.referenceImage)).status).toBe(200);
     expect((await request(look.image)).status).toBe(200);

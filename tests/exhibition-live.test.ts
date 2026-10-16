@@ -91,7 +91,7 @@ describe('explicit exhibition XMAX path', () => {
     expect(issue).toHaveBeenCalledTimes(1); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
   });
 
-  it('appends during live first-frame and heartbeat updates without replacing or extending the active session', async () => {
+  it('prepends uploads during live first-frame and heartbeat updates without replacing or extending the active session', async () => {
     const { exhibition, service, store, issue, deactivate, advance } = fixture();
     const bytes = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#bfbcff88' } }).png().toBuffer();
     const input = { name: '现场新增服装', category: '通勤', tags: ['简约'], imageBase64: bytes.toString('base64'), referenceImageBase64: bytes.toString('base64'), expectedRevision: 0 };
@@ -102,11 +102,11 @@ describe('explicit exhibition XMAX path', () => {
     await service.firstFrame(session.id, 750); exhibition.liveFirstFrame(session.id, 750);
     const latest = exhibition.get(); const activeRecord = store.get(session.id);
     expect(latest).toMatchObject({ phase: 'showcase', live: { status: 'running', sessionId: session.id, firstFrameMs: 750 } });
-    const appended = await pending;
-    const { looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, ...visitor } = appended;
+    const uploaded = await pending;
+    const { looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, ...visitor } = uploaded;
     const { looks: _previousLooks, revision: _previousRevision, updatedAt: _previousUpdatedAt, logs: _previousLogs, ...expectedVisitor } = latest;
-    expect(visitor).toEqual(expectedVisitor); expect(appended.looks).toHaveLength(4);
-    expect(appended.enabledLookIds).not.toContain(appended.looks.at(-1)!.id);
+    expect(visitor).toEqual(expectedVisitor); expect(uploaded.looks).toHaveLength(4);
+    expect(uploaded.enabledLookIds).not.toContain(uploaded.looks[0].id);
     expect(store.get(session.id)).toEqual(activeRecord); expect(store.list()).toHaveLength(1);
     expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled(); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     advance(14000); const another = await exhibition.upload({ ...input, name: '继续上传' });

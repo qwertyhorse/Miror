@@ -12,6 +12,8 @@ import './mirror-credential-settings.css';
 interface Props { controller: ExhibitionController; live: ExhibitionLiveController; embedded?: boolean; }
 
 const FRAME_MESSAGE = 'openbuy:mirror-credential';
+// Temporarily hide provider switching for the XMAX visit; opt in when building to restore it.
+const SHOW_PROVIDER_SETTINGS = import.meta.env.VITE_EXHIBITION_SHOW_PROVIDER_SETTINGS === 'true';
 const HTTP_PARENT_PORTS = new Set(['10200', '10201', '10601', '10101']);
 const REGIONS: readonly { value: XmaxRegion; label: string }[] = [{ value: 'cn', label: '国内版' }, { value: 'global', label: '国际版' }];
 const frameHeight = (height: number) => Math.max(68, Math.min(800, Math.ceil(height)));
@@ -223,7 +225,7 @@ function CredentialSettings({ controller, live, embedded = false }: Props) {
   }
 
   return <div id="mirror-sk-settings" ref={section} className="ex-mirror-credentials">
-    <ProviderSettingsForm key={mirrorId} mirrorId={mirrorId} onSaved={() => { if (embedded) notifyParent(mirrorId, { saved: true }); void live.refreshStatus(); void controller.refresh(); }} />
+    {SHOW_PROVIDER_SETTINGS && <ProviderSettingsForm key={mirrorId} mirrorId={mirrorId} onSaved={() => { if (embedded) notifyParent(mirrorId, { saved: true }); void live.refreshStatus(); void controller.refresh(); }} />}
     <div className="ex-credential-heading"><label htmlFor="mirror-xmax-sk">XMAX SK</label><span className="ex-credential-status">{!status ? '读取中…' : !status.configured ? '未配置' : status.source === 'mirror' ? '已配置' : '默认 SK'}</span>
       {currentRegion && <span className="ex-credential-current" data-current-region={currentRegion}>{`当前：${REGIONS.find(option => option.value === currentRegion)!.label}`}</span>}
       {regionChanged && <span className="ex-credential-unsaved" role="status">未保存</span>}

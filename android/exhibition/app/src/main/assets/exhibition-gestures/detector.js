@@ -634,7 +634,7 @@ var NativeGestureBundle = (function(exports) {
 		absentSince: null,
 		lowering: null
 	});
-	/** Prefer body-associated hands; a single visible hand can also take control without usable body wrists. */
+	/** Each visible hand can act; body association only assists tracking and natural lowering. */
 	var ExhibitionMirrorGestureDetector = class {
 		constructor(options = {}) {
 			this.options = options;
@@ -642,6 +642,7 @@ var NativeGestureBundle = (function(exports) {
 			_defineProperty(this, "waves", [new ExhibitionGestureDetector({ waveReversals: 1 }), new ExhibitionGestureDetector({ waveReversals: 1 })]);
 			_defineProperty(this, "palms", [newDisplay(), newDisplay()]);
 			_defineProperty(this, "previousTime", null);
+			_defineProperty(this, "noHandsSince", null);
 			_defineProperty(this, "body", null);
 			_defineProperty(this, "latch", null);
 			_defineProperty(this, "detected", false);
@@ -651,19 +652,16 @@ var NativeGestureBundle = (function(exports) {
 			_defineProperty(this, "status", "searching");
 			_defineProperty(this, "source", "none");
 			_defineProperty(this, "ambiguity", null);
-			_defineProperty(this, "handTrack", null);
 			_defineProperty(this, "lastHands", [null, null]);
 			_defineProperty(this, "handSince", [null, null]);
 			_defineProperty(this, "handLastAt", [null, null]);
 			_defineProperty(this, "associatedBody", null);
-			_defineProperty(this, "pendingBodyHand", null);
+			_defineProperty(this, "poseArms", [null, null]);
 			_defineProperty(this, "rawCount", 0);
 			_defineProperty(this, "matchedCount", 0);
 			_defineProperty(this, "palmIssues", ["no_hand", "no_hand"]);
 			_defineProperty(this, "blocked", false);
 			_defineProperty(this, "blockedWaves", [null, null]);
-			_defineProperty(this, "blockedUnknownHand", false);
-			_defineProperty(this, "blockedUnknownAbsentSince", null);
 			this.options = {
 				...options,
 				...options.gestures ? { gestures: [...new Set(options.gestures)] } : {}
@@ -784,9 +782,9 @@ var NativeGestureBundle = (function(exports) {
 			this.raise.reset();
 			this.clearWaves();
 			this.previousTime = null;
+			this.noHandsSince = null;
 			this.body = null;
 			this.associatedBody = null;
-			this.handTrack = null;
 			this.handSince = [null, null];
 			this.handLastAt = [null, null];
 			this.rawCount = this.matchedCount = 0;
@@ -800,15 +798,14 @@ var NativeGestureBundle = (function(exports) {
 				this.latch = null;
 				this.palms = [newDisplay(), newDisplay()];
 				this.lastHands = [null, null];
-				this.pendingBodyHand = null;
+				this.poseArms = [null, null];
 				this.blockedWaves = [null, null];
-				this.blockedUnknownHand = false;
-				this.blockedUnknownAbsentSince = null;
 			}
 			this.clearDisplayProgress();
 			this.clearReleaseProgress();
 		}
 		update(poses, hands, timestampMs, frameAspectRatio = 1) {
+			var _this$noHandsSince, _ref, _ref2, _ref3, _this$latch;
 			this.raiseStartedAt = null;
 			if (!Number.isFinite(timestampMs)) return null;
 			if (!Number.isFinite(frameAspectRatio) || frameAspectRatio <= 0) {
@@ -820,6 +817,7 @@ var NativeGestureBundle = (function(exports) {
 				if (timestampMs < this.previousTime || timestampMs - this.previousTime > MAX_FRAME_GAP_MS) this.reset(true);
 			}
 			this.previousTime = timestampMs;
+			this.noHandsSince = hands.length ? null : (_this$noHandsSince = this.noHandsSince) !== null && _this$noHandsSince !== void 0 ? _this$noHandsSince : timestampMs;
 			this.rawCount = hands.length;
 			this.matchedCount = 0;
 			this.palmIssues = ["no_hand", "no_hand"];
@@ -827,99 +825,22 @@ var NativeGestureBundle = (function(exports) {
 			const lockedPose = this.raise.operatorPose;
 			const lockedBody = lockedPose ? anchor(lockedPose, frameAspectRatio) : null;
 			const bodyHands = lockedPose && lockedBody ? matchedHands(lockedPose, hands, lockedBody, frameAspectRatio) : null;
-			const pose = !!lockedPose && hands.some((hand) => usableHand(hand, frameAspectRatio)) && WRISTS.some((index) => !trusted(lockedPose.landmarks[index])) && (!(bodyHands === null || bodyHands === void 0 ? void 0 : bodyHands.some(Boolean)) || hands.length > 1 && hands.some((hand) => !(bodyHands === null || bodyHands === void 0 ? void 0 : bodyHands.includes(hand)))) ? null : lockedPose;
+			const matches = this.trackHands(hands, bodyHands, lockedBody, frameAspectRatio);
+			const pose = lockedPose ? this.poseForSlots(lockedPose, matches, bodyHands) : null;
+			const bodyAssociated = !!pose && matches.some((hand, arm) => hand && trusted(pose.landmarks[WRISTS[arm]]));
+			const nextSource = pose && (bodyAssociated || !matches.some(Boolean)) ? "body" : matches.some(Boolean) ? "hand" : "none";
+			const body = (_ref = (_ref2 = (_ref3 = nextSource === "body" ? lockedBody : null) !== null && _ref3 !== void 0 ? _ref3 : this.body) !== null && _ref2 !== void 0 ? _ref2 : (_this$latch = this.latch) === null || _this$latch === void 0 ? void 0 : _this$latch.body) !== null && _ref !== void 0 ? _ref : {
+				x: 0,
+				y: 0,
+				width: 1,
+				scale: 1
+			};
+			const sourceChanged = this.source !== nextSource;
+			this.source = nextSource;
 			this.detected = !!this.options.allowRaise && this.raise.handDetected;
 			this.raised = !!this.options.allowRaise && this.raise.handRaised;
 			this.matched = false;
 			this.ambiguity = null;
-			if (this.raise.operatorStatus === "ambiguous" || !pose && hands.length > 1) {
-				if (this.blocked && hands.length) this.blockedUnknownHand = true;
-				this.status = "ambiguous";
-				this.source = "none";
-				this.ambiguity = this.raise.operatorStatus === "ambiguous" ? "people" : "hands";
-				this.handTrack = null;
-				this.handSince = [null, null];
-				this.handLastAt = [null, null];
-				this.clearWaves();
-				this.clearReleaseProgress();
-				this.clearDisplayProgress();
-				return null;
-			}
-			const nextSource = pose ? "body" : hands.length === 1 && usableHand(hands[0], frameAspectRatio) ? "hand" : "none";
-			const sourceChanged = this.source !== nextSource;
-			this.source = nextSource;
-			let body;
-			let matches;
-			if (pose) {
-				body = lockedBody;
-				matches = bodyHands;
-				if (this.pendingBodyHand) {
-					const previous = this.pendingBodyHand;
-					const owners = [0, 1].filter((arm) => matches[arm] && sameHand(previous.hand, matches[arm], frameAspectRatio)).map((arm) => ({
-						arm,
-						distance: distance(previous.hand.landmarks[0], matches[arm].landmarks[0], frameAspectRatio)
-					})).sort((a, b) => a.distance - b.distance);
-					const nearest = owners[0];
-					if (nearest && (owners.length === 1 || owners[1].distance - nearest.distance >= Math.max(.015, nearest.distance * .3))) {
-						if (nearest.arm !== previous.arm) this.swapArms();
-						this.pendingBodyHand = null;
-					} else if (owners.length > 1) {
-						this.status = "ambiguous";
-						this.source = "none";
-						this.ambiguity = "hands";
-						if (this.blocked && hands.length) this.blockedUnknownHand = true;
-						this.handSince = [null, null];
-						this.handLastAt = [null, null];
-						this.clearWaves();
-						this.clearReleaseProgress();
-						this.clearDisplayProgress();
-						return null;
-					}
-				}
-				this.handTrack = null;
-				this.status = "locked";
-			} else {
-				var _ref, _this$body, _this$latch;
-				body = (_ref = (_this$body = this.body) !== null && _this$body !== void 0 ? _this$body : (_this$latch = this.latch) === null || _this$latch === void 0 ? void 0 : _this$latch.body) !== null && _ref !== void 0 ? _ref : {
-					x: 0,
-					y: 0,
-					width: 1,
-					scale: 1
-				};
-				matches = [null, null];
-				const hand = nextSource === "hand" ? hands[0] : null;
-				if (hand) {
-					if (!this.handTrack || timestampMs - this.handTrack.lastAt > MAX_FRAME_GAP_MS || !sameHand(this.handTrack.hand, hand, frameAspectRatio)) {
-						var _this$handSince$arm;
-						const owners = [0, 1].filter((arm) => this.lastHands[arm] && sameHand(this.lastHands[arm], hand, frameAspectRatio));
-						const arm = owners.length === 1 ? owners[0] : this.latch ? 1 - this.latch.arm : 0;
-						const continuing = owners.length === 1 && this.handLastAt[arm] !== null && timestampMs - this.handLastAt[arm] <= MAX_FRAME_GAP_MS;
-						this.handTrack = {
-							hand,
-							arm,
-							since: continuing ? (_this$handSince$arm = this.handSince[arm]) !== null && _this$handSince$arm !== void 0 ? _this$handSince$arm : timestampMs : timestampMs,
-							lastAt: timestampMs
-						};
-						if (!continuing) {
-							this.clearWaves();
-							this.clearReleaseProgress();
-							this.clearDisplayProgress();
-						}
-					} else {
-						this.handTrack.hand = hand;
-						this.handTrack.lastAt = timestampMs;
-					}
-					matches[this.handTrack.arm] = hand;
-					this.pendingBodyHand = {
-						hand,
-						arm: this.handTrack.arm
-					};
-					this.status = timestampMs - this.handTrack.since >= HAND_SETTLE_MS ? "locked" : "searching";
-				} else {
-					this.handTrack = null;
-					this.status = "searching";
-				}
-			}
 			const bodyChanged = !!pose && !!this.associatedBody && !sameBody(this.associatedBody, body);
 			if (bodyChanged) {
 				this.clearWaves();
@@ -950,6 +871,7 @@ var NativeGestureBundle = (function(exports) {
 				this.handLastAt[arm] = timestampMs;
 				this.lastHands[arm] = hand;
 			}
+			this.status = pose && (bodyAssociated || !matches.some(Boolean)) || matches.some((hand, arm) => hand && usableHand(hand, frameAspectRatio) && this.handSince[arm] !== null && timestampMs - this.handSince[arm] >= HAND_SETTLE_MS) ? "locked" : "searching";
 			this.matchedCount = matches.filter(Boolean).length;
 			this.matched = matches.some(Boolean);
 			this.detected || (this.detected = this.matched);
@@ -959,20 +881,17 @@ var NativeGestureBundle = (function(exports) {
 			const unknownHand = hands.some((hand) => !matches.includes(hand));
 			this.observeLoweredPalms(pose, matches, unknownHand, body, timestampMs, frameAspectRatio);
 			this.observeDisplays(matches, complete, unknownHand, body, timestampMs, frameAspectRatio);
-			if (this.blocked && unknownHand) this.blockedUnknownHand = true;
-			if (this.blocked || this.blockedUnknownHand) {
-				for (const arm of [0, 1]) {
-					if (complete[arm]) this.consumePalm(arm, pose, body);
-					if (this.waveEnabled && matches[arm]) this.guardBlockedWave(arm);
-				}
-				if (!unknownHand && this.matchedCount) this.blockedUnknownHand = false;
-				if (!hands.length) {
-					var _this$blockedUnknownA;
-					(_this$blockedUnknownA = this.blockedUnknownAbsentSince) !== null && _this$blockedUnknownA !== void 0 || (this.blockedUnknownAbsentSince = timestampMs);
-					if (timestampMs - this.blockedUnknownAbsentSince >= this.palmReleaseMs) this.blockedUnknownHand = false;
-				} else this.blockedUnknownAbsentSince = null;
+			if (this.blocked) for (const arm of [0, 1]) {
+				if (complete[arm]) this.consumePalm(arm, pose, body);
+				if (this.waveEnabled && matches[arm]) this.guardBlockedWave(arm);
 			}
 			this.observeBlockedWaves(matches, unknownHand, body, timestampMs, frameAspectRatio);
+			if (this.noHandsSince !== null && timestampMs - this.noHandsSince >= this.palmReleaseMs) {
+				this.latch = null;
+				this.palms = [newDisplay(), newDisplay()];
+				this.blockedWaves = [null, null];
+				this.clearWaves();
+			}
 			if (this.blocked) {
 				this.clearWaves();
 				for (const display of this.palms) display.since = null;
@@ -980,7 +899,7 @@ var NativeGestureBundle = (function(exports) {
 				return null;
 			}
 			if (this.status !== "locked") {
-				if (this.waveEnabled && this.source === "hand" && this.matchedCount === 1 && !this.latch) {
+				if (this.waveEnabled && this.source === "hand" && !this.latch) {
 					for (const arm of [0, 1]) if (!this.blockedWaves[arm]) this.observeWave(arm, matches[arm], body, timestampMs);
 				}
 				return null;
@@ -993,7 +912,8 @@ var NativeGestureBundle = (function(exports) {
 			}
 			if (this.options.allowRaise && raiseEvent && this.raise.lastTriggeredArm !== null) {
 				this.raiseStartedAt = this.raise.lastRaiseStartedAt;
-				this.lock(this.raise.lastTriggeredArm, pose, body, complete);
+				const slot = this.poseArms.findIndex((arm) => arm === this.raise.lastTriggeredArm);
+				this.lock(slot < 0 ? this.raise.lastTriggeredArm : slot, pose, body, complete);
 				return "raise_hand";
 			}
 			for (const arm of [0, 1]) {
@@ -1231,7 +1151,6 @@ var NativeGestureBundle = (function(exports) {
 				guard.stillSince = guard.absentSince = null;
 				guard.stillAnchor = null;
 			}
-			this.blockedUnknownAbsentSince = null;
 			if (!preserveBodyLowering) {
 				for (const display of this.palms) if (display.lowering) display.lowering.since = null;
 			}
@@ -1242,14 +1161,77 @@ var NativeGestureBundle = (function(exports) {
 				display.absentSince = null;
 			}
 		}
-		swapArms() {
-			[this.palms[0], this.palms[1]] = [this.palms[1], this.palms[0]];
-			[this.lastHands[0], this.lastHands[1]] = [this.lastHands[1], this.lastHands[0]];
-			[this.handSince[0], this.handSince[1]] = [this.handSince[1], this.handSince[0]];
-			[this.handLastAt[0], this.handLastAt[1]] = [this.handLastAt[1], this.handLastAt[0]];
-			[this.waves[0], this.waves[1]] = [this.waves[1], this.waves[0]];
-			[this.blockedWaves[0], this.blockedWaves[1]] = [this.blockedWaves[1], this.blockedWaves[0]];
-			if (this.latch) this.latch.arm = 1 - this.latch.arm;
+		/** Choose the lowest-cost one-to-one assignment; handedness is deliberately ignored. */
+		trackHands(hands, bodyHands, body, aspect) {
+			const candidates = hands.filter((hand) => hand.landmarks.length === 21 && hand.landmarks.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)) && hand.landmarks[0].x >= 0 && hand.landmarks[0].x <= 1 && hand.landmarks[0].y >= 0 && hand.landmarks[0].y <= 1).sort((a, b) => a.landmarks[0].x - b.landmarks[0].x || a.landmarks[0].y - b.landmarks[0].y);
+			if (!candidates.length) return [null, null];
+			const continuingBody = !!body && !!this.associatedBody && sameBody(this.associatedBody, body);
+			const certain = this.lastHands.map((previous, arm) => {
+				if (!previous) return null;
+				const nearest = candidates.map((hand) => ({
+					hand,
+					distance: distance(previous.landmarks[0], hand.landmarks[0], aspect)
+				})).sort((a, b) => a.distance - b.distance);
+				const first = nearest[0];
+				const other = this.lastHands[1 - arm];
+				return first.distance <= .06 && (!nearest[1] || nearest[1].distance - first.distance >= .025) && (!other || distance(other.landmarks[0], first.hand.landmarks[0], aspect) - first.distance >= .025) ? first.hand : null;
+			});
+			const cost = (hand, arm) => {
+				var _bodyHands$indexOf;
+				const previous = this.lastHands[arm];
+				let score = previous ? distance(previous.landmarks[0], hand.landmarks[0], aspect) + (sameHand(previous, hand, aspect) ? 0 : .12) : .6;
+				const bodyArm = (_bodyHands$indexOf = bodyHands === null || bodyHands === void 0 ? void 0 : bodyHands.indexOf(hand)) !== null && _bodyHands$indexOf !== void 0 ? _bodyHands$indexOf : -1;
+				if (bodyArm >= 0 && continuingBody && this.poseArms[arm] === bodyArm) score *= .1;
+				if (certain[arm] && hand !== certain[arm]) score += 2;
+				return score;
+			};
+			const assignments = [];
+			if (candidates.length === 1) assignments.push({
+				hands: [candidates[0], null],
+				score: cost(candidates[0], 0)
+			}, {
+				hands: [null, candidates[0]],
+				score: cost(candidates[0], 1)
+			});
+			else for (const left of candidates) for (const right of candidates) if (left !== right) assignments.push({
+				hands: [left, right],
+				score: cost(left, 0) + cost(right, 1)
+			});
+			assignments.sort((a, b) => a.score - b.score);
+			const best = assignments[0];
+			if (assignments[1] && assignments[1].score - best.score < .015 && this.lastHands.every(Boolean) && (this.latch || this.palms.some((display) => display.consumed))) for (const arm of [0, 1]) {
+				if (this.palms.some((display) => display.consumed)) this.palms[arm].consumed = true;
+				if (this.latch && this.waveEnabled) this.guardBlockedWave(arm);
+			}
+			return best.hands;
+		}
+		/** Remap body wrists to stable hand slots, without granting body ownership to an unrelated hand. */
+		poseForSlots(pose, matches, bodyHands) {
+			const landmarks = [...pose.landmarks];
+			const owners = matches.map((hand, slot) => {
+				if (hand) {
+					const owner = bodyHands.indexOf(hand);
+					this.poseArms[slot] = owner >= 0 ? owner : null;
+				}
+				return this.poseArms[slot];
+			});
+			for (const slot of [0, 1]) {
+				const owner = owners[slot];
+				const duplicate = owner !== null && owners[1 - slot] === owner;
+				if (owner === null || duplicate) landmarks[WRISTS[slot]] = {
+					...pose.landmarks[WRISTS[slot]],
+					visibility: 0,
+					presence: 0
+				};
+				else {
+					landmarks[WRISTS[slot]] = pose.landmarks[WRISTS[owner]];
+					landmarks[SHOULDERS[slot]] = pose.landmarks[SHOULDERS[owner]];
+				}
+			}
+			return {
+				...pose,
+				landmarks
+			};
 		}
 		clearWaves() {
 			for (const wave of this.waves) wave.reset();

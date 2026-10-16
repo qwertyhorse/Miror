@@ -14,7 +14,7 @@ internal class NativeRemoteGestures(
     private val onError: (String) -> Unit,
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val callbackDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
-    private val encode: (NativeCameraFrame) -> ByteArray = ::encodeGestureJpeg,
+    private val encode: (NativeCameraFrame, Int) -> ByteArray = ::encodeGestureJpeg,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + callbackDispatcher)
     private val lock = Any()
@@ -30,7 +30,7 @@ internal class NativeRemoteGestures(
     private var seq = 0L
     private var sourceGeneration = Long.MIN_VALUE
     private var lastTimestamp = Long.MIN_VALUE
-    private var maxFps = 10
+    private var sampling = NativeGestureSampling.linux()
     private var frameOwned = false
     private var frameJob: Job? = null
     private var syncJob: Job? = null
@@ -38,12 +38,13 @@ internal class NativeRemoteGestures(
     private var retryAt = 0L
 
     /** Called on the Activity thread; configuration changes invalidate any earlier result immediately. */
-    fun configure(enabled: Boolean, blocked: Boolean, resetKey: String, maxFps: Int = 10) {
+    fun configure(enabled: Boolean, blocked: Boolean, resetKey: String, maxFps: Int = 15, inputLongEdge: Int = 720) {
         var invalidate = false
         synchronized(lock) {
             if (closed) return
-            this.maxFps = maxFps.coerceIn(1, 10)
-            val reset = this.resetKey != resetKey
+            val nextSampling = NativeGestureSampling.linux(maxFps, inputLongEdge)
+            val reset = this.resetKey != resetKey || sampling != nextSampling
+            sampling = nextSampling
             if (active != enabled || this.blocked != blocked || reset) {
                 active = enabled
                 this.blocked = blocked
@@ -112,7 +113,7 @@ internal class NativeRemoteGestures(
             val now = clock()
             if (closed || !active || !ready || sessionId == null || frameOwned || !frame.isCurrent() ||
                 now - frame.timestampMs !in 0 until MAX_AGE_MS || frame.generation < sourceGeneration ||
-                (lastTimestamp != Long.MIN_VALUE && frame.timestampMs - lastTimestamp < 1_000 / maxFps)) null
+                (lastTimestamp != Long.MIN_VALUE && frame.timestampMs - lastTimestamp < sampling.intervalMs)) null
             else {
                 if (frame.generation != sourceGeneration) {
                     sourceGeneration = frame.generation
@@ -121,27 +122,28 @@ internal class NativeRemoteGestures(
                 }
                 frameOwned = true
                 lastTimestamp = frame.timestampMs
-                NativeGestureUpload(requireNotNull(sessionId), epoch, seq++, frame.timestampMs, blocked)
+                NativeGestureUpload(requireNotNull(sessionId), epoch, seq++, frame.timestampMs, blocked) to sampling
             }
         }
         if (metadata == null) { frame.close(); return }
+        val (upload, capturedSampling) = metadata
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
-                if (!isCurrent(metadata, frame)) return@launch
-                val jpeg = encode(frame)
-                if (!isCurrent(metadata, frame)) return@launch
-                val response = transport.frame(metadata, jpeg)
+                if (!isCurrent(upload, frame)) return@launch
+                val jpeg = encode(frame, capturedSampling.inputLongEdge)
+                if (!isCurrent(upload, frame)) return@launch
+                val response = transport.frame(upload, jpeg)
                 withContext(callbackDispatcher) {
-                    if (!isCurrent(metadata, frame) || response.optString("sessionId") != metadata.sessionId ||
-                        response.optLong("epoch", -1) != metadata.epoch || response.optLong("seq", -1) != metadata.seq ||
-                        response.optLong("timestamp", -1) != metadata.timestampMs)
+                    if (!isCurrent(upload, frame) || response.optString("sessionId") != upload.sessionId ||
+                        response.optLong("epoch", -1) != upload.epoch || response.optLong("seq", -1) != upload.seq ||
+                        response.optLong("timestamp", -1) != upload.timestampMs)
                         return@withContext
                     onState(response)
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (cause: Exception) {
                 withContext(callbackDispatcher) {
-                    if (!isCurrent(metadata, frame, checkAge = false)) return@withContext
+                    if (!isCurrent(upload, frame, checkAge = false)) return@withContext
                     if (cause is ExhibitionApiException && cause.code in DROP_FRAME_CODES) return@withContext
                     loseSession()
                     synchronizeSession()
@@ -154,7 +156,7 @@ internal class NativeRemoteGestures(
         }
         synchronized(lock) {
             frameJob = job
-            if (closed || epoch != metadata.epoch || !active) job.cancel()
+            if (closed || epoch != upload.epoch || !active) job.cancel()
         }
         job.start()
         if (changedGeneration) scope.launch { synchronizeSession() }
@@ -209,15 +211,20 @@ internal class NativeRemoteGestures(
 }
 
 /** Rotation already belongs to the RTC sampler; Linux applies the same landmark mirroring as local mode. */
-internal fun encodeGestureJpeg(frame: NativeCameraFrame): ByteArray {
+internal fun encodeGestureJpeg(frame: NativeCameraFrame, inputLongEdge: Int = 720): ByteArray {
     val original = frame.bitmap
-    val scale = minOf(1.0, 480.0 / maxOf(original.width, original.height))
+    val longEdge = NativeGestureSampling.linux(inputLongEdge = inputLongEdge).inputLongEdge
+    val scale = minOf(1.0, longEdge.toDouble() / maxOf(original.width, original.height))
     val bitmap = if (scale < 1.0) Bitmap.createScaledBitmap(original,
         (original.width * scale).roundToInt().coerceAtLeast(1),
         (original.height * scale).roundToInt().coerceAtLeast(1), true) else original
     try {
         val output = ByteArrayOutputStream(32 * 1024)
-        check(bitmap.compress(Bitmap.CompressFormat.JPEG, 70, output)) { "Gesture JPEG failed" }
-        return output.toByteArray().also { check(it.size <= 256 * 1024) { "Gesture JPEG too large" } }
+        for (quality in 82 downTo 2 step 10) {
+            output.reset()
+            check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)) { "Gesture JPEG failed" }
+            if (output.size() <= 256 * 1024) return output.toByteArray()
+        }
+        error("Gesture JPEG too large")
     } finally { if (bitmap !== original) bitmap.recycle() }
 }

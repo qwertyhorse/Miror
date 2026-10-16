@@ -8,6 +8,8 @@ internal data class NativeMirrorUiState(
     val showPoster: Boolean,
     val showContinue: Boolean,
 ) {
+    val showFooterStop: Boolean get() = stopIcon && !recoverIcon
+
     companion object {
         fun resolve(
             realtime: Boolean,

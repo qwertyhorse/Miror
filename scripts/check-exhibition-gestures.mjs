@@ -254,7 +254,7 @@ async function scenario(synthetic = false, phase = 'idle', upperBody = false, ha
       await page.getByRole('complementary', { name: '智能镜诊断' }).waitFor();
       assert.equal(await page.getByRole('button', { name: '已看到新衣服' }).isDisabled(), true);
       if(!handOnly){assert.equal(ready.operator,'locked');assert.equal(ready.armed,'true');assert.match(ready.gestureLabel,/挥手或展掌换装/);}
-      await setMotion('open');
+      await setMotion(handOnly ? 'two-hands' : 'open');
       await page.waitForTimeout(1500);
       assert.equal(item.commands.length,1,'presenting an already-raised open palm selects one material');
       assert.equal(item.commands[0].lookId,'city');
@@ -264,14 +264,14 @@ async function scenario(synthetic = false, phase = 'idle', upperBody = false, ha
       if(handOnly){
         assert.equal(await gesture.getAttribute('data-control-source'),'hand');
         await setMotion('two-hands');
-        await page.waitForFunction(()=>document.querySelector('.ex-mirror-gesture')?.getAttribute('data-operator')==='ambiguous');
-        assert.match((await snapshot('two-hands-paused')).gestureLabel,/请只露一只手/);
+        await page.waitForFunction(()=>document.querySelector('.ex-mirror-gesture')?.getAttribute('data-operator')==='locked');
+        assert.doesNotMatch((await snapshot('two-hands-accepted')).gestureLabel,/请只露一只手/);
         await setMotion('open');await page.waitForTimeout(1400);
-        assert.equal(item.commands.length,1,'second-hand interruption does not create a new palm presentation');
+        assert.equal(item.commands.length,1,'removing one of two consumed palms does not create a new presentation');
       }
       await setMotion('ambiguous');
-      await page.waitForFunction(() => document.querySelector('.ex-mirror-gesture')?.getAttribute('data-operator') === 'ambiguous');
-      assert.match((await snapshot('multiple-people')).gestureLabel,/请单人体验/);
+      await page.waitForFunction(() => document.querySelector('.ex-mirror-gesture')?.getAttribute('data-operator') === 'locked');
+      assert.doesNotMatch((await snapshot('multiple-people')).gestureLabel,/请单人体验/);
       assert.equal(item.commands.length,1);
       await setMotion('open');
       await page.waitForTimeout(1400);

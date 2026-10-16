@@ -129,7 +129,7 @@ describe('exhibition six-mode catalogue and migration', () => {
     const { service, directory, now } = fixture();
     const imageBase64 = (await sharp({ create: { width: 512, height: 512, channels: 4, background: '#9999ff' } }).png().toBuffer()).toString('base64');
     const state = await service.upload({ name: '拖拽场景', mode: 'mox', imageBase64, referenceImageBase64: imageBase64 });
-    const look = state.looks.at(-1)!;
+    const look = state.looks[0]!;
     expect(look).toMatchObject({ name: '拖拽场景', mode: 'mox', tags: [] }); expect(state.enabledLookIds).not.toContain(look.id);
     expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(state);
     await expect(service.upload({ name: '自定义', mode: 'free', imageBase64 })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PROMPT' });
@@ -140,24 +140,24 @@ describe('exhibition six-mode catalogue and migration', () => {
     const original = fixture(); const { directory, now } = original;
     const imageBase64 = (await sharp({ create: { width: 512, height: 512, channels: 4, background: '#554477' } }).png().toBuffer()).toString('base64');
     const state = await original.service.upload({ name: '水彩画', mode: 'free', prompt: '视频变成水彩画', imageBase64, referenceImageBase64: imageBase64 });
-    const uploaded = state.looks.at(-1)!;
+    const uploaded = state.looks[0]!;
     // Reconstruct a persisted single-image catalog from before dual-image uploads.
     const path = join(directory, 'exhibition.json'); const stored = JSON.parse(readFileSync(path, 'utf8'));
-    const legacy = stored.state.looks.at(-1);
+    const legacy = stored.state.looks[0];
     renameSync(join(directory, 'exhibition-assets', `${uploaded.id}.display.${uploaded.image.split('/').at(-1)}.webp`), join(directory, 'exhibition-assets', `${uploaded.id}.webp`));
     rmSync(join(directory, 'exhibition-assets', `${uploaded.id}.reference.${uploaded.referenceImage!.split('/').at(-1)}.webp`));
     legacy.image = `/api/exhibition/assets/${uploaded.id}`; legacy.referenceKind = 'none';
     delete legacy.referenceImage; delete legacy.referenceImageInfo;
     writeFileSync(path, JSON.stringify(stored));
-    const service = new ExhibitionService(directory, { now, strictStorage: true }); const cover = service.get().looks.at(-1)!;
+    const service = new ExhibitionService(directory, { now, strictStorage: true }); const cover = service.get().looks[0]!;
     expect(cover).toMatchObject({ mode: 'free', referenceKind: 'none', source: 'upload' });
     expect(service.asset(cover.id).data.length).toBeGreaterThan(0);
-    expect((await service.updateLook(cover.id, { name: '水彩效果' })).looks.at(-1)).toMatchObject({ name: '水彩效果', referenceKind: 'none' });
+    expect((await service.updateLook(cover.id, { name: '水彩效果' })).looks[0]).toMatchObject({ name: '水彩效果', referenceKind: 'none' });
     expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(service.get());
     await expect(Promise.resolve().then(() => service.updateLook(cover.id, { mode: 'charx' }))).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_REQUIRED' });
     await expect(service.upload({ name: '角色', mode: 'charx', referenceKind: 'none', imageBase64, referenceImageBase64: imageBase64 })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_REFERENCE' });
     await expect(service.upload({ name: '水彩', mode: 'free', prompt: '水彩画', referenceKind: 'none', imageBase64 })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_REQUIRED' });
-    expect((await service.updateLook(cover.id, { mode: 'charx', referenceImageBase64: imageBase64 })).looks.at(-1)).toMatchObject({ mode: 'charx', referenceKind: 'image' });
+    expect((await service.updateLook(cover.id, { mode: 'charx', referenceImageBase64: imageBase64 })).looks[0]).toMatchObject({ mode: 'charx', referenceKind: 'image' });
   });
 
   it('copies mode and prompts with materials, copies current mode with settings, and never selects another mode', () => {

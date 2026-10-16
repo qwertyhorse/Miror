@@ -288,7 +288,7 @@ export class ExhibitionMirrorClient {
   upload = async (input: ExhibitionUploadInput): Promise<{ lookId: string; index: number } | null> => {
     let created: { lookId: string; index: number } | null = null;
     await this.mutate('looks', input, 'POST', 60000, false, next => {
-      const index = next.looks.length - 1;
+      const index = 0;
       if (next.looks[index]) created = { lookId: next.looks[index].id, index };
     });
     return created;

@@ -1,18 +1,21 @@
 import { act, createElement, useEffect, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TerminalCameraEntry, TerminalCameraSettings, terminalCameraAvailable, terminalCameraRequestMatches, useTerminalCameraRequest, useTerminalCameraReport } from '../src/exhibition/TerminalCameraSettings';
+import { Kiosk } from '../src/exhibition/ExhibitionApp';
 import { useExhibitionLive, type ExhibitionLiveController } from '../src/exhibition/useExhibitionLive';
 import { readCameraPreference, type ExhibitionCameraPreference } from '../src/exhibition/cameraPreference';
 import { scopedStorageKey } from '../src/versionScope';
 import type { TerminalBinding } from '../src/exhibition/useTerminalBinding';
 import type { ExhibitionState } from '../shared/exhibition';
 import type { ExhibitionCameraRequest } from '../shared/exhibitionCamera';
+import { DEFAULT_EXHIBITION_GESTURE_SETTINGS } from '../shared/exhibitionGestures';
 import { createReactHost, flushReact } from './support/reactHost';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
-vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: ({ stream, onFirstFrame }: { stream: MediaStream; onFirstFrame?: (stream: MediaStream) => void }) => {
-  useEffect(() => { if (stream) onFirstFrame?.(stream); }, [stream, onFirstFrame]); return null;
+vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: ({ stream, label, onFirstFrame }: { stream: MediaStream; label?: string; onFirstFrame?: (stream: MediaStream) => void }) => {
+  useEffect(() => { if (stream) onFirstFrame?.(stream); }, [stream, onFirstFrame]);
+  return createElement('video', { 'aria-label': label, ref: (video: HTMLVideoElement | null) => { if (video) video.srcObject = stream; } });
 } }));
 
 const identity = { terminalId: 'terminal-12345678-1234-4234-8234-123456789abc', token: 'private-test-token', platform: 'browser' as const, label: '浏览器镜端' };
@@ -30,7 +33,7 @@ function makeStream(id: string) {
   return { stream: { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream, track };
 }
 async function fixture(initialRequest: ExhibitionCameraRequest | null = request(), initialState = state(), includeMetadataReport = false, localPreview = false,
-  options: { cameraPreferenceScope?: string; initialPreference?: ExhibitionCameraPreference } = {}) {
+  options: { cameraPreferenceScope?: string; initialPreference?: ExhibitionCameraPreference; renderKiosk?: boolean } = {}) {
   host = await createReactHost();
   const createNode = document.createElement.bind(document);
   document.createElement = ((tag: string) => {
@@ -52,6 +55,7 @@ async function fixture(initialRequest: ExhibitionCameraRequest | null = request(
   vi.stubGlobal('navigator', { mediaDevices: { getUserMedia, enumerateDevices, addEventListener: vi.fn(), removeEventListener: vi.fn() } });
   mocks.api.mockResolvedValue({ configured: false });
   const report = vi.fn();
+  const send = vi.fn(async () => true);
   const openCamera = vi.fn(async (_mirrorId: string, _signal?: AbortSignal) => request());
   let update!: (value: { request?: ExhibitionCameraRequest; connected?: boolean; bindingId?: string; boundMirrorId?: string; localPreview?: boolean; state?: ExhibitionState }) => void;
   let live!: ExhibitionLiveController;
@@ -64,17 +68,50 @@ async function fixture(initialRequest: ExhibitionCameraRequest | null = request(
     gate = useTerminalCameraRequest(terminal, 'mirror-a', value.state, false, value.localPreview);
     live = useExhibitionLive({ state: value.state, active: value.connected, refresh: () => {}, mirrorId: 'mirror-a', cameraSettingsOpen: gate.blocksGeneration, cameraPreferenceScope: options.cameraPreferenceScope });
     useTerminalCameraReport(includeMetadataReport ? terminal : undefined, 'mirror-a', live, gate.request);
-    return createElement('div', null, createElement(TerminalCameraEntry, { settings: gate, busy: !terminalCameraAvailable(value.state), connected: value.connected }),
-      gate.request ? createElement(TerminalCameraSettings, { request: gate.request, live, report: gate.request.localPreview ? undefined : report, close: gate.close, cameraPreferenceScope: options.cameraPreferenceScope }) : null);
+    const cameraControl = createElement(TerminalCameraEntry, { settings: gate, busy: !terminalCameraAvailable(value.state), connected: value.connected });
+    return createElement('div', null, options.renderKiosk ? createElement(Kiosk, { state: value.state, live, send,
+      canControl: !gate.blocksGeneration, disabled: gate.blocksGeneration, cameraControl }) : cameraControl,
+      gate.request ? createElement(TerminalCameraSettings, { request: gate.request, live, report: gate.request.localPreview ? undefined : report, close: gate.close,
+        cameraPreferenceScope: options.cameraPreferenceScope, keepPreview: !options.renderKiosk || (value.state.providerMode === 'xmax' && value.state.experienceMode !== 'mox') }) : null);
   }
   await host.render(createElement(Harness)); await flushReact();
   const button = (label: string) => host!.find(node => node.nodeName === 'button' && node.textContent === label);
   const click = async (label: string) => { await act(async () => { await button(label)!.getReactProps().onClick(); }); await flushReact(); };
   const select = async (id: string) => { await act(async () => { host!.find(node => node.nodeName === 'select')!.getReactProps().onChange({ target: { value: id } }); }); await flushReact(); };
-  return { get live() { return live; }, get gate() { return gate; }, update, report, openCamera, storage, getUserMedia, enumerateDevices, streams, click, select, button };
+  return { get live() { return live; }, get gate() { return gate; }, update, report, send, openCamera, storage, getUserMedia, enumerateDevices, streams, click, select, button };
 }
 
 describe('bound browser terminal camera diagnostics', () => {
+  it('keeps a saved replacement camera visible on the empty browser-test screen without allocating a session', async () => {
+    const initial: ExhibitionState = { ...state(), providerMode: 'xmax', selectedLookId: null,
+      publication: { revision: 1, publishedAt: 1, legacy: false, looks: [] },
+      settings: { ...state().settings, gestureRecognition: { ...DEFAULT_EXHIBITION_GESTURE_SETTINGS, gestures: [] } } };
+    const f = await fixture(null, initial, false, true, { renderKiosk: true, cameraPreferenceScope: 'test-empty-materials' });
+    const mainVideo = () => host!.find(node => node.nodeName === 'video' && node.getReactProps()['aria-label'] === '本地取景') as unknown as HTMLVideoElement | undefined;
+    expect(f.live.selectedCameraId).toBe('camera-a');
+    expect(mainVideo()?.srcObject).toBe(f.streams[0].stream);
+    expect(f.button('开始体验')?.getReactProps().disabled).toBe(true);
+
+    await f.click('摄像头'); await f.select('camera-b');
+    const replacement = f.streams[1];
+    expect(f.streams[0].track.stop).toHaveBeenCalledOnce();
+    expect(f.button('保存')?.getReactProps().disabled).toBe(false);
+    await f.click('保存');
+
+    expect(f.gate.request).toBeNull();
+    expect(host!.find(node => node.nodeName === 'dialog')).toBeUndefined();
+    expect(mainVideo()?.srcObject).toBe(replacement.stream);
+    expect(f.live.cameraStream).toBe(replacement.stream);
+    expect(replacement.track.readyState).toBe('live');
+    expect(replacement.track.stop).not.toHaveBeenCalled();
+    expect(f.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(readCameraPreference('test-empty-materials')?.deviceId).toBe('camera-b');
+    expect(f.button('开始体验')?.getReactProps().disabled).toBe(true);
+    expect(f.send).not.toHaveBeenCalled();
+    expect(f.report).not.toHaveBeenCalled();
+    expect(mocks.api.mock.calls.every(([url]) => String(url).endsWith('/live/status'))).toBe(true);
+  });
+
   it('isolates browser-test camera capture and saved selection from the real screen and other tests', async () => {
     const realPreference: ExhibitionCameraPreference = { deviceId: 'disconnected-real-camera', label: '真实镜端摄像头', profile: 'default' };
     const f = await fixture(null, { ...state(), providerMode: 'xmax' }, false, true,

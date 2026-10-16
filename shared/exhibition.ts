@@ -91,7 +91,7 @@ export interface ExhibitionLookInput {
   referenceImageBase64?: string;
 }
 export interface ExhibitionUploadInput extends ExhibitionLookInput {
-  /** Uploads append a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock append operations. */
+  /** Uploads prepend a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock uploads. */
   expectedRevision?: number;
   /** Raw base64 or a data URL. Only fully decoded, static PNG/JPEG/WebP images are accepted. */
   imageBase64: string;

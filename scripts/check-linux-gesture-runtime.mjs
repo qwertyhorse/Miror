@@ -17,7 +17,7 @@ const source = option('--sample') ? await readFile(option('--sample')) : Buffer.
 assert(source.length < 8 * 1024 * 1024);
 const jpeg = await sharp(source).resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
 const alternate = await sharp(jpeg).flop().jpeg({ quality: 82 }).toBuffer();
-const oversize = await sharp({ create: { width: 641, height: 8, channels: 3, background: '#fff' } }).jpeg().toBuffer();
+const oversize = await sharp({ create: { width: 961, height: 8, channels: 3, background: '#fff' } }).jpeg().toBuffer();
 const settings = { minHandDetectionConfidence: .5, minHandPresenceConfidence: .5, minTrackingConfidence: .5 };
 const started = performance.now();
 const workers = await Promise.all([createGestureInference(), createGestureInference()]);
@@ -31,27 +31,34 @@ try {
   await assert.rejects(workers[0].infer(Buffer.from([255, 216, 255, 217]), 1, settings), { code: 'INVALID_IMAGE' });
   const first = workers[0].infer(jpeg, 2, settings);
   await assert.rejects(workers[0].infer(jpeg, 3, settings), { code: 'INFERENCE_BUSY' });
-  assert((await first).hands.length > 0, 'Official sample must detect real hand landmarks');
+  const firstResult = await first;
+  assert(firstResult.hands.length > 0, 'Official sample must detect real hand landmarks');
+  assert(firstResult.poses.length > 0, 'Official sample must detect real body landmarks');
   const benchmarkStarted = performance.now();
   const streams = await Promise.all(workers.map(async (worker, index) => {
-    const elapsed = [], inference = [], hands = [];
+    const elapsed = [], inference = [], hands = [], poses = [];
     for (let frame = 0; frame < frames; frame++) {
       const at = performance.now();
       const result = await worker.infer(index === 0 ? jpeg : alternate, 1000 + frame * 100, settings);
-      elapsed.push(performance.now() - at); inference.push(result.inferenceMs); hands.push(result.hands.length);
-      assert.equal(result.poses.length, 0);
+      elapsed.push(performance.now() - at); inference.push(result.inferenceMs); hands.push(result.hands.length); poses.push(result.poses.length);
+      assert(result.poses.length > 0 && result.poses.length <= 2);
       assert(result.width <= 640 && result.height <= 640 && result.hands.length > 0);
       for (const hand of result.hands) assert.equal(hand.landmarks.length, 21);
+      for (const pose of result.poses) {
+        assert.equal(pose.landmarks.length, 33);
+        assert(pose.landmarks.every(point => Number.isFinite(point.visibility)));
+      }
     }
-    return { terminal: index + 1, frames, endToEndMs: percentiles(elapsed), inferenceMs: percentiles(inference), minimumHands: Math.min(...hands), maximumHands: Math.max(...hands) };
+    return { terminal: index + 1, frames, endToEndMs: percentiles(elapsed), inferenceMs: percentiles(inference), minimumHands: Math.min(...hands), maximumHands: Math.max(...hands), minimumPoses: Math.min(...poses), maximumPoses: Math.max(...poses) };
   }));
   const durationMs = performance.now() - benchmarkStarted;
   const root = fileURLToPath(new URL('../', import.meta.url));
   const report = { passed: true, checkedAt: new Date().toISOString(), platform: `${platform()} ${arch()}`, cpu: cpus()[0]?.model,
     modelSha256: createHash('sha256').update(await readFile(path.join(root, 'public/assets/exhibition-gestures/hand_landmarker.task'))).digest('hex'),
+    poseModelSha256: createHash('sha256').update(await readFile(path.join(root, 'public/assets/body-scan/pose_landmarker_full.task'))).digest('hex'),
     source: option('--sample') ?? sourceUrl, sourceSha256: createHash('sha256').update(source).digest('hex'), jpegBytes: jpeg.length,
     startupMs, durationMs, concurrentTerminals: 2, totalFramesPerSecond: frames * 2 * 1000 / durationMs, streams,
-    checks: ['actual CPU model warmup', 'oversize JPEG header rejected', 'corrupt JPEG rejected', 'overlapping frame rejected', 'two isolated VIDEO models detect real hands'],
+    checks: ['actual CPU hand and pose model warmup', 'oversize JPEG header rejected', 'corrupt JPEG rejected', 'overlapping frame rejected', 'two isolated VIDEO contexts detect real hands and bodies'],
     limitation: 'Host CPU inference and local pipes only; excludes Android capture, JPEG encoding, LAN transport and XMAX generation.' };
   const output = option('--output');
   if (output) { await mkdir(path.dirname(path.resolve(output)), { recursive: true }); await writeFile(output, JSON.stringify(report, null, 2)); }

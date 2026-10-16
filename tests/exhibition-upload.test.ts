@@ -32,7 +32,7 @@ describe('exhibition upload validation and persistence', () => {
     const { service } = fixture();
     const state = await service.upload(uploadInput(await image(width, height)));
     expect(state.settings.uploadLimits).toEqual(EXHIBITION_DEFAULT_UPLOAD_LIMITS);
-    expect(state.looks.at(-1)).toMatchObject({ width, height, referenceImageInfo: { width, height } });
+    expect(state.looks[0]).toMatchObject({ width, height, referenceImageInfo: { width, height } });
   });
 
   it('upgrades saved default limits once while preserving the catalog and later explicit limits', async () => {
@@ -71,7 +71,7 @@ describe('exhibition upload validation and persistence', () => {
     const uploaded = await service.upload(uploadInput(bytes, { expectedRevision: initial.revision }));
     expect(uploaded.revision).toBe(initial.revision + 1);
     expect(uploaded.looks).toHaveLength(4);
-    const look = uploaded.looks.at(-1)!;
+    const look = uploaded.looks[0]!;
     expect(look).toMatchObject({ name: '展会衬衫', category: '通勤', tags: ['简约'], width: 512, height: 768, source: 'upload', mime: 'image/webp' });
     expect(look.id).toMatch(/^upload-[a-f0-9-]{36}$/);
     expect(look.image).toMatch(new RegExp(`^/api/exhibition/assets/${look.id}/display/[a-f0-9-]{36}$`));
@@ -133,7 +133,7 @@ describe('exhibition upload validation and persistence', () => {
     const { service } = fixture();
     service.command({ action: 'configure', uploadLimits: { maxFileSizeMB: 10, minWidth: 512, maxWidth: 600, minHeight: 700, maxHeight: 900 } });
     const bytes = await sharp({ create: { width: 800, height: 512, channels: 3, background: '#ccc' } }).jpeg().withMetadata({ orientation: 6 }).toBuffer();
-    const state = await service.upload(uploadInput(bytes)); const look = state.looks.at(-1)!;
+    const state = await service.upload(uploadInput(bytes)); const look = state.looks[0]!;
     expect(look).toMatchObject({ width: 512, height: 800 });
     const metadata = await sharp(service.asset(look.id).data).metadata();
     expect(metadata.orientation).toBeUndefined(); expect(metadata.exif).toBeUndefined();
@@ -168,7 +168,7 @@ describe('exhibition upload validation and persistence', () => {
       const afterStorage = JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8'));
       expect(appended).toMatchObject({ phase, selectedLookId: before.selectedLookId, displayedLookId: before.displayedLookId,
         enabledLookIds: before.enabledLookIds, live: before.live, sessionNumber: before.sessionNumber, generationNumber: before.generationNumber, generationReadyAt: before.generationReadyAt });
-      expect(appended.enabledLookIds).not.toContain(appended.looks.at(-1)!.id);
+      expect(appended.enabledLookIds).not.toContain(appended.looks[0]!.id);
       expect(afterStorage.lastCommandAt).toBe(beforeStorage.lastCommandAt);
       expect(afterStorage.pausedPhase).toBe(beforeStorage.pausedPhase); expect(afterStorage.pausedRemainingMs).toBe(beforeStorage.pausedRemainingMs);
     }
@@ -206,24 +206,42 @@ describe('exhibition upload validation and persistence', () => {
     }
   });
 
-  it('merges parallel uploads and enforces the catalog cap again at the serialized commit', async () => {
+  it('merges parallel uploads beyond 100 materials and reloads the complete catalog', async () => {
     const { service, directory, now } = fixture(); const bytes = await image();
     const [first, second] = await Promise.all([service.upload(uploadInput(bytes, { name: '并发甲' })), service.upload(uploadInput(bytes, { name: '并发乙' }))]);
     expect(Math.max(first.looks.length, second.looks.length)).toBe(5);
     expect(service.get().looks.map(look => look.name)).toEqual(expect.arrayContaining(['并发甲', '并发乙']));
     const saved = JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8'));
-    const template = saved.state.looks.at(-1);
+    const template = saved.state.looks[0];
     while (saved.state.looks.length < 99) {
       const id = `upload-${randomUUID()}`;
       saved.state.looks.push({ ...template, id, image: `/api/exhibition/assets/${id}`, referenceImage: undefined, referenceImageInfo: undefined });
     }
     writeFileSync(join(directory, 'exhibition.json'), JSON.stringify(saved));
-    const capped = new ExhibitionService(directory, { now });
-    const results = await Promise.allSettled([capped.upload(uploadInput(bytes, { name: '最后一套甲' })), capped.upload(uploadInput(bytes, { name: '最后一套乙' }))]);
-    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
-    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { code: 'EXHIBITION_CATALOG_FULL' } });
-    expect(capped.get().looks).toHaveLength(100);
-    expect(readdirSync(join(directory, 'exhibition-assets'))).toHaveLength(6);
+    const expanded = new ExhibitionService(directory, { now });
+    await Promise.all([expanded.upload(uploadInput(bytes, { name: '新增甲' })), expanded.upload(uploadInput(bytes, { name: '新增乙' }))]);
+    const current = expanded.get();
+    expect(current.looks).toHaveLength(101);
+    expect(current.looks.slice(0, 2).map(look => look.name)).toEqual(expect.arrayContaining(['新增甲', '新增乙']));
+    expect(current.looks.slice(2).map(look => look.id)).toEqual(saved.state.looks.map((look: { id: string }) => look.id));
+    expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(current);
+    expect(readdirSync(join(directory, 'exhibition-assets'))).toHaveLength(8);
+  });
+
+  it('prepends each upload without disturbing saved manual order or moving an edited material', async () => {
+    const { service, directory, now } = fixture(); const bytes = await image();
+    const before = service.command({ action: 'reorder', experienceMode: 'clothx', lookIds: ['evening', 'city', 'commute'] });
+    const first = (await service.upload(uploadInput(bytes, { name: '第一件' }))).looks[0]!;
+    const second = (await service.upload(uploadInput(bytes, { name: '第二件' }))).looks[0]!;
+    expect(service.get().looks.map(look => look.id)).toEqual([second.id, first.id, ...before.looks.map(look => look.id)]);
+    expect(service.get().selectedLookId).toBe(before.selectedLookId);
+    expect(service.get().enabledLookIds).toEqual(before.enabledLookIds);
+    const manualOrder = [first.id, 'city', second.id, 'commute', 'evening'];
+    service.command({ action: 'reorder', experienceMode: 'clothx', lookIds: manualOrder });
+    await service.updateLook(second.id, { name: '改名后的第二件' });
+    expect(new ExhibitionService(directory, { now, strictStorage: true }).get().looks.map(look => look.id)).toEqual(manualOrder);
+    const third = (await service.upload(uploadInput(bytes, { name: '第三件' }))).looks[0]!;
+    expect(new ExhibitionService(directory, { now, strictStorage: true }).get().looks.map(look => look.id)).toEqual([third.id, ...manualOrder]);
   });
 
   it('rejects asset IDs with traversal, sample IDs or unknown uploads', () => {
@@ -238,9 +256,9 @@ describe('exhibition flat classification and metadata', () => {
     let state = service.get();
     state = service.taxonomy({ categories: [...state.categories, '国风'], tags: [...state.tags, '新品', '限定'], expectedRevision: state.revision });
     state = await service.upload(uploadInput(await image(), { category: '国风', tags: ['新品', '限定'] }));
-    const id = state.looks.at(-1)!.id;
+    const id = state.looks[0]!.id;
     state = await service.updateLook(id, { name: '改名服装', description: '已修改', tags: ['限定'], expectedRevision: state.revision });
-    expect(state.looks.at(-1)).toMatchObject({ name: '改名服装', description: '已修改', category: '国风', tags: ['限定'] });
+    expect(state.looks[0]).toMatchObject({ name: '改名服装', description: '已修改', category: '国风', tags: ['限定'] });
     expect(() => service.taxonomy({ categories: ['通勤', '休闲', '礼服'], tags: state.tags })).toThrow(errorCode('EXHIBITION_TAXONOMY_IN_USE'));
     expect(() => service.taxonomy({ categories: state.categories, tags: state.tags.filter(tag => tag !== '限定') })).toThrow(errorCode('EXHIBITION_TAXONOMY_IN_USE'));
     state = service.taxonomy({ categories: state.categories, tags: state.tags.filter(tag => tag !== '新品') });
@@ -265,7 +283,7 @@ describe('exhibition flat classification and metadata', () => {
 describe('exhibition garment deletion', () => {
   it('removes an enabled uploaded garment, falls back in enabled order, and persists without its asset', async () => {
     const { service, directory, now } = fixture();
-    const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks.at(-1)!;
+    const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks[0]!;
     service.command({ action: 'configure', enabledLookIds: ['evening', look.id, 'city'] });
     const selected = service.command({ action: 'select', lookId: look.id });
     const removed = service.removeLook(look.id, { expectedRevision: selected.revision });
@@ -294,7 +312,7 @@ describe('exhibition garment deletion', () => {
 
   it('rejects stale revisions, missing IDs and active-session deletion without mutation', async () => {
     const { service } = fixture();
-    const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks.at(-1)!;
+    const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks[0]!;
     const initial = service.command({ action: 'configure', enabledLookIds: ['city'] });
     expect(() => service.removeLook(look.id, { expectedRevision: initial.revision - 1 })).toThrow(errorCode('EXHIBITION_STALE_REVISION'));
     expect(() => service.removeLook(look.id, { expectedRevision: -1 })).toThrow(errorCode('EXHIBITION_INVALID_REVISION'));
@@ -309,7 +327,7 @@ describe('exhibition garment deletion', () => {
 
   it('retains the catalog and image when the atomic state write fails', async () => {
     const { service, directory } = fixture();
-    const before = await service.upload(uploadInput(await image())); const look = before.looks.at(-1)!;
+    const before = await service.upload(uploadInput(await image())); const look = before.looks[0]!;
     const originalImage = service.asset(look.id).data;
     const storedPath = join(directory, 'exhibition.json'); const backupPath = `${storedPath}.saved`;
     const originalState = readFileSync(storedPath, 'utf8');
@@ -323,7 +341,7 @@ describe('exhibition garment deletion', () => {
 
   it('does not misreport a committed deletion when asset cleanup fails, and never serves the orphan', async () => {
     const { service, directory, now } = fixture();
-    const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks.at(-1)!;
+    const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks[0]!;
     const assetPath = join(directory, 'exhibition-assets', assetFile(look.image));
     const original = readFileSync(assetPath); rmSync(assetPath); mkdirSync(assetPath); writeFileSync(join(assetPath, 'orphan'), original);
     const removed = service.removeLook(look.id, { expectedRevision: uploaded.revision });
@@ -348,12 +366,12 @@ describe('exhibition upload HTTP boundary', () => {
   it('accepts multipart-sized JSON only on uploads, returns safe image content, and exposes metadata/taxonomy APIs', async () => {
     await withServer(async (base, service) => {
       const uploaded = await fetch(`${base}/api/exhibition/looks`, { method: 'POST', headers, body: JSON.stringify(uploadInput(await image())) });
-      expect(uploaded.status).toBe(201); const state = await uploaded.json() as ExhibitionState; const look = state.looks.at(-1)!;
+      expect(uploaded.status).toBe(201); const state = await uploaded.json() as ExhibitionState; const look = state.looks[0]!;
       const asset = await fetch(`${base}${look.image}`); expect(asset.status).toBe(200); expect(asset.headers.get('content-type')).toBe('image/webp');
       expect(asset.headers.get('x-content-type-options')).toBe('nosniff'); expect(Buffer.from(await asset.arrayBuffer())).toEqual(service.asset(look.id).data);
       const head = await fetch(`${base}${look.image}`, { method: 'HEAD' }); expect(head.status).toBe(200); expect(await head.text()).toBe('');
       const edit = await fetch(`${base}/api/exhibition/looks/${look.id}`, { method: 'PATCH', headers, body: JSON.stringify({ name: '新名字', expectedRevision: state.revision }) });
-      expect(edit.status).toBe(200); expect((await edit.json() as ExhibitionState).looks.at(-1)?.name).toBe('新名字');
+      expect(edit.status).toBe(200); expect((await edit.json() as ExhibitionState).looks[0]?.name).toBe('新名字');
       const terms = await fetch(`${base}/api/exhibition/taxonomy`, { method: 'POST', headers, body: JSON.stringify({ categories: [...state.categories, '运动'], tags: state.tags }) });
       expect(terms.status).toBe(200); expect((await terms.json() as ExhibitionState).categories).toContain('运动');
       for (const path of ['/api/exhibition/assets/%2e%2e%2fexhibition.json', '/api/exhibition/assets/commute', '/api/exhibition/assets/upload-00000000-0000-0000-0000-000000000000']) expect((await fetch(`${base}${path}`)).status).toBe(404);
@@ -366,13 +384,13 @@ describe('exhibition upload HTTP boundary', () => {
       const noisy = await sharp(randomBytes(512 * 512 * 3), { raw: { width: 512, height: 512, channels: 3 } }).png().toBuffer();
       expect(noisy.length).toBeGreaterThan(16_384);
       const uploaded = await fetch(`${base}/api/exhibition/looks`, { method: 'POST', headers, body: JSON.stringify(uploadInput(noisy)) });
-      expect(uploaded.status).toBe(201); const state = await uploaded.json() as ExhibitionState; const look = state.looks.at(-1)!;
+      expect(uploaded.status).toBe(201); const state = await uploaded.json() as ExhibitionState; const look = state.looks[0]!;
       const reference = await fetch(`${base}${look.referenceImage}`); expect(reference.status).toBe(200);
       const originalReference = Buffer.from(await reference.arrayBuffer());
       expect((await fetch(`${base}${look.referenceImage}`, { method: 'HEAD' })).status).toBe(200);
       const edited = await fetch(`${base}/api/exhibition/looks/${look.id}`, { method: 'PATCH', headers,
         body: JSON.stringify({ imageBase64: noisy.toString('base64'), expectedRevision: state.revision }) });
-      expect(edited.status).toBe(200); const changed = (await edited.json() as ExhibitionState).looks.at(-1)!;
+      expect(edited.status).toBe(200); const changed = (await edited.json() as ExhibitionState).looks[0]!;
       expect(changed.image).not.toBe(look.image); expect(changed.referenceImage).toBe(look.referenceImage);
       expect(Buffer.from(await (await fetch(`${base}${changed.referenceImage}`)).arrayBuffer())).toEqual(originalReference);
       expect((await fetch(`${base}${look.image}`)).status).toBe(404);
@@ -401,7 +419,7 @@ describe('exhibition upload HTTP boundary', () => {
 
   it('deletes through the protected revision-aware route and makes the deleted image unavailable', async () => {
     await withServer(async (base, service) => {
-      const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks.at(-1)!;
+      const uploaded = await service.upload(uploadInput(await image())); const look = uploaded.looks[0]!;
       const path = `${base}/api/exhibition/looks/${look.id}`;
       const requestDelete = (requestHeaders: Record<string, string>, expectedRevision: number) => fetch(path, {
         method: 'DELETE', headers: requestHeaders, body: JSON.stringify({ expectedRevision }),

@@ -128,7 +128,7 @@ describe('isolated browser test HTTP context', () => {
     const f = await fixture();
     const image = async (color: string) => (await sharp({ create: { width: 512, height: 512, channels: 3, background: color } }).png().toBuffer()).toString('base64');
     const uploaded = await f.source.upload({ name: '双图隔离', mode: 'clothx', imageBase64: await image('red'), referenceImageBase64: await image('blue') });
-    const look = uploaded.looks.at(-1)!;
+    const look = uploaded.looks[0]!;
     await f.source.preparePublication({ lookIds: [look.id] }); await vi.waitFor(() => expect(f.source.readyReference(look.id)).not.toBeNull()); f.source.publishPublication({ lookIds: [look.id] });
     f.source.command({ action: 'configure', enabledLookIds: [look.id] });
     const test = await f.create(); const state = await (await f.request(test.path, undefined, test)).json() as ExhibitionState;

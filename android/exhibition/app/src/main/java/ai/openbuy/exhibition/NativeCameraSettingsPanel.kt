@@ -20,6 +20,8 @@ internal class NativeCameraSettingsPanel(
     private val requestPermission: () -> Boolean,
     initialRotationDegrees: Int = 0,
     private val onState: (String, NativeCameraSnapshot, NativeCameraSelection, String?, String?) -> Unit = { _, _, _, _, _ -> },
+    initialCaptureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
+    initialXmaxRotationDegrees: Int? = null,
 ) : NativeCameraSettingsView(context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var operation: Job? = null
@@ -27,6 +29,9 @@ internal class NativeCameraSettingsPanel(
     private var closed = false
     private var initialized = false
     private var options = listOf<String?>(null)
+    private var captureOptions = listOf(NativeCameraCaptureSelection.Automatic)
+    private var unavailableCapturePosition: Int? = null
+    private var updatingCaptureChoices = false
     private val preview = XmaxRealtimeVideoView(context).apply {
         setBackgroundColor(Color.BLACK)
         videoContentMode = VideoContentMode.FIT
@@ -36,11 +41,20 @@ internal class NativeCameraSettingsPanel(
         private set
     var rotationDegrees = initialRotationDegrees
         private set
+    var captureSelection = initialCaptureSelection
+        private set
+    var xmaxRotationDegrees = initialXmaxRotationDegrees
+        private set
     private var snapshot = NativeCameraSnapshot(emptyList())
     private var previewedDeviceId: String? = null
 
+    val hasVerifiedPreview: Boolean
+        get() = !closed && !controller.hasReleaseFailure && previewedDeviceId != null &&
+            selection.resolve(snapshot.devices)?.id == previewedDeviceId
+
     init {
         require(initialRotationDegrees in listOf(0, 90, 180, 270))
+        require(initialXmaxRotationDegrees == null || initialXmaxRotationDegrees in listOf(0, 90, 180, 270))
         rotationSpinner.setSelection(initialRotationDegrees / 90)
         rotationSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -50,7 +64,26 @@ internal class NativeCameraSettingsPanel(
                 if (initialized) launchOperation { showPreview() }
             }
         }
+        xmaxRotationSpinner.setSelection(initialXmaxRotationDegrees?.let { it / 90 + 1 } ?: 0)
+        xmaxRotationSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (closed || position !in 0..4) return
+                // This is the absolute input correction for the next XMAX session.
+                // Changing it must not reconnect or invalidate this local preview.
+                xmaxRotationDegrees = if (position == 0) null else (position - 1) * 90
+            }
+        }
         previewContainer.addView(preview, FrameLayout.LayoutParams(-1, -1))
+        captureSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!initialized || updatingCaptureChoices || position !in captureOptions.indices ||
+                    position == unavailableCapturePosition || captureOptions[position] == captureSelection) return
+                captureSelection = captureOptions[position]
+                launchOperation { showPreview() }
+            }
+        }
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -65,6 +98,7 @@ internal class NativeCameraSettingsPanel(
 
     fun rescan() {
         if (closed) return
+        previewedDeviceId = null
         if (!requestPermission()) {
             message("请允许摄像头权限", true)
             report("permission-required", "请允许摄像头权限")
@@ -94,11 +128,21 @@ internal class NativeCameraSettingsPanel(
 
     private suspend fun showPreview() {
         val selected = selection.resolve(snapshot.devices)
+        updateCaptureChoices(selected)
         if (selected == null) {
             preview.visibility = View.GONE
             previewContainer.visibility = View.GONE
             message(selection.unavailableMessage(snapshot), true)
             report("ready", selection.unavailableMessage(snapshot))
+            return
+        }
+        try {
+            captureSelection.resolve(selected)
+        } catch (error: IllegalArgumentException) {
+            preview.visibility = View.GONE
+            previewContainer.visibility = View.GONE
+            message(checkNotNull(error.message), true)
+            report("ready", error.message)
             return
         }
         message("连接摄像头…")
@@ -113,14 +157,38 @@ internal class NativeCameraSettingsPanel(
                 report("ready", "摄像头已断开，请重新检测")
             }
         }
-        controller.preview(cameraDeviceId = selected.id, target = preview, cameraRotationDegrees = rotationDegrees)
+        controller.preview(cameraDeviceId = selected.id, target = preview, cameraRotationDegrees = rotationDegrees,
+            captureSelection = captureSelection)
         // The shared controller defaults to the full-screen mirror's fill mode.
         preview.videoContentMode = VideoContentMode.FIT
         if (!closed && owner == epoch) {
             previewedDeviceId = selected.id
-            message("已连接 · ${selected.label}")
+            val actual = controller.captureInfo
+            val requested = captureSelection.size
+            val sizeMessage = actual?.let {
+                "实际 ${it.width}×${it.height}" + if (requested != null &&
+                    (requested.width != it.width || requested.height != it.height))
+                    "（请求 ${requested.width}×${requested.height}）" else ""
+            }
+            message(sizeMessage ?: "已连接 · ${selected.label}")
             report("preview")
         }
+    }
+
+    private fun updateCaptureChoices(device: NativeCameraDevice?) {
+        val available = device?.let { NativeCameraCaptureSelection.options(it) }.orEmpty()
+            .map(::NativeCameraCaptureSelection)
+        val nextOptions = listOf(NativeCameraCaptureSelection.Automatic) + available
+        val missing = captureSelection.takeUnless { it in nextOptions }
+        captureOptions = nextOptions + listOfNotNull(missing)
+        unavailableCapturePosition = missing?.let { captureOptions.lastIndex }
+        updatingCaptureChoices = true
+        try {
+            setCaptureChoices(captureOptions.mapIndexed { index, option ->
+                option.label + if (index == unavailableCapturePosition) "（不可用）" else ""
+            }, unavailableCapturePosition)
+            captureSpinner.setSelection(captureOptions.indexOf(captureSelection))
+        } finally { updatingCaptureChoices = false }
     }
 
     private fun launchOperation(action: suspend () -> Unit) {

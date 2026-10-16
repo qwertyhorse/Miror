@@ -24,6 +24,16 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { clients.splice(0).forEach(value => value.stop()); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('mirror-scoped exhibition client', () => {
+  it('returns the newly uploaded material at the front of an existing catalog', async () => {
+    const uploaded = state('east', 6);
+    uploaded.looks.unshift({ ...uploaded.looks[0], id: 'upload-newest', name: '新素材', source: 'upload' });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => response(url.endsWith('/looks') ? uploaded : state('east', 5))));
+    const east = client('east'); east.start(); await flush();
+    expect(await east.upload({ name: '新素材', imageBase64: 'fixture', referenceImageBase64: 'reference-fixture' }))
+      .toEqual({ lookId: 'upload-newest', index: 0 });
+    expect(east.getSnapshot().state?.looks.map(look => look.id)).toEqual(['upload-newest', 'commute']);
+  });
+
   it('copies one material to the target client without changing the source client', async () => {
     const copied = state('west', 6);
     copied.looks.push({ ...copied.looks[0], id: 'upload-independent', mode: 'free', prompt: '彩虹背景', source: 'upload' });

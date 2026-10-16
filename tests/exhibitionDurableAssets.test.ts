@@ -32,7 +32,7 @@ async function picture(color: string) {
   return (await sharp({ create: { width: 512, height: 768, channels: 3, background: color } }).png().toBuffer()).toString('base64');
 }
 async function upload(mirror: ExhibitionService, name = '双图素材') {
-  return (await mirror.upload({ name, imageBase64: await picture('#aa0000'), referenceImageBase64: await picture('#0000aa') })).looks.at(-1)!;
+  return (await mirror.upload({ name, imageBase64: await picture('#aa0000'), referenceImageBase64: await picture('#0000aa') })).looks[0]!;
 }
 const urls = (look: ExhibitionLook) => [look.image, look.referenceImage!];
 function asset(mirror: ExhibitionService, url: string) {
@@ -50,7 +50,7 @@ describe('dual images with SQLite mirror state', () => {
   it('reloads the latest immutable pair from SQLite and retains the existing schema and upload-limit migrations', async () => {
     const f = fixture(); const mirror = f.mirrors.getMirror(); const look = await upload(mirror);
     const replacement = await picture('#00aa00');
-    const next = (await mirror.updateLook(look.id, { imageBase64: replacement, expectedRevision: mirror.read().revision })).looks.at(-1)!;
+    const next = (await mirror.updateLook(look.id, { imageBase64: replacement, expectedRevision: mirror.read().revision })).looks[0]!;
     expect(next.referenceImage).toBe(look.referenceImage);
     const restored = f.open().getMirror();
     expect(restored.read()).toEqual(mirror.read());
@@ -78,13 +78,13 @@ describe('dual images with SQLite mirror state', () => {
     const f = fixture(); const source = f.mirrors.getMirror(); const original = await upload(source, '来源');
     const id = f.mirrors.create({ name: '目标' }).id; const target = f.mirrors.getMirror(id); const previous = await upload(target, '复制前');
     const before = target.read();
-    const copied = f.mirrors.copy(id, { sourceMirrorId: 'default', copyLooks: true, copySettings: true, expectedRevision: before.revision }).looks.at(-1)!;
+    const copied = f.mirrors.copy(id, { sourceMirrorId: 'default', copyLooks: true, copySettings: true, expectedRevision: before.revision }).looks[0]!;
     expect(copied.id).not.toBe(original.id);
     urls(copied).forEach((url, index) => expect(asset(target, url)).toEqual(asset(source, urls(original)[index])));
     const latest = f.open().getMirror(id); expect(latest.read()).toEqual(target.read());
     const backups = join(f.directory, 'exhibition-mirrors', id, 'exhibition-copy-backups');
     const backup = join(backups, readdirSync(backups)[0]);
-    expect(JSON.parse(readFileSync(join(backup, 'exhibition.json'), 'utf8')).state.looks.at(-1)).toEqual(previous);
+    expect(JSON.parse(readFileSync(join(backup, 'exhibition.json'), 'utf8')).state.looks[0]).toEqual(previous);
     const restoredStore = new SessionStore(':memory:'); cleanups.push(() => restoredStore.close());
     const restored = new ExhibitionService(backup, { now, mirrorId: id, assetBasePath: `/api/exhibition/mirrors/${id}/assets`, strictStorage: true });
     restored.attachLiveService(storeService(restoredStore));

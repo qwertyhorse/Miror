@@ -140,10 +140,11 @@ def main():
         print('Run bounded remote gesture uploads against an isolated HTTP peer.', flush=True)
         run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', upload_classes, SOURCE / 'UrlPolicy.java'])
         run(compiler + ['-classpath', upload_classpath, '-d', upload_classes,
-                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeCameraFrame.kt', SOURCE / 'NativeRemoteGestures.kt',
-                        TESTS / 'NativeRemoteGesturesTest.kt'] + upload_stubs)
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeCameraFrame.kt', SOURCE / 'NativeGestureSampling.kt', SOURCE / 'NativeRemoteGestures.kt',
+                        TESTS / 'NativeRemoteGesturesTest.kt', TESTS / 'NativeGestureSamplingTest.kt'] + upload_stubs)
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',
              '-cp', upload_classpath, 'ai.openbuy.exhibition.NativeRemoteGesturesTestKt'], timeout=60)
+        run([java, '-cp', upload_classpath, 'ai.openbuy.exhibition.NativeGestureSamplingTestKt'], timeout=60)
 
         tls_dir = temporary / 'tls'
         tls_classes = tls_dir / 'classes'
@@ -192,8 +193,10 @@ def main():
         camera_classpath = os.pathsep.join(map(str, [camera_classes, stdlib]))
         print('Run native camera identity and selection fixtures.', flush=True)
         run(compiler + ['-classpath', camera_classpath, '-d', camera_classes,
-                        SOURCE / 'NativeCameraSelection.kt', TESTS / 'NativeCameraSelectionTest.kt'])
+                        SOURCE / 'NativeCameraSelection.kt', SOURCE / 'NativeCameraCaptureSelection.kt',
+                        TESTS / 'NativeCameraSelectionTest.kt', TESTS / 'NativeCameraCaptureSelectionTest.kt'])
         run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraSelectionTestKt'], timeout=60)
+        run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraCaptureSelectionTestKt'], timeout=60)
 
         pixels_classes = temporary / 'camera-pixels/classes'
         pixels_classes.mkdir(parents=True)
@@ -269,6 +272,7 @@ def main():
         run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', flow_classes, SOURCE / 'UrlPolicy.java'])
         run(compiler + ['-classpath', flow_classpath, '-d', flow_classes,
                         SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeGenerationRound.kt',
+                        SOURCE / 'NativeCameraSelection.kt', SOURCE / 'NativeCameraCaptureSelection.kt',
                         TESTS / 'NativeRoundFlowTest.kt'] + stub_sources)
         shutil.copytree(stubs / 'META-INF', flow_classes / 'META-INF', dirs_exist_ok=True)
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',

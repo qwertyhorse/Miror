@@ -27,7 +27,7 @@ async function add(service: ExhibitionService, mode: ExhibitionExperienceMode = 
   const image = await sharp({ create: { width: 512, height: 768, channels: 4, background: '#ac8de088' } }).png().toBuffer();
   const result = await service.upload({ name: `${mode} 原始素材`, description: `${mode} 描述`, mode, category: '通勤', tags: ['简约'],
     ...(mode === 'free' ? { prompt: '雨后的城市，人物身后出现彩虹，保持人物面部和动作。', referenceKind: 'image' } : {}), imageBase64: image.toString('base64'), referenceImageBase64: image.toString('base64') });
-  return result.looks.at(-1)!;
+  return result.looks[0]!;
 }
 const assetFile = (image: string) => image.split('/').slice(-3).join('.') + '.webp';
 const assetFiles = (look: { image: string; referenceImage?: string }) => [assetFile(look.image), ...(look.referenceImage ? [assetFile(look.referenceImage)] : [])];

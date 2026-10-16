@@ -120,7 +120,7 @@ it('caches immutable source digests for repeated batch reads and bounds missing-
   const f = await fixture();
   const image = await sharp({ create: { width: 512, height: 512, channels: 4, background: '#eeeeee' } }).png().toBuffer();
   const state = await f.mirror.upload({ name: '素材', mode: 'clothx', imageBase64: image.toString('base64'), referenceImageBase64: image.toString('base64') });
-  const look = state.looks.at(-1)!;
+  const look = state.looks[0]!;
   const asset = vi.spyOn(f.mirror as unknown as { readImage: (id: string, image: string) => { data: Buffer; mime: string } }, 'readImage');
   f.mirror.referencePreparationStatuses(); f.mirror.referencePreparationStatuses();
   expect(asset.mock.calls.filter(([id]) => id === look.id)).toHaveLength(1);

@@ -111,6 +111,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const realtime = state.providerMode === 'xmax';
   useEffect(() => { setBeginError(''); }, [state.phase, state.providerMode, state.experienceMode, state.selectedLookId, state.sessionNumber, state.generationNumber]);
   const otherDevice = remote || (!!state.live && !!live && state.live.deviceId !== live.deviceId);
+  const localPreview = welcome && !passive && !otherDevice && !mox ? live?.cameraStream : null;
   const serverError = state.live?.status === 'error' && state.live.generationNumber === state.generationNumber
     && state.live.lookId === state.selectedLookId;
   const needsRetry = realtime && !welcome && !passive && !otherDevice && (!!live?.error || serverError);
@@ -418,7 +419,7 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
             : gestureProcessing ? '切换中'
             : gestureBlocked ? '手势已暂停'
               : !gestureCapturing ? '等待取景'
-                : gestures.operatorStatus === 'ambiguous' ? gestures.ambiguityReason === 'hands' ? '请只露一只手' : '请单人体验'
+                : gestures.operatorStatus === 'ambiguous' ? '请露出手掌'
                   : gestures.operatorStatus !== 'locked' ? '请露出手掌'
                     : gestures.confirmationState === 'raise_required' ? '可以再次抬手'
                       : gestures.confirmationState === 'lowering' || (configuredGestures.includes('open_palm')
@@ -428,14 +429,18 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
                             : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
   if (!look || !visualLook || !enabled.length) return <section className={`ex-kiosk ex-mirror-minimal ex-empty-mode${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
-    <div className="ex-mirror-stage ex-mirror-empty"><Sparkles aria-hidden="true" /><span>暂无可用素材</span><div className="ex-mirror-stage-actions">{recoveryButton ?? (!hasStop && <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>)}</div></div>
+    <div className={`ex-mirror-stage${localPreview ? '' : ' ex-mirror-empty'}`}>
+      {localPreview ? <><StreamVideo stream={localPreview} mirrored={live?.mirrored} label="本地取景" /><div className="ex-visual-status" role="status"><span>暂无可用素材</span></div></>
+        : <><Sparkles aria-hidden="true" /><span>暂无可用素材</span></>}
+      <div className="ex-mirror-stage-actions">{recoveryButton ?? (!hasStop && <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>)}</div>
+    </div>
     <footer className="ex-mirror-footer"><div className="ex-mirror-footer-tools">{stopButton}{cameraControl}</div></footer>
   </section>;
   const feedback = !locallyEnded && !passive && !otherDevice ? beginError || (realtime ? live?.error || live?.updateError || (serverError ? '换装连接状态未确认，请联系工作人员。' : '') : '') : '';
   return <section className={`ex-kiosk ex-mirror-minimal ex-phase-${state.phase}${welcome ? ' ex-welcome' : ''}${passive ? ' ex-passive' : ''}${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className="ex-mirror-stage">
-      {welcome ? (live?.cameraStream && !passive && !otherDevice && !mox ? <StreamVideo stream={live.cameraStream} mirrored={live?.mirrored} label="本地取景" /> : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={visualLook.name} />)
+      {welcome ? (localPreview ? <StreamVideo stream={localPreview} mirrored={live?.mirrored} label="本地取景" /> : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={visualLook.name} />)
         : realtime && mox && !passive && !otherDevice && !needsRetry ? <MoXDragSurface interaction={live?.interaction ?? null} disabled={disabled || paused || !live?.interaction} imageUrl={!live?.outputStream || live?.presentation?.showInputImage ? live?.presentation?.inputImageUrl ?? appUrl(exhibitionReferenceImage(visualLook) ?? '') : undefined}>
           {live?.outputStream && <StreamVideo stream={live.outputStream} mirrored={false} label={outputLabel} onFirstFrame={live.reportFirstFrame} />}
         </MoXDragSurface> : realtime ? (stream && !passive && (!needsRetry || cameraFallback) ? <StreamVideo key={!cameraFallback && live?.outputStream ? 'output' : 'camera'} stream={stream} mirrored={live?.mirrored} label={!cameraFallback && live?.outputStream ? outputLabel : '本地取景'} onFirstFrame={!cameraFallback && live?.outputStream ? live.reportFirstFrame : undefined} /> : <div className="ex-mirror-placeholder"><Sparkles aria-hidden="true" /><span>{livePlaceholder}</span>{passive ? <small>仅同步状态，未回传镜端视频</small> : otherDevice ? <small>当前页面未接收镜端视频</small> : needsRetry && !serverError && <button type="button" className="ex-kiosk-retry" disabled={disabled || live?.opening} onClick={() => void retryExperience()}><RotateCcw />重试</button>}</div>) : <img className="ex-mirror-poster" src={appUrl(visualLook.image)} alt={`${visualLook.name}素材预览`} />}

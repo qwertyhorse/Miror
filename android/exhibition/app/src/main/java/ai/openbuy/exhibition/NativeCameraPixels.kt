@@ -19,7 +19,7 @@ internal object NativeCameraPixels {
         val turned = rotation == 90 || rotation == 270
         val rotatedWidth = if (turned) height else width
         val rotatedHeight = if (turned) width else height
-        val scale = minOf(1.0, longEdge.coerceIn(64, 640).toDouble() / max(rotatedWidth, rotatedHeight))
+        val scale = minOf(1.0, longEdge.coerceIn(64, 960).toDouble() / max(rotatedWidth, rotatedHeight))
         val outWidth = max(1, (rotatedWidth * scale).roundToInt())
         val outHeight = max(1, (rotatedHeight * scale).roundToInt())
         val yOffset = y.position(); val uOffset = u.position(); val vOffset = v.position()

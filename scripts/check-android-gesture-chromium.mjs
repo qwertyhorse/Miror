@@ -27,6 +27,6 @@ try {
   const match = result.stdout.match(/GESTURE_RESULT:(\[[\s\S]*?\])<\/body>/);
   if (!match) throw new Error(`Chromium 74 gesture contract failed: ${result.stdout}`);
   const checks = JSON.parse(match[1]);
-  if (checks.length !== 6) throw new Error('Incomplete Chromium 74 gesture contract');
+  if (checks.length !== 10) throw new Error('Incomplete Chromium 74 gesture contract');
   console.log(JSON.stringify({ browser: version, passed: checks }, null, 2));
 } finally { await rm(temporary, { recursive: true, force: true }); }

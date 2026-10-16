@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, GripVertical, ImagePlus, Plus, Search, Trash2, Upload, X } from 'lucide-react';
 import { EXHIBITION_FREE_PROMPT_MAX_LENGTH, exhibitionReferenceImage, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionUploadLimits } from '../../shared/exhibition';
@@ -73,28 +73,63 @@ function useMaterialImage(limits: ExhibitionUploadLimits) {
   return { ...current, file, setFile, valid: !!file && !!current.size && !current.error && !current.reading };
 }
 
-function MaterialImageField({ label, image, existing, disabled, required, promptOnly = false, onChange }: {
+function MaterialImageField({ label, image, existing, disabled, required, promptOnly = false, followsDisplay = false, resetToDisplay = false, onChange }: {
   label: string; image: ReturnType<typeof useMaterialImage>; existing?: string | null;
-  disabled: boolean; required: boolean; promptOnly?: boolean; onChange: () => void;
+  disabled: boolean; required: boolean; promptOnly?: boolean; followsDisplay?: boolean; resetToDisplay?: boolean; onChange: () => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
+  const [dropError, setDropError] = useState('');
   const errorId = useId();
+  const error = dropError || image.error;
   const source = image.file ? image.preview : existing ? appUrl(existing) : '';
+  useEffect(() => {
+    if (disabled) { dragDepth.current = 0; setDragging(false); }
+  }, [disabled]);
   function choose(file: File | null) {
     if (disabled) return;
+    if (input.current) input.current.value = '';
+    setDropError('');
     image.setFile(file); onChange();
   }
-  return <div className="ex-image-field">
-    <div className="ex-image-label"><span>{label}</span>{required && !existing ? <small>必填</small> : promptOnly ? <small>可选</small> : null}</div>
-    <div className="ex-upload-preview">{source ? <img src={source} alt={label} /> : <><ImagePlus size={32} /><span>{promptOnly ? '仅提示词' : label}</span></>}</div>
-    <label className="ex-file-picker"><Upload size={16} />{source || image.file ? '更换图片' : '选择图片'}<input ref={input} aria-label={`${label}文件`} aria-describedby={image.error ? errorId : undefined} aria-invalid={!!image.error} required={required && !existing} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" disabled={disabled} onChange={event => {
+  function acceptDrag(event: DragEvent) {
+    if (!event.dataTransfer.types.includes('Files')) return false;
+    event.preventDefault(); event.stopPropagation();
+    event.dataTransfer.dropEffect = disabled ? 'none' : 'copy';
+    return true;
+  }
+  return <div className={`ex-image-field${dragging && !disabled ? ' is-dragging' : ''}`}
+    onDragEnter={event => {
+      if (!acceptDrag(event) || disabled) return;
+      dragDepth.current++; setDragging(true);
+    }}
+    onDragOver={event => { acceptDrag(event); }}
+    onDragLeave={event => {
+      if (!acceptDrag(event)) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (!dragDepth.current) setDragging(false);
+    }}
+    onDrop={event => {
+      if (!acceptDrag(event)) return;
+      dragDepth.current = 0; setDragging(false);
+      if (disabled) return;
+      const files = event.dataTransfer.files;
+      if (files.length > 1) { setDropError('每次请拖入一张图片。'); return; }
+      if (files[0]) choose(files[0]);
+    }}>
+    <div className="ex-image-label"><span>{label}</span>{followsDisplay ? <small>同展示图</small> : required && !existing ? <small>必填</small> : promptOnly ? <small>可选</small> : null}</div>
+    <div className="ex-upload-preview">{source ? <img src={source} alt={label} draggable={false} /> : <><ImagePlus size={32} /><span>{promptOnly ? '仅提示词' : '拖入图片'}</span></>}
+      {dragging && !disabled && <span className="ex-image-drop-hint">{source || image.file ? '松开替换' : '松开添加'}</span>}
+    </div>
+    <label className="ex-file-picker"><Upload size={16} />{source || image.file ? '更换图片' : '选择图片'}<input ref={input} aria-label={`${label}文件`} aria-describedby={error ? errorId : undefined} aria-invalid={!!error} required={required && !existing && !image.file} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" disabled={disabled} onChange={event => {
       const selected = event.target.files?.[0];
       if (selected) choose(selected);
     }} /></label>
     {image.reading && <p className="ex-form-note" role="status">正在检查图片…</p>}
     {image.file && image.size && <p className="ex-file-accepted"><Check size={14} />{image.size.width} × {image.size.height} px · {(image.file.size / 1024 / 1024).toFixed(2)} MB</p>}
-    {image.error && <p id={errorId} className="ex-field-error" role="alert">{image.error}</p>}
-    {image.file && <button type="button" className="ex-image-reset" disabled={disabled} aria-label={`${existing ? '撤销更换' : '移除'}${label}`} onClick={() => { if (disabled) return; if (input.current) input.current.value = ''; choose(null); }}>{existing ? '撤销更换' : '移除图片'}</button>}
+    {error && <p id={errorId} className="ex-field-error" role="alert">{error}</p>}
+    {image.file && !followsDisplay && <button type="button" className="ex-image-reset" disabled={disabled} aria-label={resetToDisplay ? '模型参考图使用展示图' : `${existing ? '撤销更换' : '移除'}${label}`} onClick={() => choose(null)}>{resetToDisplay ? '使用展示图' : existing ? '撤销更换' : '移除图片'}</button>}
   </div>;
 }
 
@@ -132,13 +167,15 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
   const displayImage = useMaterialImage(limits);
   const referenceImage = useMaterialImage(limits);
   const existingReference = look ? exhibitionReferenceImage(look) : null;
+  const referenceFollowsDisplay = !referenceImage.file && (!look || existingReference === look.image);
+  const effectiveReferenceImage = referenceFollowsDisplay ? { ...displayImage, setFile: referenceImage.setFile } : referenceImage;
   const promptOnly = look?.referenceKind === 'none' && mode === 'free' && !referenceImage.file;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const configurable = ['idle', 'select'].includes(state!.phase) && !state!.live;
   const unavailable = pending || submitting || !connected;
   const valid = mode !== 'free' || !!prompt.trim();
   const displayValid = displayImage.file ? displayImage.valid : !!look?.image;
-  const referenceValid = referenceImage.file ? referenceImage.valid : !!existingReference || promptOnly;
+  const referenceValid = effectiveReferenceImage.file ? effectiveReferenceImage.valid : !!existingReference || promptOnly;
   async function remove() {
     if (!look || unavailable || !configurable || saving.current) return;
     saving.current = true;
@@ -153,10 +190,11 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
     saving.current = true;
     setSubmitting(true);
     try {
-      const [imageBase64, referenceImageBase64] = await Promise.all([
+      const [imageBase64, selectedReferenceBase64] = await Promise.all([
         displayImage.file ? toBase64(displayImage.file) : undefined,
         referenceImage.file ? toBase64(referenceImage.file) : undefined,
       ]);
+      const referenceImageBase64 = referenceFollowsDisplay ? imageBase64 : selectedReferenceBase64;
       if (!alive.current) return;
       const input = { name: look?.name ?? materialName(displayImage.file!), description: look?.description ?? '', mode, prompt: mode === 'free' ? prompt.trim() : '',
         ...(look?.referenceKind === 'none' ? { referenceKind: promptOnly ? 'none' as const : 'image' as const } : {}) };
@@ -168,13 +206,16 @@ export function LookEditor({ controller, look, initialMode, close, saved, delete
     } catch (cause) { if (alive.current) setError(cause instanceof Error ? cause.message : '保存失败，请重试。'); }
     finally { saving.current = false; if (alive.current) setSubmitting(false); }
   }
-  return <dialog ref={dialog} className={`ex-editor-dialog${deleteConfirm ? ' ex-delete-dialog' : ''}`} aria-label={deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传素材'} onCancel={event => { event.preventDefault(); if (!submitting && !pending) close(); }}><form className="ex-look-editor" onSubmit={event => void submit(event)} aria-label={deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传素材'}>
+  return <dialog ref={dialog} className={`ex-editor-dialog${deleteConfirm ? ' ex-delete-dialog' : ''}`} aria-label={deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传素材'}
+    onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'none'; } }}
+    onDrop={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }}
+    onCancel={event => { event.preventDefault(); if (!submitting && !pending) close(); }}><form className="ex-look-editor" onSubmit={event => void submit(event)} aria-label={deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传素材'}>
     <div className="ex-editor-heading"><h3>{deleteConfirm ? '删除素材' : look ? '编辑素材' : '上传新素材'}</h3><button type="button" className="ex-icon-button" onClick={close} disabled={submitting || pending} aria-label={deleteConfirm ? '关闭删除确认' : '关闭素材编辑'}><X size={18} /></button></div>
     {deleteConfirm && look ? <div className="ex-delete-preview"><img src={appUrl(look.image)} alt={`${look.name}素材`} /><div><strong>{look.name}</strong><p>{experienceModeLabel(look.mode)} · {look.source === 'upload' ? '上传素材' : '示例素材'}</p></div></div> : <div className="ex-editor-grid">
       <div className="ex-editor-images">
         <div className="ex-image-pair">
           <MaterialImageField label="展示图" image={displayImage} existing={look?.image} disabled={unavailable} required={!look} onChange={() => setError('')} />
-          <MaterialImageField label="模型参考图" image={referenceImage} existing={existingReference} disabled={unavailable} required={!promptOnly} promptOnly={promptOnly} onChange={() => setError('')} />
+          <MaterialImageField label="模型参考图" image={effectiveReferenceImage} existing={existingReference} disabled={unavailable} required={!promptOnly} promptOnly={promptOnly} followsDisplay={referenceFollowsDisplay} resetToDisplay={!look || existingReference === look.image} onChange={() => setError('')} />
         </div>
         <p className="ex-form-note">JPG / PNG / WebP · 每张 ≤ {limits.maxFileSizeMB} MB<br />宽 {limits.minWidth}–{limits.maxWidth} px · 高 {limits.minHeight}–{limits.maxHeight} px</p>
       </div>
@@ -229,6 +270,7 @@ function WardrobeContent({ controller, registry, onSummaryChange }: WardrobePane
   function openEditor(next: string, deleting = false) { setOpenMenuId(null); controller.clearError(); setEditorLook(looks.find(item => item.id === next)); setEditor(next); setInitialDelete(deleting); setNotice(''); }
   function savedEditor(savedMode: ExhibitionExperienceMode) {
     setNotice(editor === 'upload' ? '素材已保存。' : '素材信息已保存。');
+    if (editor === 'upload' && results.current) results.current.scrollTop = 0;
     setMode(savedMode); setQuery(''); setEditor(null);
   }
   return <div className="ex-library">

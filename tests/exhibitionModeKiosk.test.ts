@@ -83,6 +83,40 @@ describe('mirror video state labels', () => {
     expect(screen('positioning')).toContain('aria-label="本地取景"');
   });
 
+  it.each(['clothx', 'charx', 'free'] as const)('keeps local capture visible before publishing %s materials without enabling generation', experienceMode => {
+    const controller = live({ cameraStream: { getVideoTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream });
+    for (const phase of ['idle', 'select'] as const) {
+      const html = screen(phase, controller, false, { experienceMode, selectedLookId: null,
+        publication: { revision: 1, publishedAt: 1, legacy: false, looks: [] } });
+      expect(html).toContain('aria-label="本地取景"');
+      expect(html).toContain('暂无可用素材');
+      expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*?开始体验<\/button>/);
+      expect(html).not.toContain('commute-cutout.png');
+      expect(html).not.toContain('生成结果');
+    }
+  });
+
+  it('keeps local capture visible when the whole material catalogue is empty', () => {
+    const controller = live({ cameraStream: { getVideoTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream });
+    const html = screen('idle', controller, false, { looks: [], enabledLookIds: [], selectedLookId: null });
+    expect(html).toContain('aria-label="本地取景"');
+    expect(html).toContain('暂无可用素材');
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*?开始体验<\/button>/);
+  });
+
+  it.each(['passive', 'remote', 'mox', 'foreign'] as const)('does not show local capture in an empty %s screen', scenario => {
+    const state: ExhibitionState = { ...fixture(), providerMode: 'xmax', selectedLookId: null,
+      experienceMode: scenario === 'mox' ? 'mox' : 'clothx',
+      publication: { revision: 1, publishedAt: 1, legacy: false, looks: [] },
+      live: scenario === 'foreign' ? { deviceId: 'another-screen' } as ExhibitionState['live'] : null };
+    const controller = live({ cameraStream: { getVideoTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream });
+    const html = renderToStaticMarkup(createElement(Kiosk, { state, live: controller,
+      passive: scenario === 'passive', presentation: scenario === 'remote' ? 'remote' : 'terminal' }));
+    expect(html).toContain('暂无可用素材');
+    expect(html).not.toContain('<video');
+    expect(html).not.toContain('aria-label="本地取景"');
+  });
+
   it('waits for confirmed output instead of treating an allocated stream as a result', () => {
     const connecting = screen('generating', live({ outputStream: output, status: 'connecting' }));
     expect(badgeText(connecting)).toBe('连接实时服务');

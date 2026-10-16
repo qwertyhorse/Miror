@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -53,9 +55,19 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
     }
     val gestures = text("", Color.rgb(99, 83, 127)).apply {
         visibility = GONE
+        setSingleLine()
+        ellipsize = TextUtils.TruncateAt.END
         isClickable = true
         isFocusable = true
         contentDescription = "手势识别"
+    }
+    val stopButton = MirrorActionButton(context, false).apply {
+        contentDescription = "停止生成"
+        visibility = GONE
+    }
+    private val footerTools = LinearLayout(context).apply {
+        gravity = Gravity.CENTER
+        showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
     }
     private var skinKey = ""
     private var geometryWidth = 0
@@ -81,7 +93,9 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
         actions.addView(continueButton)
         stage.addView(actions)
         surface.addView(home)
-        surface.addView(gestures)
+        footerTools.addView(gestures)
+        footerTools.addView(stopButton)
+        surface.addView(footerTools)
     }
 
     fun applySkin(preset: String, custom: Boolean) {
@@ -111,6 +125,7 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
             }
         }
         home.background = MirrorUiTheme.rounded(if (key == "brand") 0x1fffffff else 0x80ffffff.toInt(), width * .014f)
+        updateFooterStyle()
         updateIcons()
         requestLayout()
     }
@@ -126,8 +141,17 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
         primary.setIcon(primaryIcon, (unit * 3.5f).toInt(), Color.WHITE, (unit * 1.5f).toInt())
         continueButton.setIcon(R.drawable.mirror_resume, (unit * 2.8f).toInt(), gapPx = unit.toInt())
         home.setIcon(R.drawable.mirror_home, (unit * 3.4f).toInt(), if (skinKey == "brand") Color.WHITE else Color.rgb(121, 102, 188))
+        stopButton.setIcon(R.drawable.mirror_stop, (unit * 2.2f).toInt(), if (skinKey == "brand") Color.WHITE else Color.rgb(121, 102, 188))
         primary.setPadding((unit * 4).toInt(), 0, (unit * 4).toInt(), 0)
         continueButton.setPadding((unit * 2.5f).toInt(), 0, (unit * 2.5f).toInt(), 0)
+    }
+
+    private fun updateFooterStyle() {
+        val unit = geometryWidth / 100f
+        val backgroundColor = if (skinKey == "brand") 0x1fffffff else 0x80ffffff.toInt()
+        stopButton.background = MirrorUiTheme.rounded(backgroundColor, unit)
+        gestures.background = MirrorUiTheme.rounded(backgroundColor, unit)
+        gestures.setTextColor(if (skinKey == "brand") Color.WHITE else Color.rgb(121, 102, 188))
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -162,14 +186,11 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
         place(stage, w * .045f, h * .092f, sw, sh)
         stage.background = MirrorUiTheme.rounded(MirrorUiTheme.SURFACE, unit * 2.4f)
         val actionHeight = unit * 8.4f
-        val gap = unit * 2
         place(actions, sw * .04f, sh * .955f - actionHeight, sw * .92f, actionHeight)
         primary.minimumWidth = (sw * .92f * .42f).toInt()
         primary.minWidth = primary.minimumWidth
         primary.layoutParams = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, actionHeight.toInt())
-        continueButton.layoutParams = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, actionHeight.toInt()).apply {
-            leftMargin = gap.toInt()
-        }
+        continueButton.layoutParams = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, actionHeight.toInt())
         primary.background = MirrorUiTheme.rounded(MirrorUiTheme.PRIMARY, unit * 1.4f)
         continueButton.background = MirrorUiTheme.rounded(0xe6faf8ff.toInt(), unit * 1.4f).apply {
             setStroke(maxOf(1, (unit * .12f).toInt()), Color.rgb(217, 206, 237))
@@ -185,10 +206,20 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
         status.setTextSize(TypedValue.COMPLEX_UNIT_PX, unit * 2.4f)
         empty.setTextSize(TypedValue.COMPLEX_UNIT_PX, unit * 3.2f)
         pairing.arrange(sw)
-        place(home, w * .045f, h * .96f, unit * 6, unit * 6)
-        place(gestures, w * .25f, h * .96f, w * .5f, unit * 6)
+        place(home, w * .045f, h * .98f - unit * 3, unit * 6, unit * 6)
+        // Keep stop and gesture controls entirely in the border, outside the video stage.
+        place(footerTools, w * .13f, h * .964f, w * .74f, h * .032f)
+        footerTools.dividerDrawable = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            setSize((unit * 1.4f).roundToInt(), 1)
+        }
+        stopButton.layoutParams = LinearLayout.LayoutParams((unit * 5.2f).toInt(), (unit * 5.2f).toInt())
+        gestures.layoutParams = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, (unit * 5.2f).toInt())
+        gestures.maxWidth = (w * .6f).toInt()
+        gestures.setPadding((unit * 1.4f).toInt(), 0, (unit * 1.4f).toInt(), 0)
         gestures.setTextSize(TypedValue.COMPLEX_UNIT_PX, unit * 2.4f)
         home.background = MirrorUiTheme.rounded(if (skinKey == "brand") 0x1fffffff else 0x80ffffff.toInt(), unit * 1.4f)
+        updateFooterStyle()
     }
 
     private fun renderLogo(width: Int, height: Int) {

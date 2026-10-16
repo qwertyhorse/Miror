@@ -25,12 +25,12 @@ const bytes = (service: ExhibitionService, url: string) => {
 };
 async function add(service: ExhibitionService) {
   const state = await service.upload({ name: '双图素材', imageBase64: await picture('#cc0000', 512, 768), referenceImageBase64: await picture('#0000cc', 768, 512) });
-  return state.looks.at(-1)!;
+  return state.looks[0]!;
 }
 async function legacy(promptOnly = false) {
   const f = fixture(); const look = await add(f.service); const display = f.service.asset(look.id).data;
   const stored = JSON.parse(readFileSync(join(f.directory, 'exhibition.json'), 'utf8'));
-  const old = stored.state.looks.at(-1);
+  const old = stored.state.looks[0];
   old.image = `/api/exhibition/assets/${look.id}`; delete old.referenceImage; delete old.referenceImageInfo;
   if (promptOnly) { old.mode = 'free'; old.referenceKind = 'none'; old.prompt = '保留人物，背景变为花海'; }
   writeFileSync(join(f.directory, 'exhibition.json'), JSON.stringify(stored));
@@ -66,12 +66,12 @@ describe('independent exhibition display and XMAX images', () => {
   it('replaces either image independently with fresh URLs while keeping the material id and the other bytes', async () => {
     const f = fixture(); const original = await add(f.service); const reference = bytes(f.service, original.referenceImage!);
     let state = await f.service.updateLook(original.id, { imageBase64: await picture('#00cc00'), expectedRevision: f.service.get().revision });
-    const displayChanged = state.looks.at(-1)!;
+    const displayChanged = state.looks[0]!;
     expect(displayChanged.id).toBe(original.id); expect(displayChanged.image).not.toBe(original.image);
     expect(displayChanged.referenceImage).toBe(original.referenceImage); expect(bytes(f.service, displayChanged.referenceImage!)).toEqual(reference);
     expect(() => bytes(f.service, original.image)).toThrow();
     state = await f.service.updateLook(original.id, { referenceImageBase64: await picture('#cccc00', 640, 640), expectedRevision: state.revision });
-    const referenceChanged = state.looks.at(-1)!;
+    const referenceChanged = state.looks[0]!;
     expect(referenceChanged.image).toBe(displayChanged.image); expect(referenceChanged.referenceImage).not.toBe(original.referenceImage);
     expect(referenceChanged.referenceImageInfo).toMatchObject({ width: 640, height: 640 });
     expect(() => bytes(f.service, original.referenceImage!)).toThrow();
@@ -80,10 +80,10 @@ describe('independent exhibition display and XMAX images', () => {
 
   it('pins a legacy single image as the reference when only its display is changed', async () => {
     const f = await legacy();
-    const updated = (await f.service.updateLook(f.look.id, { imageBase64: await picture('#00cc00') })).looks.at(-1)!;
+    const updated = (await f.service.updateLook(f.look.id, { imageBase64: await picture('#00cc00') })).looks[0]!;
     expect(updated.referenceImage).toBe(f.look.image); expect(updated.referenceImageInfo).toMatchObject({ width: 512, height: 768 });
     expect(bytes(f.service, updated.referenceImage!)).toEqual(f.display);
-    expect(new ExhibitionService(f.directory, { now: f.now, strictStorage: true }).get().looks.at(-1)).toEqual(updated);
+    expect(new ExhibitionService(f.directory, { now: f.now, strictStorage: true }).get().looks[0]).toEqual(updated);
     f.service.removeLook(updated.id, {}); expect(readdirSync(join(f.directory, 'exhibition-assets'))).toEqual([]);
   });
 
@@ -100,15 +100,15 @@ describe('independent exhibition display and XMAX images', () => {
 
   it('preserves legacy prompt-only display edits and requires a new reference before switching modes', async () => {
     const f = await legacy(true);
-    const displayed = (await f.service.updateLook(f.look.id, { imageBase64: await picture('#00cc00') })).looks.at(-1)!;
+    const displayed = (await f.service.updateLook(f.look.id, { imageBase64: await picture('#00cc00') })).looks[0]!;
     expect(displayed.referenceKind).toBe('none'); expect(exhibitionReferenceImage(displayed)).toBeNull();
     expect(() => f.service.updateLook(f.look.id, { mode: 'clothx' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_REFERENCE_REQUIRED' }));
     expect(() => f.service.updateLook(f.look.id, { referenceKind: 'image' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_REFERENCE_REQUIRED' }));
-    const converted = (await f.service.updateLook(f.look.id, { mode: 'clothx', referenceImageBase64: await picture('#0000cc') })).looks.at(-1)!;
+    const converted = (await f.service.updateLook(f.look.id, { mode: 'clothx', referenceImageBase64: await picture('#0000cc') })).looks[0]!;
     expect(converted).toMatchObject({ mode: 'clothx', referenceKind: 'image', image: displayed.image });
     expect(exhibitionReferenceImage(converted)).toBe(converted.referenceImage);
     const promptOnly = await f.service.updateLook(f.look.id, { mode: 'free', prompt: '彩虹', referenceKind: 'none' });
-    expect(exhibitionReferenceImage(promptOnly.looks.at(-1)!)).toBeNull();
+    expect(exhibitionReferenceImage(promptOnly.looks[0]!)).toBeNull();
   });
 
   it('rejects an edit when revision or active phase changes while decoding, retaining all current resources', async () => {
@@ -116,7 +116,7 @@ describe('independent exhibition display and XMAX images', () => {
     const pending = f.service.updateLook(look.id, { imageBase64: replacement });
     f.service.updateLook(look.id, { name: '并发改名' });
     await expect(pending).rejects.toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
-    expect(f.service.get().looks.at(-1)).toEqual({ ...look, name: '并发改名' });
+    expect(f.service.get().looks[0]).toEqual({ ...look, name: '并发改名' });
     const entering = f.service.updateLook(look.id, { referenceImageBase64: replacement });
     f.service.command({ action: 'begin' });
     await expect(entering).rejects.toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
@@ -158,7 +158,7 @@ describe('independent exhibition display and XMAX images', () => {
     const targetId = manager.create({ name: '目标设备' }).id; const target = manager.getMirror(targetId); const previous = await add(target);
     const oldPair = resources(previous).map(url => bytes(target, url));
     const state = manager.copy(targetId, { sourceMirrorId: 'default', copyLooks: true, copySettings: false, expectedRevision: target.get().revision });
-    const copied = state.looks.at(-1)!;
+    const copied = state.looks[0]!;
     expect(copied.id).not.toBe(sourceLook.id);
     resources(copied).forEach((url, index) => {
       expect(url).toContain(`/mirrors/${targetId}/assets/${copied.id}/`);
@@ -169,7 +169,7 @@ describe('independent exhibition display and XMAX images', () => {
     const backup = join(backupDirectory, readdirSync(backupDirectory)[0]);
     resources(previous).forEach((url, index) => expect(readFileSync(join(backup, 'exhibition-assets', file(url)))).toEqual(oldPair[index]));
     const restored = new ExhibitionService(backup, { now: f.now, mirrorId: targetId, assetBasePath: `/api/exhibition/mirrors/${targetId}/assets`, strictStorage: true });
-    expect(restored.get().looks.at(-1)).toEqual(previous);
+    expect(restored.get().looks[0]).toEqual(previous);
     resources(previous).forEach((url, index) => expect(bytes(restored, url)).toEqual(oldPair[index]));
   });
 });

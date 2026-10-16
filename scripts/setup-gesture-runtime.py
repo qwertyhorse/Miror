@@ -29,7 +29,8 @@ def main():
                     "--require-hashes", "-r", str(root / "runtime/gesture/requirements.txt")], check=True)
     subprocess.run([str(python), "-m", "pip", "check"], check=True)
     completed = subprocess.run([str(python), str(root / "scripts/gesture-worker.py"), "--model",
-                                str(root / "public/assets/exhibition-gestures/hand_landmarker.task")],
+                                str(root / "public/assets/exhibition-gestures/hand_landmarker.task"), "--pose-model",
+                                str(root / "public/assets/body-scan/pose_landmarker_full.task")],
                                input="", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=True)
     if completed.stdout.strip() != '{"type":"ready"}':
         raise SystemExit("Gesture model did not finish its warmup.")

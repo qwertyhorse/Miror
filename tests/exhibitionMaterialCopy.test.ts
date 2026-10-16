@@ -44,7 +44,7 @@ async function add(service: ExhibitionService, extras: Record<string, unknown> =
   const reference = await sharp({ create: { width: 320, height: 512, channels: 4, background: '#cfa0a0ff' } }).png().toBuffer();
   const state = await service.upload({ name: '原始素材', description: '保留说明', category: '通勤', tags: ['简约'],
     imageBase64: display.toString('base64'), referenceImageBase64: reference.toString('base64'), ...extras });
-  return state.looks.at(-1)!;
+  return state.looks[0]!;
 }
 const code = (value: string) => expect.objectContaining({ code: value });
 const assetFile = (image: string) => image.split('/').slice(-3).join('.') + '.webp';
@@ -187,7 +187,7 @@ describe('independent material copy', () => {
     await expect(f.copy()).resolves.toBeDefined();
   });
 
-  it('enforces catalog and taxonomy capacity before creating any files', async () => {
+  it('copies into catalogs beyond 100 materials and persists the complete target catalog', async () => {
     const f = fixture(); const original = await add(f.target); const file = join(f.targetDirectory, 'exhibition.json');
     const stored = JSON.parse(readFileSync(file, 'utf8'));
     while (stored.state.looks.length < 100) {
@@ -196,8 +196,15 @@ describe('independent material copy', () => {
     }
     writeFileSync(file, JSON.stringify(stored));
     const reloaded = new ExhibitionMirrors(f.directory, { now: f.now }); const beforeFiles = assets(f.targetDirectory);
-    await expect(reloaded.copyLook(f.targetId, { sourceMirrorId: 'default', sourceLookId: 'commute', mode: 'clothx', expectedRevision: reloaded.getMirror(f.targetId).read().revision })).rejects.toMatchObject({ code: 'EXHIBITION_CATALOG_FULL' });
-    expect(assets(f.targetDirectory)).toEqual(beforeFiles);
+    const copied = await reloaded.copyLook(f.targetId, { sourceMirrorId: 'default', sourceLookId: 'commute', mode: 'clothx', expectedRevision: reloaded.getMirror(f.targetId).read().revision });
+    expect(copied.looks).toHaveLength(101);
+    expect(copied.looks.slice(0, -1)).toEqual(stored.state.looks);
+    expect(assets(f.targetDirectory)).toHaveLength(beforeFiles.length + 2);
+    expect(new ExhibitionMirrors(f.directory, { now: f.now }).getMirror(f.targetId).read()).toEqual(copied);
+  });
+
+  it('enforces taxonomy capacity before creating any files', async () => {
+    const f = fixture(); const beforeFiles = assets(f.targetDirectory);
     f.source.taxonomy({ categories: [...f.source.read().categories, '额外分类'], tags: f.source.read().tags });
     f.source.updateLook('commute', { category: '额外分类' });
     f.target.taxonomy({ categories: [...f.target.read().categories, ...Array.from({ length: 37 }, (_, index) => `分类${index}`)], tags: f.target.read().tags });

@@ -51,7 +51,9 @@ it('automatically uploads new reference bytes to both configured services once w
   const f = fixture(); await f.drain();
   const before = [f.xmax.mock.calls.length, f.decart.mock.calls.length];
   const state = await f.mirror.upload({ name: 'New material', imageBase64: await f.image('white'), referenceImageBase64: await f.image('red') });
-  const look = state.looks.at(-1)!; await f.drain();
+  const look = state.looks[0]!;
+  expect(look.name).toBe('New material');
+  await f.drain();
   expect(f.xmax.mock.calls.length).toBe(before[0] + 1); expect(f.decart.mock.calls.length).toBe(before[1] + 1);
   for (const target of ['xmax', 'decart'] as const) expect(f.mirror.referencePreparationStatus(look.id, false, target).state).toBe('ready');
   // The display image is not uploaded; published and draft snapshots share the same content reference.

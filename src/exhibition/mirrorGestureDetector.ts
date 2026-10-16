@@ -41,7 +41,6 @@ interface PalmLowering {
   waitingForRaise: boolean;
 }
 interface PalmDisplay { consumed: boolean; since: number | null; absentSince: number | null; lowering: PalmLowering | null; }
-interface HandTrack { hand: ExhibitionGestureHand; arm: Arm; since: number; lastAt: number; }
 export type ExhibitionGestureConfirmationState = 'no_hand' | 'unmatched_hand' | 'settling' | 'ambiguous'
   | 'incomplete' | 'too_small' | 'fingers_folded' | 'holding' | 'already_triggered' | 'release_required'
   | 'lowering' | 'raise_required';
@@ -178,7 +177,7 @@ interface MirrorGestureOptions {
   lowerTrackingGraceMs?: number;
 }
 
-/** Prefer body-associated hands; a single visible hand can also take control without usable body wrists. */
+/** Each visible hand can act; body association only assists tracking and natural lowering. */
 export class ExhibitionMirrorGestureDetector {
   constructor(private options: MirrorGestureOptions = {}) {
     this.options = { ...options, ...(options.gestures ? { gestures: [...new Set(options.gestures)] } : {}) };
@@ -198,6 +197,7 @@ export class ExhibitionMirrorGestureDetector {
   private waves = [new ExhibitionGestureDetector({ waveReversals: 1 }), new ExhibitionGestureDetector({ waveReversals: 1 })];
   private palms: [PalmDisplay, PalmDisplay] = [newDisplay(), newDisplay()];
   private previousTime: number | null = null;
+  private noHandsSince: number | null = null;
   private body: BodyAnchor | null = null;
   private latch: Latch | null = null;
   private detected = false;
@@ -207,19 +207,16 @@ export class ExhibitionMirrorGestureDetector {
   private status: 'searching' | 'locked' | 'ambiguous' = 'searching';
   private source: 'body' | 'hand' | 'none' = 'none';
   private ambiguity: 'people' | 'hands' | null = null;
-  private handTrack: HandTrack | null = null;
   private lastHands: [ExhibitionGestureHand | null, ExhibitionGestureHand | null] = [null, null];
   private handSince: [number | null, number | null] = [null, null];
   private handLastAt: [number | null, number | null] = [null, null];
   private associatedBody: BodyAnchor | null = null;
-  private pendingBodyHand: { hand: ExhibitionGestureHand; arm: Arm } | null = null;
+  private poseArms: [Arm | null, Arm | null] = [null, null];
   private rawCount = 0;
   private matchedCount = 0;
   private palmIssues: [ExhibitionGestureConfirmationState | null, ExhibitionGestureConfirmationState | null] = ['no_hand', 'no_hand'];
   private blocked = false;
   private blockedWaves: [BlockedWave | null, BlockedWave | null] = [null, null];
-  private blockedUnknownHand = false;
-  private blockedUnknownAbsentSince: number | null = null;
 
   /** Busy periods still observe release, but never accumulate a future action. */
   setBlocked(blocked: boolean): void {
@@ -274,9 +271,9 @@ export class ExhibitionMirrorGestureDetector {
     this.raise.reset();
     this.clearWaves();
     this.previousTime = null;
+    this.noHandsSince = null;
     this.body = null;
     this.associatedBody = null;
-    this.handTrack = null;
     this.handSince = [null, null]; this.handLastAt = [null, null];
     this.rawCount = this.matchedCount = 0;
     this.palmIssues = ['no_hand', 'no_hand'];
@@ -285,9 +282,8 @@ export class ExhibitionMirrorGestureDetector {
     this.raiseStartedAt = null;
     if (!preserveLatch) {
       this.latch = null; this.palms = [newDisplay(), newDisplay()];
-      this.lastHands = [null, null]; this.pendingBodyHand = null;
+      this.lastHands = [null, null]; this.poseArms = [null, null];
       this.blockedWaves = [null, null];
-      this.blockedUnknownHand = false; this.blockedUnknownAbsentSince = null;
     }
     this.clearDisplayProgress();
     this.clearReleaseProgress();
@@ -303,89 +299,29 @@ export class ExhibitionMirrorGestureDetector {
       if (timestampMs < this.previousTime || timestampMs - this.previousTime > MAX_FRAME_GAP_MS) this.reset(true);
     }
     this.previousTime = timestampMs;
+    this.noHandsSince = hands.length ? null : this.noHandsSince ?? timestampMs;
     this.rawCount = hands.length; this.matchedCount = 0;
     this.palmIssues = ['no_hand', 'no_hand'];
     const raiseEvent = this.raise.update(poses, timestampMs, frameAspectRatio);
     const lockedPose = this.raise.operatorPose;
     const lockedBody = lockedPose ? anchor(lockedPose, frameAspectRatio) : null;
     const bodyHands = lockedPose && lockedBody ? matchedHands(lockedPose, hands, lockedBody, frameAspectRatio) : null;
-    // Pose can keep the torso while losing the raised wrist. Do not turn that
-    // partial result into a veto on the one clearly visible Hand model result.
-    // Confident wrists that contradict an unrelated hand still retain ownership.
-    const fallbackForWristLoss = !!lockedPose && hands.some(hand => usableHand(hand, frameAspectRatio))
-      && WRISTS.some(index => !trusted(lockedPose.landmarks[index]))
-      && (!bodyHands?.some(Boolean) || (hands.length > 1 && hands.some(hand => !bodyHands?.includes(hand))));
-    const pose = fallbackForWristLoss ? null : lockedPose;
+    // Stable hand slots are independent of model labels, list ordering and body
+    // ownership. An unmatched or second person's hand is still a valid control.
+    const matches = this.trackHands(hands, bodyHands, lockedBody, frameAspectRatio);
+    const pose = lockedPose ? this.poseForSlots(lockedPose, matches, bodyHands!) : null;
+    const bodyAssociated = !!pose && matches.some((hand, arm) => hand && trusted(pose.landmarks[WRISTS[arm]]));
+    const nextSource = pose && (bodyAssociated || !matches.some(Boolean)) ? 'body' : matches.some(Boolean) ? 'hand' : 'none';
+    // A visible but unrelated body cannot move a hand-only track's coordinate
+    // origin: that would make its old latch appear to belong to someone else.
+    const body = (nextSource === 'body' ? lockedBody : null)
+      ?? this.body ?? this.latch?.body ?? { x: 0, y: 0, width: 1, scale: 1 };
+    const sourceChanged = this.source !== nextSource;
+    this.source = nextSource;
     this.detected = !!this.options.allowRaise && this.raise.handDetected;
     this.raised = !!this.options.allowRaise && this.raise.handRaised;
     this.matched = false;
     this.ambiguity = null;
-    if (this.raise.operatorStatus === 'ambiguous' || (!pose && hands.length > 1)) {
-      if (this.blocked && hands.length) this.blockedUnknownHand = true;
-      this.status = 'ambiguous';
-      this.source = 'none';
-      this.ambiguity = this.raise.operatorStatus === 'ambiguous' ? 'people' : 'hands';
-      this.handTrack = null;
-      this.handSince = [null, null]; this.handLastAt = [null, null];
-      this.clearWaves();
-      this.clearReleaseProgress();
-      this.clearDisplayProgress();
-      return null;
-    }
-    const nextSource = pose ? 'body' : hands.length === 1 && usableHand(hands[0], frameAspectRatio) ? 'hand' : 'none';
-    const sourceChanged = this.source !== nextSource;
-    this.source = nextSource;
-    let body: BodyAnchor;
-    let matches: [ExhibitionGestureHand | null, ExhibitionGestureHand | null];
-    if (pose) {
-      body = lockedBody!;
-      matches = bodyHands!;
-      // An initially hand-only right palm must keep its consumed state when a
-      // newly visible body identifies it as wrist 16 instead of fallback slot 0.
-      if (this.pendingBodyHand) {
-        const previous = this.pendingBodyHand;
-        const owners = ([0, 1] as const).filter(arm => matches[arm] && sameHand(previous.hand, matches[arm]!, frameAspectRatio))
-          .map(arm => ({ arm, distance: distance(previous.hand.landmarks[0], matches[arm]!.landmarks[0], frameAspectRatio) }))
-          .sort((a, b) => a.distance - b.distance);
-        const nearest = owners[0];
-        const distinguishable = nearest && (owners.length === 1
-          || owners[1].distance - nearest.distance >= Math.max(0.015, nearest.distance * 0.3));
-        if (distinguishable) {
-          if (nearest.arm !== previous.arm) this.swapArms();
-          this.pendingBodyHand = null;
-        } else if (owners.length > 1) {
-          // Do not turn an ambiguous handover into an unconsumed second palm,
-          // or let the stationary other hand release the shared action latch.
-          this.status = 'ambiguous'; this.source = 'none'; this.ambiguity = 'hands';
-          if (this.blocked && hands.length) this.blockedUnknownHand = true;
-          this.handSince = [null, null]; this.handLastAt = [null, null];
-          this.clearWaves(); this.clearReleaseProgress(); this.clearDisplayProgress();
-          return null;
-        }
-      }
-      this.handTrack = null;
-      this.status = 'locked';
-    } else {
-      // A fixed coordinate origin retains wrist translation for natural waves.
-      // Reusing the last body origin also keeps a body-to-hand transition smooth.
-      body = this.body ?? this.latch?.body ?? { x: 0, y: 0, width: 1, scale: 1 };
-      matches = [null, null];
-      const hand = nextSource === 'hand' ? hands[0] : null;
-      if (hand) {
-        if (!this.handTrack || timestampMs - this.handTrack.lastAt > MAX_FRAME_GAP_MS
-          || !sameHand(this.handTrack.hand, hand, frameAspectRatio)) {
-          const owners = ([0, 1] as const).filter(arm => this.lastHands[arm] && sameHand(this.lastHands[arm]!, hand, frameAspectRatio));
-          const arm = owners.length === 1 ? owners[0] : this.latch ? (1 - this.latch.arm) as Arm : 0;
-          const continuing = owners.length === 1 && this.handLastAt[arm] !== null
-            && timestampMs - this.handLastAt[arm]! <= MAX_FRAME_GAP_MS;
-          this.handTrack = { hand, arm, since: continuing ? this.handSince[arm] ?? timestampMs : timestampMs, lastAt: timestampMs };
-          if (!continuing) { this.clearWaves(); this.clearReleaseProgress(); this.clearDisplayProgress(); }
-        } else { this.handTrack.hand = hand; this.handTrack.lastAt = timestampMs; }
-        matches[this.handTrack.arm] = hand;
-        this.pendingBodyHand = { hand, arm: this.handTrack.arm };
-        this.status = timestampMs - this.handTrack.since >= HAND_SETTLE_MS ? 'locked' : 'searching';
-      } else { this.handTrack = null; this.status = 'searching'; }
-    }
     const bodyChanged = !!pose && !!this.associatedBody && !sameBody(this.associatedBody, body);
     if (bodyChanged) {
       this.clearWaves(); this.clearReleaseProgress();
@@ -414,6 +350,8 @@ export class ExhibitionMirrorGestureDetector {
       this.handLastAt[arm] = timestampMs;
       this.lastHands[arm] = hand;
     }
+    this.status = (pose && (bodyAssociated || !matches.some(Boolean))) || matches.some((hand, arm) => hand && usableHand(hand, frameAspectRatio)
+      && this.handSince[arm] !== null && timestampMs - this.handSince[arm]! >= HAND_SETTLE_MS) ? 'locked' : 'searching';
     this.matchedCount = matches.filter(Boolean).length;
     this.matched = matches.some(Boolean);
     this.detected ||= this.matched;
@@ -424,21 +362,23 @@ export class ExhibitionMirrorGestureDetector {
     const unknownHand = hands.some(hand => !matches.includes(hand));
     this.observeLoweredPalms(pose, matches, unknownHand, body, timestampMs, frameAspectRatio);
     this.observeDisplays(matches, complete, unknownHand, body, timestampMs, frameAspectRatio);
-    if (this.blocked && unknownHand) this.blockedUnknownHand = true;
-    // An ambiguous busy observation cannot become a fresh presentation merely
-    // because ownership is resolved after the operation finishes.
-    if (this.blocked || this.blockedUnknownHand) {
+    // Every tracked hand seen during busy is consumed independently. A bad or
+    // unrelated second hand cannot veto a qualified hand after a fresh release.
+    if (this.blocked) {
       for (const arm of [0, 1] as const) {
         if (complete[arm]) this.consumePalm(arm, pose, body);
         if (this.waveEnabled && matches[arm]) this.guardBlockedWave(arm);
       }
-      if (!unknownHand && this.matchedCount) this.blockedUnknownHand = false;
-      if (!hands.length) {
-        this.blockedUnknownAbsentSince ??= timestampMs;
-        if (timestampMs - this.blockedUnknownAbsentSince >= this.palmReleaseMs) this.blockedUnknownHand = false;
-      } else this.blockedUnknownAbsentSince = null;
     }
     this.observeBlockedWaves(matches, unknownHand, body, timestampMs, frameAspectRatio);
+    // Complete Hand-model absence releases independently of body identity. A
+    // newly locked or moving pose must not restart the observed absence clock.
+    if (this.noHandsSince !== null && timestampMs - this.noHandsSince >= this.palmReleaseMs) {
+      this.latch = null;
+      this.palms = [newDisplay(), newDisplay()];
+      this.blockedWaves = [null, null];
+      this.clearWaves();
+    }
     if (this.blocked) {
       this.clearWaves();
       for (const display of this.palms) display.since = null;
@@ -449,7 +389,7 @@ export class ExhibitionMirrorGestureDetector {
       // Track the start of a new hand's wave while ownership settles. The 200 ms
       // settling interval is shorter than wave's 300 ms minimum, so this cannot
       // confirm or consume an action before ownership is locked.
-      if (this.waveEnabled && this.source === 'hand' && this.matchedCount === 1 && !this.latch) {
+      if (this.waveEnabled && this.source === 'hand' && !this.latch) {
         for (const arm of [0, 1] as const) if (!this.blockedWaves[arm]) this.observeWave(arm, matches[arm], body, timestampMs);
       }
       return null;
@@ -465,7 +405,8 @@ export class ExhibitionMirrorGestureDetector {
     }
     if (this.options.allowRaise && raiseEvent && this.raise.lastTriggeredArm !== null) {
       this.raiseStartedAt = this.raise.lastRaiseStartedAt;
-      this.lock(this.raise.lastTriggeredArm, pose, body, complete);
+      const slot = this.poseArms.findIndex(arm => arm === this.raise.lastTriggeredArm);
+      this.lock((slot < 0 ? this.raise.lastTriggeredArm : slot) as Arm, pose, body, complete);
       return 'raise_hand';
     }
     for (const arm of [0, 1] as const) {
@@ -687,7 +628,6 @@ export class ExhibitionMirrorGestureDetector {
     for (const guard of this.blockedWaves) if (guard) {
       guard.stillSince = guard.absentSince = null; guard.stillAnchor = null;
     }
-    this.blockedUnknownAbsentSince = null;
     if (!preserveBodyLowering) for (const display of this.palms) if (display.lowering) display.lowering.since = null;
   }
 
@@ -695,14 +635,82 @@ export class ExhibitionMirrorGestureDetector {
     for (const display of this.palms) { display.since = null; display.absentSince = null; }
   }
 
-  private swapArms() {
-    [this.palms[0], this.palms[1]] = [this.palms[1], this.palms[0]];
-    [this.lastHands[0], this.lastHands[1]] = [this.lastHands[1], this.lastHands[0]];
-    [this.handSince[0], this.handSince[1]] = [this.handSince[1], this.handSince[0]];
-    [this.handLastAt[0], this.handLastAt[1]] = [this.handLastAt[1], this.handLastAt[0]];
-    [this.waves[0], this.waves[1]] = [this.waves[1], this.waves[0]];
-    [this.blockedWaves[0], this.blockedWaves[1]] = [this.blockedWaves[1], this.blockedWaves[0]];
-    if (this.latch) this.latch.arm = (1 - this.latch.arm) as Arm;
+  /** Choose the lowest-cost one-to-one assignment; handedness is deliberately ignored. */
+  private trackHands(hands: readonly ExhibitionGestureHand[], bodyHands: readonly (ExhibitionGestureHand | null)[] | null,
+    body: BodyAnchor | null, aspect: number): [ExhibitionGestureHand | null, ExhibitionGestureHand | null] {
+    const candidates = hands.filter(hand => hand.landmarks.length === 21
+      && hand.landmarks.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))
+      && hand.landmarks[0].x >= 0 && hand.landmarks[0].x <= 1 && hand.landmarks[0].y >= 0 && hand.landmarks[0].y <= 1)
+      .sort((a, b) => a.landmarks[0].x - b.landmarks[0].x || a.landmarks[0].y - b.landmarks[0].y);
+    if (!candidates.length) return [null, null];
+    const continuingBody = !!body && !!this.associatedBody && sameBody(this.associatedBody, body);
+    // An erratic second detection must not steal a clearly continuing first
+    // hand merely because swapping both slots has a smaller total distance.
+    const certain = this.lastHands.map((previous, arm) => {
+      if (!previous) return null;
+      const nearest = candidates.map(hand => ({ hand, distance: distance(previous.landmarks[0], hand.landmarks[0], aspect) }))
+        .sort((a, b) => a.distance - b.distance);
+      const first = nearest[0];
+      const other = this.lastHands[1 - arm];
+      return first.distance <= 0.06 && (!nearest[1] || nearest[1].distance - first.distance >= 0.025)
+        && (!other || distance(other.landmarks[0], first.hand.landmarks[0], aspect) - first.distance >= 0.025)
+        ? first.hand : null;
+    });
+    const cost = (hand: ExhibitionGestureHand, arm: Arm) => {
+      const previous = this.lastHands[arm];
+      let score = previous ? distance(previous.landmarks[0], hand.landmarks[0], aspect)
+        + (sameHand(previous, hand, aspect) ? 0 : 0.12) : 0.6;
+      const bodyArm = bodyHands?.indexOf(hand) ?? -1;
+      if (bodyArm >= 0 && continuingBody && this.poseArms[arm] === bodyArm) score *= 0.1;
+      if (certain[arm] && hand !== certain[arm]) score += 2;
+      return score;
+    };
+    const assignments: { hands: [ExhibitionGestureHand | null, ExhibitionGestureHand | null]; score: number }[] = [];
+    if (candidates.length === 1) {
+      assignments.push({ hands: [candidates[0], null], score: cost(candidates[0], 0) },
+        { hands: [null, candidates[0]], score: cost(candidates[0], 1) });
+    } else {
+      for (const left of candidates) for (const right of candidates) if (left !== right) {
+        assignments.push({ hands: [left, right], score: cost(left, 0) + cost(right, 1) });
+      }
+    }
+    assignments.sort((a, b) => a.score - b.score);
+    const best = assignments[0];
+    // At a true crossing the two identities may be indistinguishable. Carry
+    // consumed state to both possible owners; never turn a held palm into new input.
+    if (assignments[1] && assignments[1].score - best.score < 0.015
+      && this.lastHands.every(Boolean) && (this.latch || this.palms.some(display => display.consumed))) {
+      for (const arm of [0, 1] as const) {
+        if (this.palms.some(display => display.consumed)) this.palms[arm].consumed = true;
+        if (this.latch && this.waveEnabled) this.guardBlockedWave(arm);
+      }
+    }
+    return best.hands;
+  }
+
+  /** Remap body wrists to stable hand slots, without granting body ownership to an unrelated hand. */
+  private poseForSlots(pose: ExhibitionGesturePose, matches: readonly (ExhibitionGestureHand | null)[],
+    bodyHands: readonly (ExhibitionGestureHand | null)[]): ExhibitionGesturePose {
+    const landmarks = [...pose.landmarks];
+    const owners = matches.map((hand, slot) => {
+      if (hand) {
+        const owner = bodyHands.indexOf(hand);
+        this.poseArms[slot] = owner >= 0 ? owner as Arm : null;
+      }
+      return this.poseArms[slot];
+    });
+    for (const slot of [0, 1] as const) {
+      const owner = owners[slot];
+      const duplicate = owner !== null && owners[1 - slot] === owner;
+      if (owner === null || duplicate) {
+        // Keep shoulder geometry but remove wrist authority for natural lowering.
+        landmarks[WRISTS[slot]] = { ...pose.landmarks[WRISTS[slot]], visibility: 0, presence: 0 };
+      } else {
+        landmarks[WRISTS[slot]] = pose.landmarks[WRISTS[owner]];
+        landmarks[SHOULDERS[slot]] = pose.landmarks[SHOULDERS[owner]];
+      }
+    }
+    return { ...pose, landmarks };
   }
 
   private clearWaves() { for (const wave of this.waves) wave.reset(); }

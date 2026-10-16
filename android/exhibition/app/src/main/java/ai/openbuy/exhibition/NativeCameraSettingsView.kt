@@ -31,6 +31,18 @@ internal open class NativeCameraSettingsView(context: Context) : LinearLayout(co
         setPadding(0, 0, 0, 0)
         setPopupBackgroundDrawable(MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1)))
     }
+    val captureSpinner = Spinner(context, Spinner.MODE_DROPDOWN).apply {
+        contentDescription = "采集分辨率"
+        background = null
+        setPadding(0, 0, 0, 0)
+        setPopupBackgroundDrawable(MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1)))
+    }
+    val xmaxRotationSpinner = Spinner(context, Spinner.MODE_DROPDOWN).apply {
+        contentDescription = "XMAX输入方向"
+        background = null
+        setPadding(0, 0, 0, 0)
+        setPopupBackgroundDrawable(MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1)))
+    }
     val feedback = MirrorSettingsStyle.label(context).apply { setPadding(0, dp(10), 0, dp(10)) }
     val previewContainer: FrameLayout = object : FrameLayout(context) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -61,12 +73,37 @@ internal open class NativeCameraSettingsView(context: Context) : LinearLayout(co
             }, LayoutParams(0, dp(48), 1f))
             addView(refresh, LayoutParams(dp(116), dp(48)).apply { leftMargin = dp(10) })
         }, LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        addView(MirrorSettingsStyle.label(context).apply { text = "采集分辨率" },
+            LayoutParams(-1, -2).apply { topMargin = dp(16); bottomMargin = dp(8) })
+        addView(FrameLayout(context).apply {
+            background = MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1))
+            addView(captureSpinner, FrameLayout.LayoutParams(-1, -1))
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.mirror_chevron_down)
+                imageTintList = android.content.res.ColorStateList.valueOf(MirrorSettingsStyle.SECONDARY)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                isClickable = false
+            }, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = dp(12) })
+        }, LayoutParams(-1, dp(48)))
         addView(MirrorSettingsStyle.label(context).apply { text = "画面方向" },
             LayoutParams(-1, -2).apply { topMargin = dp(16); bottomMargin = dp(8) })
         rotationSpinner.adapter = choicesAdapter(listOf("默认", "顺时针 90°", "旋转 180°", "逆时针 90°"))
         addView(FrameLayout(context).apply {
             background = MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1))
             addView(rotationSpinner, FrameLayout.LayoutParams(-1, -1))
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.mirror_chevron_down)
+                imageTintList = android.content.res.ColorStateList.valueOf(MirrorSettingsStyle.SECONDARY)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                isClickable = false
+            }, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = dp(12) })
+        }, LayoutParams(-1, dp(48)))
+        addView(MirrorSettingsStyle.label(context).apply { text = "XMAX输入方向" },
+            LayoutParams(-1, -2).apply { topMargin = dp(16); bottomMargin = dp(8) })
+        xmaxRotationSpinner.adapter = choicesAdapter(listOf("跟随摄像头", "0°", "顺时针 90°", "旋转 180°", "逆时针 90°"))
+        addView(FrameLayout(context).apply {
+            background = MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1))
+            addView(xmaxRotationSpinner, FrameLayout.LayoutParams(-1, -1))
             addView(ImageView(context).apply {
                 setImageResource(R.drawable.mirror_chevron_down)
                 imageTintList = android.content.res.ColorStateList.valueOf(MirrorSettingsStyle.SECONDARY)
@@ -82,14 +119,22 @@ internal open class NativeCameraSettingsView(context: Context) : LinearLayout(co
         spinner.adapter = choicesAdapter(labels)
     }
 
-    private fun choicesAdapter(labels: List<String>) =
+    fun setCaptureChoices(labels: List<String>, unavailablePosition: Int? = null) {
+        captureSpinner.adapter = choicesAdapter(labels, unavailablePosition)
+    }
+
+    private fun choicesAdapter(labels: List<String>, unavailablePosition: Int? = null) =
         object : ArrayAdapter<String>(context, android.R.layout.simple_spinner_item, labels) {
+            override fun areAllItemsEnabled(): Boolean = unavailablePosition == null
+            override fun isEnabled(position: Int): Boolean = position != unavailablePosition
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View = row(position, convertView, false)
             override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View = row(position, convertView, true)
 
             private fun row(position: Int, recycled: View?, dropdown: Boolean): TextView =
                 ((recycled as? TextView) ?: MirrorSettingsStyle.label(context, 14f, primary = true)).apply {
                     text = getItem(position)
+                    isEnabled = position != unavailablePosition
+                    setTextColor(if (position == unavailablePosition) MirrorSettingsStyle.SECONDARY else MirrorUiTheme.INK)
                     gravity = Gravity.CENTER_VERTICAL
                     setSingleLine(true)
                     ellipsize = TextUtils.TruncateAt.END

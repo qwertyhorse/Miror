@@ -2,6 +2,8 @@ package ai.xmax.sdk.media.camera
 
 import ai.xmax.sdk.CameraPosition
 import ai.xmax.sdk.RealtimeCameraDevice
+import ai.xmax.sdk.RealtimeCameraCaptureFormat
+import ai.xmax.sdk.RealtimeCameraCaptureInfo
 import ai.xmax.sdk.MediaServicing
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.RealtimeMediaStream
@@ -9,6 +11,8 @@ import ai.xmax.sdk.RealtimeVideoFormat
 import ai.xmax.sdk.RealtimeVideoTrack
 import ai.xmax.sdk.XmaxError
 import ai.xmax.sdk.XmaxErrorCode
+import ai.xmax.sdk.XmaxLogger
+import ai.xmax.sdk.foundation.rtc.CameraFrameGeometry
 import ai.xmax.sdk.cleanupAfterFailure
 import ai.xmax.sdk.cleanupResources
 import ai.xmax.sdk.foundation.permissions.PermissionManaging
@@ -42,6 +46,7 @@ internal class CameraController(
     private var activeTrack: RealtimeVideoTrack? = null
     private var storedUseMicrophone = false
     private var isMicrophoneCapturing = false
+    private var connectionFormatFrozen = false
 
     val currentTrack: RealtimeVideoTrack?
         get() = synchronized(stateLock) { activeTrack }
@@ -49,8 +54,45 @@ internal class CameraController(
     val useMicrophone: Boolean
         get() = synchronized(stateLock) { activeTrack != null && storedUseMicrophone }
 
+    fun captureInfo(): RealtimeCameraCaptureInfo? {
+        if (currentTrack == null) return null
+        return rtcManager.cameraFrameGeometry?.let {
+            RealtimeCameraCaptureInfo(it.width, it.height, it.rotationDegrees)
+        }
+    }
+
     fun setPreviewReadyListener(listener: RealtimeCameraPreviewReadyListener?) {
-        rtcManager.setCameraPreviewReadyListener(listener)
+        rtcManager.setCameraPreviewReadyListener(if (listener == null) null else RealtimeCameraPreviewReadyListener {
+            try {
+                synchronized(stateLock) {
+                    val track = activeTrack ?: return@RealtimeCameraPreviewReadyListener
+                    val geometry = rtcManager.cameraFrameGeometry ?: return@RealtimeCameraPreviewReadyListener
+                    if (!connectionFormatFrozen) applyGeometry(track, geometry)
+                }
+                listener.onCameraPreviewReady()
+            } catch (error: Throwable) { errorListener(XmaxError.from(error)) }
+        })
+    }
+
+    /** Resolve once more before encoding, then pin start/change_condition to that same format. */
+    suspend fun prepareConnectionVideoFormat(): RealtimeVideoFormat {
+        val track = currentTrack ?: throw XmaxError(XmaxErrorCode.INVALID_CONFIGURATION, "Camera capture is not active")
+        val geometry = rtcManager.awaitCameraFrameGeometry()
+        return synchronized(stateLock) {
+            if (activeTrack !== track) throw XmaxError(XmaxErrorCode.INVALID_CONFIGURATION, "Camera capture changed")
+            applyGeometry(track, geometry)
+            connectionFormatFrozen = true
+            val format = checkNotNull(track.videoFormat)
+            XmaxLogger.realtime.info(message = {
+                "Camera input: raw=${geometry.width}x${geometry.height}, rotation=${geometry.rotationDegrees}, model=${format.width}x${format.height}, fps=${format.fps}"
+            })
+            checkNotNull(track.videoFormat)
+        }
+    }
+
+    private fun applyGeometry(track: RealtimeVideoTrack, geometry: CameraFrameGeometry) {
+        val size = mediaService.resolveModelInputSize(IntSize(geometry.displayWidth, geometry.displayHeight))
+        track.updateVideoFormat(checkNotNull(track.videoFormat).copy(width = size.width, height = size.height).also(RealtimeVideoFormat::validate))
     }
 
     suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice> {
@@ -64,7 +106,9 @@ internal class CameraController(
         useMicrophone: Boolean = false,
         cameraDeviceId: String? = null,
         cameraRotationDegrees: Int = 0,
+        captureFormat: RealtimeCameraCaptureFormat? = null,
     ): RealtimeMediaStream {
+        captureFormat?.validate()
         if (cameraRotationDegrees !in listOf(0, 90, 180, 270)) {
             throw XmaxError(
                 code = XmaxErrorCode.INVALID_CONFIGURATION,
@@ -101,9 +145,9 @@ internal class CameraController(
             }
             rtcManager.setVideoCaptureRotation(cameraRotationDegrees)
             rtcManager.startVideoCapture(
-                width = resolvedFormat.width,
-                height = resolvedFormat.height,
-                frameRate = resolvedFormat.fps,
+                width = captureFormat?.width ?: resolvedFormat.width,
+                height = captureFormat?.height ?: resolvedFormat.height,
+                frameRate = captureFormat?.fps ?: resolvedFormat.fps,
             )
             VideoRenderRegistry.register(
                 track,
@@ -122,6 +166,7 @@ internal class CameraController(
             )
             synchronized(stateLock) {
                 activeTrack = track
+                connectionFormatFrozen = false
                 storedUseMicrophone = useMicrophone
             }
             return RealtimeMediaStream(StreamID.LOCAL.value, track)
@@ -156,6 +201,7 @@ internal class CameraController(
         val track = synchronized(stateLock) {
             activeTrack.also {
                 activeTrack = null
+                connectionFormatFrozen = false
                 storedUseMicrophone = false
             }
         }

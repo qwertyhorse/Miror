@@ -4,7 +4,7 @@ import ai.xmax.sdk.CameraPosition
 import java.io.IOException
 
 /** Records SDK calls only. No SDK, camera, RTC, or provider HTTP implementation is loaded. */
-class NativeXmaxController(private val events: MutableList<String>) {
+internal class NativeXmaxController(private val events: MutableList<String>) {
     var onFirstFrame: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var failConnect = false
@@ -13,17 +13,23 @@ class NativeXmaxController(private val events: MutableList<String>) {
     var connectedPosition: CameraPosition? = null
     var connectedCameraDeviceId: String? = null
     var connectedCameraRotationDegrees: Int? = null
+    var connectedXmaxRotationDegrees: Int? = null
+    var connectedCaptureSelection: NativeCameraCaptureSelection? = null
     var generatedPrompt: String? = null
     var generatedReference: String? = null
     suspend fun connect(token: String, region: String, model: String,
                         position: CameraPosition = CameraPosition.BACK, image: ByteArray? = null,
-                        cameraDeviceId: String? = null, cameraRotationDegrees: Int = 0): String {
+                        cameraDeviceId: String? = null, cameraRotationDegrees: Int = 0,
+                        captureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
+                        xmaxRotationDegrees: Int? = null): String {
         check(token == "tk-fixture" && region == "cn" && model == "x2.0")
         events.add("connect")
         connectedImage = image
         connectedPosition = position
         connectedCameraDeviceId = cameraDeviceId
         connectedCameraRotationDegrees = cameraRotationDegrees
+        connectedXmaxRotationDegrees = xmaxRotationDegrees
+        connectedCaptureSelection = captureSelection
         if (failConnect) throw IOException("连接失败 tk-fixture https://supplier-fixture.invalid/?secret=fixture")
         return "ums-fixture"
     }

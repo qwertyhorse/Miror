@@ -67,7 +67,7 @@ it('prepares only the independent XMAX image and binds its immutable asset to th
   const image = async (color: string, width: number, height: number) => (await sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer()).toString('base64');
   const uploaded = await f.post('/looks', { name: '双图参考验证', imageBase64: await image('#ff0000', 512, 768), referenceImageBase64: await image('#0000ff', 768, 512) });
   expect(uploaded.status).toBe(201);
-  const look = (await uploaded.json()).looks.at(-1);
+  const look = (await uploaded.json()).looks[0];
   const [id, role, assetId] = look.referenceImage.split('/assets/')[1].split('/');
   const expected = f.mirror.assetResource(id, role, assetId).data;
   expect(expected).not.toEqual(f.mirror.asset(look.id).data);

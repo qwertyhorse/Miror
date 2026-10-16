@@ -72,17 +72,124 @@ async function fixture(look?: ExhibitionLook) {
     await act(async () => { props(node => node.getReactProps()['aria-label'] === `${side}文件`).onChange({ target: { files: value ? [value] : [] } }); });
     await flushReact();
   };
+  const imageField = (side: ImageSide) => host!.find(node => node.getReactProps()['aria-label'] === `${side}文件`)!.parentNode!.parentNode!;
+  const drag = async (side: ImageSide, handler: 'onDragEnter' | 'onDragOver' | 'onDragLeave' | 'onDrop', files: File[] = [], types = ['Files']) => {
+    const field = imageField(side);
+    const event = { dataTransfer: { files, types, dropEffect: 'none' }, currentTarget: field, target: field.firstChild,
+      preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    await act(async () => { field.getReactProps()[handler](event); }); await flushReact();
+    return event;
+  };
   const button = (label: string) => props(node => node.nodeName === 'button' && (node.textContent === label || node.getReactProps()['aria-label'] === label));
   const saveButton = () => props(node => node.nodeName === 'button' && node.getReactProps().className === 'ex-button ex-primary');
   const submit = async () => { await act(async () => { props(node => node.nodeName === 'form').onSubmit({ preventDefault: vi.fn() }); }); await flushReact(); };
   const chooseMode = async (value: string) => { await act(async () => { props(node => node.getReactProps().type === 'radio' && node.getReactProps().value === value).onChange(); }); };
   const preview = (side: ImageSide) => host!.find(node => node.nodeName === 'img' && node.getReactProps().alt === side)?.getReactProps().src;
   await render();
-  return { state, controller, upload, updateLook, saved, close, render, choose, button, saveButton, submit, chooseMode, preview, revoke, images,
+  return { state, controller, upload, updateLook, saved, close, render, choose, imageField, drag, button, saveButton, submit, chooseMode, preview, revoke, images,
     set holdImages(value: boolean) { holdImages = value; } };
 }
 
 describe('dual-image material editor', () => {
+  it('uses a dropped display image for both upload images by default', async () => {
+    const f = await fixture();
+    const event = await f.drag('展示图', 'onDrop', [file('person.png')]);
+    expect(event.preventDefault).toHaveBeenCalledOnce(); expect(event.stopPropagation).toHaveBeenCalledOnce();
+    expect(f.preview('模型参考图')).toBe(f.preview('展示图'));
+    expect(host!.find(node => node.nodeName === 'img' && node.getReactProps().alt === '展示图')!.getReactProps().draggable).toBe(false);
+    await f.submit();
+    expect(f.upload).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ imageBase64: base64('person.png'), referenceImageBase64: base64('person.png') }));
+  });
+
+  it('keeps dropped display and reference images in their own upload fields', async () => {
+    const f = await fixture();
+    await f.drag('展示图', 'onDrop', [file('person.png')]);
+    await f.drag('模型参考图', 'onDrop', [file('outfit.png')]);
+    await f.drag('展示图', 'onDrop', [file('latest-person.png')]);
+    expect(f.preview('展示图')).toContain('latest-person.png'); expect(f.preview('模型参考图')).toContain('outfit.png');
+    await f.submit();
+    expect(f.upload).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ imageBase64: base64('latest-person.png'), referenceImageBase64: base64('outfit.png') }));
+  });
+
+  it.each([
+    ['wrong.gif', 8, '请选择 JPG'], ['huge.png', 10 * 1024 * 1024 + 1, '图片不能超过'], ['small.png', 8, '宽度需为'],
+  ])('validates dropped %s before allowing it to be saved', async (name, bytes, error) => {
+    const f = await fixture(dual);
+    await f.drag('模型参考图', 'onDrop', [new File([new Uint8Array(bytes)], name, { type: 'image/png' })]);
+    expect(f.preview('展示图')).toBe(appUrl(dual.image)); expect(f.saveButton().disabled).toBe(true);
+    expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toContain(error);
+    await f.submit(); expect(f.updateLook).not.toHaveBeenCalled();
+  });
+
+  it('rejects multiple dropped files without replacing a selection and recovers through the picker', async () => {
+    const f = await fixture(); await f.choose('展示图', file('person.png'));
+    const previous = f.preview('展示图');
+    const input = host!.find(node => node.getReactProps()['aria-label'] === '展示图文件')!;
+    Object.assign(input, { value: 'C:\\fakepath\\person.png' });
+    await f.drag('展示图', 'onDrop', [file('first.png'), file('second.png')]);
+    expect(f.preview('展示图')).toBe(previous); expect(f.preview('模型参考图')).toBe(previous);
+    expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toBe('每次请拖入一张图片。');
+    await f.choose('展示图', file('person.png'));
+    expect(host!.find(node => node.getReactProps().role === 'alert')).toBeUndefined();
+    expect(Reflect.get(input, 'value')).toBe('');
+    await f.submit();
+    expect(f.upload.mock.calls[0][0]).toMatchObject({ imageBase64: base64('person.png'), referenceImageBase64: base64('person.png') });
+  });
+
+  it('keeps the file drag highlight while crossing children and clears it after leaving or dropping', async () => {
+    const f = await fixture();
+    await f.drag('展示图', 'onDragEnter'); await f.drag('展示图', 'onDragEnter');
+    await f.drag('展示图', 'onDragLeave');
+    expect(f.imageField('展示图').getReactProps().className).toContain('is-dragging');
+    const over = await f.drag('展示图', 'onDragOver');
+    expect(over.preventDefault).toHaveBeenCalledOnce(); expect(over.stopPropagation).toHaveBeenCalledOnce();
+    expect(over.dataTransfer.dropEffect).toBe('copy');
+    await f.drag('展示图', 'onDragLeave');
+    expect(f.imageField('展示图').getReactProps().className).not.toContain('is-dragging');
+    await f.drag('展示图', 'onDragEnter'); await f.drag('展示图', 'onDrop', [file('person.png')]);
+    expect(f.imageField('展示图').getReactProps().className).not.toContain('is-dragging');
+  });
+
+  it.each(['pending', 'disconnected'] as const)('does not accept dropped images when %s', async reason => {
+    const f = await fixture(dual);
+    if (reason === 'pending') f.controller.pending = true;
+    else f.controller.connected = false;
+    await f.render();
+    await f.drag('展示图', 'onDragEnter');
+    expect(f.imageField('展示图').getReactProps().className).not.toContain('is-dragging');
+    const over = await f.drag('展示图', 'onDragOver');
+    expect(over.dataTransfer.dropEffect).toBe('none'); expect(over.preventDefault).toHaveBeenCalledOnce();
+    const dropped = await f.drag('展示图', 'onDrop', [file('replacement.png')]);
+    expect(dropped.preventDefault).toHaveBeenCalledOnce(); expect(dropped.stopPropagation).toHaveBeenCalledOnce();
+    expect(f.preview('展示图')).toBe(appUrl(dual.image)); expect(f.preview('模型参考图')).toBe(appUrl(dual.referenceImage!));
+  });
+
+  it('ignores non-file drags and empty drops without disturbing selected images', async () => {
+    const f = await fixture(dual);
+    for (const handler of ['onDragEnter', 'onDragOver', 'onDragLeave', 'onDrop'] as const) {
+      const event = await f.drag('展示图', handler, [], ['text/plain']);
+      expect(event.preventDefault).not.toHaveBeenCalled(); expect(event.stopPropagation).not.toHaveBeenCalled();
+    }
+    await f.drag('展示图', 'onDrop');
+    expect(f.imageField('展示图').getReactProps().className).not.toContain('is-dragging');
+    expect(f.preview('展示图')).toBe(appUrl(dual.image)); expect(f.preview('模型参考图')).toBe(appUrl(dual.referenceImage!));
+    expect(host!.find(node => node.getReactProps().role === 'alert')).toBeUndefined();
+  });
+
+  it('prevents dropped files from navigating away when they miss an image field', async () => {
+    await fixture();
+    const dialog = host!.find(node => node.nodeName === 'dialog')!.getReactProps();
+    for (const handler of ['onDragOver', 'onDrop']) {
+      const event = { dataTransfer: { types: ['Files'], files: [file('person.png')], dropEffect: 'copy' }, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      await act(async () => { dialog[handler](event); });
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      const textEvent = { dataTransfer: { types: ['text/plain'], files: [] }, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      await act(async () => { dialog[handler](textEvent); });
+      expect(textEvent.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(host!.find(node => node.nodeName === 'img' && node.getReactProps().alt === '展示图')).toBeUndefined();
+  });
+
   it('allows 432 × 768 images in both upload fields', async () => {
     const f = await fixture(); f.holdImages = true;
     await f.choose('展示图', file('cover.png'));
@@ -94,20 +201,60 @@ describe('dual-image material editor', () => {
     expect(f.upload).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ imageBase64: base64('cover.png'), referenceImageBase64: base64('reference.png') }));
   });
 
-  it('requires both distinct images for new uploads and sends their bytes in the right fields', async () => {
+  it('defaults the reference to the display image and uploads both from one selection', async () => {
     const f = await fixture();
     expect(document.activeElement.getReactProps()['aria-label']).toBe('展示图文件');
     expect(host!.find(node => node.getReactProps().type === 'text')).toBeUndefined();
-    await f.choose('展示图', file('person.png'));
     expect(f.saveButton().disabled).toBe(true);
     await f.submit(); expect(f.upload).not.toHaveBeenCalled();
-    await f.choose('模型参考图', file('white-outfit.png'));
-    expect(f.preview('展示图')).toContain('person.png'); expect(f.preview('模型参考图')).toContain('white-outfit.png');
+    await f.choose('展示图', file('person.png'));
+    expect(f.preview('模型参考图')).toBe(f.preview('展示图'));
+    expect(host!.find(node => node.getReactProps()['aria-label'] === '模型参考图文件')!.getReactProps().required).toBe(false);
     expect(f.saveButton().disabled).toBe(false);
     await f.submit();
     expect(f.upload).toHaveBeenCalledExactlyOnceWith({ name: 'person', description: '', mode: 'clothx', prompt: '',
-      imageBase64: base64('person.png'), referenceImageBase64: base64('white-outfit.png') });
+      imageBase64: base64('person.png'), referenceImageBase64: base64('person.png') });
     expect(f.saved).toHaveBeenCalledExactlyOnceWith('clothx');
+  });
+
+  it('follows display replacements until a separate reference is chosen', async () => {
+    const f = await fixture();
+    await f.choose('展示图', file('first-person.png'));
+    await f.choose('展示图', file('person.png'));
+    expect(f.preview('模型参考图')).toBe(f.preview('展示图'));
+    await f.choose('模型参考图', file('white-outfit.png'));
+    await f.choose('展示图', file('latest-person.png'));
+    expect(f.preview('展示图')).toContain('latest-person.png'); expect(f.preview('模型参考图')).toContain('white-outfit.png');
+    expect(f.saveButton().disabled).toBe(false);
+    await f.submit();
+    expect(f.upload).toHaveBeenCalledExactlyOnceWith({ name: 'latest-person', description: '', mode: 'clothx', prompt: '',
+      imageBase64: base64('latest-person.png'), referenceImageBase64: base64('white-outfit.png') });
+  });
+
+  it('keeps a reference selected before the display and can restore automatic following', async () => {
+    const f = await fixture();
+    await f.choose('模型参考图', file('white-outfit.png'));
+    await f.choose('展示图', file('person.png'));
+    expect(f.preview('展示图')).toContain('person.png'); expect(f.preview('模型参考图')).toContain('white-outfit.png');
+    await act(async () => f.button('模型参考图使用展示图').onClick());
+    expect(f.preview('模型参考图')).toBe(f.preview('展示图'));
+    await f.choose('展示图', file('latest-person.png'));
+    expect(f.preview('模型参考图')).toBe(f.preview('展示图'));
+    expect(f.saveButton().disabled).toBe(false);
+    await f.submit();
+    expect(f.upload.mock.calls[0][0]).toMatchObject({ imageBase64: base64('latest-person.png'), referenceImageBase64: base64('latest-person.png') });
+  });
+
+  it('clears the default reference with the display and rejects an invalid synchronized replacement', async () => {
+    const f = await fixture();
+    await f.choose('展示图', file('person.png'));
+    await act(async () => f.button('移除展示图').onClick());
+    expect(f.preview('展示图')).toBeUndefined(); expect(f.preview('模型参考图')).toBeUndefined();
+    expect(f.saveButton().disabled).toBe(true);
+    await f.choose('展示图', file('small.png')); await f.submit();
+    expect(f.saveButton().disabled).toBe(true); expect(f.upload).not.toHaveBeenCalled();
+    await f.choose('展示图', file('person.png'));
+    expect(f.saveButton().disabled).toBe(false);
   });
 
   it.each([
@@ -137,10 +284,10 @@ describe('dual-image material editor', () => {
     expect(f.updateLook).toHaveBeenCalledExactlyOnceWith('outfit', { name: '测试套装', description: '原有说明', mode: 'charx', prompt: '', expectedRevision: 7 });
   });
 
-  it('keeps a legacy reference preview fixed while only the display image is replaced', async () => {
+  it('continues following an existing material that shares the same display and reference URL', async () => {
     const f = await fixture(legacy); await f.choose('展示图', file('new-person.png'));
-    expect(f.preview('展示图')).toContain('new-person.png'); expect(f.preview('模型参考图')).toBe(appUrl(legacy.image));
-    await f.submit(); expect(f.updateLook.mock.calls[0][1]).not.toHaveProperty('referenceImageBase64');
+    expect(f.preview('展示图')).toContain('new-person.png'); expect(f.preview('模型参考图')).toBe(f.preview('展示图'));
+    await f.submit(); expect(f.updateLook.mock.calls[0][1]).toMatchObject({ imageBase64: base64('new-person.png'), referenceImageBase64: base64('new-person.png') });
   });
 
   it('keeps prompt-only Free materials image-free when editing their display picture', async () => {
@@ -151,13 +298,13 @@ describe('dual-image material editor', () => {
     expect(f.updateLook.mock.calls[0][1]).not.toHaveProperty('referenceImageBase64');
   });
 
-  it('requires both images for a new Free material as well as its prompt', async () => {
+  it('uses the display as the default reference for a new Free material while requiring its prompt', async () => {
     const f = await fixture(); await f.chooseMode('free');
-    await act(async () => host!.find(node => node.nodeName === 'textarea')!.getReactProps().onChange({ target: { value: '保留人物表情' } }));
     await f.choose('展示图', file('cover.png'));
     expect(f.saveButton().disabled).toBe(true); await f.submit(); expect(f.upload).not.toHaveBeenCalled();
-    await f.choose('模型参考图', file('outfit.png')); await f.submit();
-    expect(f.upload.mock.calls[0][0]).toMatchObject({ mode: 'free', prompt: '保留人物表情', imageBase64: base64('cover.png'), referenceImageBase64: base64('outfit.png') });
+    await act(async () => host!.find(node => node.nodeName === 'textarea')!.getReactProps().onChange({ target: { value: '保留人物表情' } }));
+    expect(f.saveButton().disabled).toBe(false); await f.submit();
+    expect(f.upload.mock.calls[0][0]).toMatchObject({ mode: 'free', prompt: '保留人物表情', imageBase64: base64('cover.png'), referenceImageBase64: base64('cover.png') });
   });
 
   it('upgrades a prompt-only Free material only when a reference image is supplied', async () => {
@@ -255,5 +402,30 @@ describe('dual-image material editor', () => {
     expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/references'))).toHaveLength(2);
     expect(host!.find(node => node.getReactProps()['aria-label'] === '测试套装：待准备')).toBeDefined();
     expect(host!.find(node => node.nodeName === 'img' && node.getReactProps().src === appUrl('/new-cover.webp'))).toBeDefined();
+  });
+
+  it('returns to the first card after uploading into the same mode from a scrolled library', async () => {
+    const f = await fixture(dual);
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ references: {} })));
+    f.controller.clearError = vi.fn();
+    const render = () => host!.render(createElement(WardrobePanel, { controller: f.controller }));
+    await render(); await flushReact();
+    const region = host!.find(node => node.getReactProps().className === 'ex-library-results')!;
+    Object.assign(region, { scrollTop: 600 });
+    f.upload.mockImplementation(async () => {
+      f.state.looks.unshift({ ...dual, id: 'new', name: '新素材' });
+      f.state.revision++;
+      return { lookId: 'new', index: 0 };
+    });
+    await act(async () => f.button('上传素材').onClick());
+    await f.choose('展示图', file('新素材.png')); await f.choose('模型参考图', file('reference.png'));
+    await f.submit();
+    expect(f.upload).toHaveBeenCalledOnce();
+    expect(host!.find(node => node.nodeName === 'dialog')).toBeUndefined();
+    expect(host!.find(node => node.getReactProps().className === 'ex-library-grid')!.childNodes.map(node => node.getReactProps()['data-material-id']))
+      .toEqual(['new', 'outfit']);
+    expect(Reflect.get(region, 'scrollTop')).toBe(0);
+    await render();
+    expect(Reflect.get(region, 'scrollTop')).toBe(0);
   });
 });

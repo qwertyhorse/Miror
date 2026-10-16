@@ -4,6 +4,8 @@ import ai.xmax.sdk.cleanupResources
 import ai.xmax.sdk.cleanupAfterFailure
 import ai.xmax.sdk.CameraPosition
 import ai.xmax.sdk.RealtimeCameraDevice
+import ai.xmax.sdk.RealtimeCameraCaptureFormat
+import ai.xmax.sdk.RealtimeCameraCaptureInfo
 import ai.xmax.sdk.RealtimeCameraPreviewReadyListener
 import ai.xmax.sdk.RealtimeMediaStream
 import ai.xmax.sdk.RealtimeReferenceVideo
@@ -54,6 +56,10 @@ internal class MediaController(
 
     override val currentVideoFormat: RealtimeVideoFormat?
         get() = currentTrack?.videoFormat
+
+    override suspend fun prepareConnectionVideoFormat(): RealtimeVideoFormat? =
+        if (synchronized(stateLock) { activeSource } == LocalMediaKind.CAMERA) cameraController.prepareConnectionVideoFormat()
+        else currentVideoFormat
 
     override val hasAudio: Boolean
         get() = when (synchronized(stateLock) { activeSource }) {
@@ -111,14 +117,19 @@ internal class MediaController(
         cameraController.enumerateCameraDevices()
     }
 
+    override fun cameraCaptureInfo(): RealtimeCameraCaptureInfo? =
+        if (synchronized(stateLock) { activeSource } == LocalMediaKind.CAMERA) cameraController.captureInfo()
+        else null
+
     override suspend fun createLocalCameraStream(
         videoFormat: RealtimeVideoFormat,
         position: CameraPosition,
         useMicrophone: Boolean,
         cameraDeviceId: String?,
         cameraRotationDegrees: Int,
+        captureFormat: RealtimeCameraCaptureFormat?,
     ): RealtimeMediaStream = createSource(LocalMediaKind.CAMERA) {
-        cameraController.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId, cameraRotationDegrees)
+        cameraController.createLocalCameraStream(videoFormat, position, useMicrophone, cameraDeviceId, cameraRotationDegrees, captureFormat)
     }
 
     override fun startMicrophoneCapture() {

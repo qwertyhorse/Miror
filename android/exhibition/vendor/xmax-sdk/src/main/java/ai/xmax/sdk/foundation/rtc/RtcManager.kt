@@ -32,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** 提供基于火山引擎的 RTC 生命周期和房间连接能力。 */
 internal class RtcManager(
@@ -61,6 +62,23 @@ internal class RtcManager(
     private var hasCapturedFirstLocalVideoFrame = false
     private var hasBoundLocalVideoCanvas = false
     private var hasReportedCameraPreviewReady = false
+    private var capturedCameraGeometry: CameraFrameGeometry? = null
+    private var cameraGeometryReady: CompletableDeferred<Unit>? = null
+
+    override val cameraFrameGeometry: CameraFrameGeometry?
+        get() = synchronized(stateLock) { capturedCameraGeometry.takeIf { isCameraVideoSourceActive } }
+
+    override suspend fun awaitCameraFrameGeometry(): CameraFrameGeometry {
+        val (version, ready) = synchronized(stateLock) {
+            cameraSourceVersion to (cameraGeometryReady ?: throw rtcError("Camera capture is not active"))
+        }
+        withTimeoutOrNull(10_000L) { ready.await(); true }
+            ?: throw rtcError("Camera capture did not produce a valid frame")
+        return synchronized(stateLock) {
+            capturedCameraGeometry?.takeIf { isCameraVideoSourceActive && cameraSourceVersion == version }
+                ?: throw rtcError("Camera capture changed while waiting for its frame")
+        }
+    }
     internal constructor(context: Context) : this(
         engineManager = RtcEngineManager.shared(context.applicationContext),
     )
@@ -93,9 +111,6 @@ internal class RtcManager(
                     synchronized(stateLock) { platformEventListener = bridge }
                     lease.engine.setEventListener(bridge)
                     lease.engine.setQualityListener(synchronized(stateLock) { qualityListener?.get() })
-                    lease.engine.setCameraPreviewReadyListener {
-                        if (isCurrentLease(lease)) markFirstLocalVideoFrameCaptured()
-                    }
                     checkResult("setLocalVideoSink", lease.engine.setLocalVideoFrameListener(
                         synchronized(stateLock) { localVideoFrameListener }))
                 }
@@ -146,6 +161,15 @@ internal class RtcManager(
             val engine = synchronized(stateLock) {
                 engineLease?.engine
             } ?: throw rtcError("RTC Engine is not initialized")
+            if (synchronized(stateLock) { isCameraVideoSourceActive }) {
+                // Use the orientation of the actual, corrected camera input. RTC applies
+                // rotation to pixels before encoding instead of requiring XMAX to interpret it.
+                val orientation = if (configuration.height >= configuration.width) CameraVideoOrientation.PORTRAIT
+                    else CameraVideoOrientation.LANDSCAPE
+                val orientationResult = try { engine.setVideoOrientation(orientation) }
+                    catch (error: Throwable) { throw rtcOperationError("setVideoOrientation", error) }
+                checkResult("setVideoOrientation", orientationResult)
+            }
             val result = try {
                 engine.configureVideoEncoding(configuration)
             } catch (error: Throwable) {
@@ -176,8 +200,11 @@ internal class RtcManager(
         synchronized(stateLock) {
             resetCameraPreviewReadinessLocked(cameraSourceActive = false)
         }
-        performEngineOperation("setVideoSourceType") {
-            it.useExternalVideoSource()
+        withEngine("setVideoSourceType") { engine ->
+            // Camera installation correction must never rotate a subsequent image/video source.
+            checkResult("setVideoOrientation", engine.setVideoOrientation(CameraVideoOrientation.ADAPTIVE))
+            checkResult("setVideoCaptureRotation", engine.setVideoCaptureRotation(0))
+            checkResult("setVideoSourceType", engine.useExternalVideoSource())
         }
     }
 
@@ -221,12 +248,21 @@ internal class RtcManager(
         frameRate: Int,
     ) {
         validateVideoDimensions(width, height, frameRate)
-        synchronized(stateLock) {
+        val sourceVersion = synchronized(stateLock) {
             resetCameraPreviewReadinessLocked(cameraSourceActive = true)
+            cameraSourceVersion
         }
         try {
-            performEngineOperation("startVideoCapture") {
-                it.startVideoCapture(width, height, frameRate)
+            withEngine("startVideoCapture") { engine ->
+                // Measure each new camera stream in its native shape before fixing its
+                // encoding orientation; otherwise a previous camera's mode biases geometry.
+                engine.setCameraPreviewReadyListener(null)
+                checkResult("setVideoOrientation", engine.setVideoOrientation(CameraVideoOrientation.ADAPTIVE))
+                val lease = synchronized(stateLock) { engineLease }
+                engine.setCameraPreviewReadyListener { geometry, firstFrame ->
+                    if (lease != null && isCurrentLease(lease)) recordCameraFrameGeometry(sourceVersion, geometry, firstFrame)
+                }
+                checkResult("startVideoCapture", engine.startVideoCapture(width, height, frameRate))
             }
         } catch (error: Throwable) {
             synchronized(stateLock) {
@@ -237,14 +273,10 @@ internal class RtcManager(
     }
 
     override fun stopVideoCapture() {
-        try {
-            performOptionalEngineOperation("stopVideoCapture") {
-                it.stopVideoCapture()
-            }
-        } finally {
-            synchronized(stateLock) {
-                resetCameraPreviewReadinessLocked(cameraSourceActive = false)
-            }
+        synchronized(stateLock) { resetCameraPreviewReadinessLocked(cameraSourceActive = false) }
+        performOptionalEngineOperation("stopVideoCapture") {
+            it.setCameraPreviewReadyListener(null)
+            it.stopVideoCapture()
         }
     }
 
@@ -704,11 +736,17 @@ internal class RtcManager(
         var framePending: Boolean = false,
     )
 
-    private fun markFirstLocalVideoFrameCaptured() {
+    private fun recordCameraFrameGeometry(sourceVersion: Long, geometry: CameraFrameGeometry, firstFrame: Boolean) {
+        if (!geometry.isValid) return
+        val ready: CompletableDeferred<Unit>?
         val shouldNotify = synchronized(stateLock) {
-            hasCapturedFirstLocalVideoFrame = true
+            if (!isCameraVideoSourceActive || cameraSourceVersion != sourceVersion) return
+            capturedCameraGeometry = geometry
+            hasCapturedFirstLocalVideoFrame = hasCapturedFirstLocalVideoFrame || firstFrame
+            ready = cameraGeometryReady.takeIf { hasCapturedFirstLocalVideoFrame }
             markCameraPreviewReadyReportedIfNeededLocked()
         }
+        ready?.complete(Unit)
         notifyCameraPreviewReady(shouldNotify)
     }
 
@@ -723,6 +761,9 @@ internal class RtcManager(
     private fun resetCameraPreviewReadinessLocked(cameraSourceActive: Boolean) {
         cameraSourceVersion++
         isCameraVideoSourceActive = cameraSourceActive
+        capturedCameraGeometry = null
+        cameraGeometryReady?.cancel()
+        cameraGeometryReady = if (cameraSourceActive) CompletableDeferred() else null
         hasCapturedFirstLocalVideoFrame = false
         hasReportedCameraPreviewReady = false
     }

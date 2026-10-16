@@ -48,15 +48,15 @@ describe('durable exhibition mirror registry', () => {
 
   it('migrates existing data and files to the default mirror, preserves originals and backup, and rewrites asset URLs once', async () => {
     const { directory, now } = fixture(); const old = new ExhibitionService(directory, { now });
-    const uploaded = await upload(old); const garment = uploaded.looks.at(-1)!;
+    const uploaded = await upload(old); const garment = uploaded.looks[0]!;
     old.command({ action: 'configure', enabledLookIds: [garment.id, 'evening'], autoReturnSeconds: 180 });
     old.command({ action: 'begin' }); old.command({ action: 'end' });
     const original = readFileSync(join(directory, 'exhibition.json'), 'utf8');
     const image = old.asset(garment.id).data;
     const manager = new ExhibitionMirrors(directory, { now }); const migrated = manager.getMirror().get();
     expect(migrated).toMatchObject({ mirrorId: 'default', selectedLookId: garment.id, enabledLookIds: [garment.id, 'evening'], sessionNumber: 1, settings: { autoReturnSeconds: 180 } });
-    expect(migrated.looks.at(-1)!.image).toBe(garment.image.replace('/api/exhibition/assets', '/api/exhibition/mirrors/default/assets'));
-    expect(migrated.looks.at(-1)!.referenceImage).toBe(garment.referenceImage!.replace('/api/exhibition/assets', '/api/exhibition/mirrors/default/assets'));
+    expect(migrated.looks[0]!.image).toBe(garment.image.replace('/api/exhibition/assets', '/api/exhibition/mirrors/default/assets'));
+    expect(migrated.looks[0]!.referenceImage).toBe(garment.referenceImage!.replace('/api/exhibition/assets', '/api/exhibition/mirrors/default/assets'));
     expect(manager.getMirror().asset(garment.id).data).toEqual(image);
     expect(readFileSync(join(directory, 'exhibition.json'), 'utf8')).toBe(original);
     const backups = readdirSync(directory).filter(name => name.startsWith('exhibition-before-mirrors-'));
@@ -179,7 +179,7 @@ describe('independent configuration snapshots', () => {
   it('copies garments into independently deletable files, remaps enabled order and leaves runtime/history with the target', async () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now });
     const source = manager.getMirror(); const second = manager.create({ name: '智能镜 2' }); const target = manager.getMirror(second.id);
-    const uploaded = await upload(source, '来源服装'); const original = uploaded.looks.at(-1)!;
+    const uploaded = await upload(source, '来源服装'); const original = uploaded.looks[0]!;
     source.command({ action: 'configure', enabledLookIds: [original.id, 'city'], autoReturnSeconds: 240 });
     source.command({ action: 'begin' });
     const oldTarget = target.get(); const sourceState = source.get();
@@ -220,7 +220,7 @@ describe('independent configuration snapshots', () => {
   it('rolls back copied files when the final state commit fails and preserves the previous target asset', async () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now });
     await upload(manager.getMirror()); const targetId = manager.create({ name: '目标' }).id; const target = manager.getMirror(targetId);
-    const old = await upload(target, '原目标素材'); const oldAsset = old.looks.at(-1)!; const bytes = target.asset(oldAsset.id).data;
+    const old = await upload(target, '原目标素材'); const oldAsset = old.looks[0]!; const bytes = target.asset(oldAsset.id).data;
     const targetDir = join(directory, 'exhibition-mirrors', targetId); const file = join(targetDir, 'exhibition.json');
     const originalFiles = readdirSync(join(targetDir, 'exhibition-assets'));
     renameSync(file, `${file}.saved`); mkdirSync(file);
@@ -233,7 +233,7 @@ describe('independent configuration snapshots', () => {
 
   it('removes already copied files when a later source asset is missing', async () => {
     const { directory, now } = fixture(); const manager = new ExhibitionMirrors(directory, { now }); const source = manager.getMirror();
-    await upload(source, '有效图片'); const state = await upload(source, '缺失图片'); const missing = state.looks.at(-1)!;
+    const state = await upload(source, '缺失图片'); const missing = state.looks[0]; await upload(source, '有效图片');
     rmSync(join(directory, 'exhibition-mirrors', 'default', 'exhibition-assets', `${missing.id}.reference.${missing.referenceImage!.split('/').at(-1)}.webp`));
     const targetId = manager.create({ name: '目标' }).id; const before = manager.getMirror(targetId).get();
     expect(() => copy(manager, targetId)).toThrow(code('EXHIBITION_ASSET_NOT_FOUND'));

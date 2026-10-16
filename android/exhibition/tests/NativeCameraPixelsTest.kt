@@ -27,6 +27,13 @@ fun main() {
         ByteBuffer.wrap(ByteArray(640 * 360) { 128.toByte() }), ByteBuffer.wrap(ByteArray(640 * 360) { 128.toByte() }),
         1280, 640, 640, 640)
     verify(reduced.width == 360 && reduced.height == 640 && reduced.argb.size == 360 * 640, "Rotation and reduction bound allocation before conversion")
+    for (edge in listOf(480, 720, 960)) {
+        val configured = NativeCameraPixels.convert(1280, 720, 90, ByteBuffer.wrap(ByteArray(1280 * 720) { 16 }),
+            ByteBuffer.wrap(ByteArray(640 * 360) { 128.toByte() }), ByteBuffer.wrap(ByteArray(640 * 360) { 128.toByte() }),
+            1280, 640, 640, edge)
+        verify(configured.width == edge * 9 / 16 && configured.height == edge,
+            "Linux $edge samples retain the configured resolution through YUV conversion")
+    }
     val odd = NativeCameraPixels.convert(3, 1, 0, gray(16, 16, 235), gray(128, 128), gray(128, 128), 3, 2, 2, 640)
     verify(odd.argb.last() == 0xffffffff.toInt(), "Odd dimensions use rounded-up chroma planes")
     for (rotation in listOf(0, 90, 180, 270)) {

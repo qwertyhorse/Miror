@@ -95,7 +95,12 @@ class UiPreviewActivity : Activity() {
         kiosk.setPrimaryIcon(presentation.stopIcon, presentation.recoverIcon)
         kiosk.primary.isEnabled = scenario !in setOf("waiting", "error", "stopping", "pairing", "empty")
         kiosk.primary.alpha = if (kiosk.primary.isEnabled) 1f else .65f
-        kiosk.primary.visibility = if (scenario == "pairing") View.GONE else View.VISIBLE
+        kiosk.primary.visibility = if (scenario == "pairing" || presentation.showFooterStop) View.GONE else View.VISIBLE
+        kiosk.stopButton.visibility = if (scenario != "pairing" && presentation.showFooterStop) View.VISIBLE else View.GONE
+        kiosk.stopButton.contentDescription = presentation.primaryText
+        kiosk.stopButton.isEnabled = kiosk.primary.isEnabled
+        kiosk.gestures.text = "手势已开启"
+        kiosk.gestures.visibility = if (active) View.VISIBLE else View.GONE
         kiosk.continueButton.visibility = if (presentation.showContinue) View.VISIBLE else View.GONE
         kiosk.home.visibility = if (active || recovering) View.VISIBLE else View.GONE
         kiosk.status.text = when (scenario) {
@@ -139,11 +144,22 @@ class UiPreviewActivity : Activity() {
         content.cameraContainer.addView(cameraView)
         val unavailable = scenario in setOf("settings-no-camera", "camera-error")
         val scanning = scenario == "camera-scanning"
+        val capture4k = NativeCameraCaptureSelection(NativeCameraSize(3840, 2160))
+        val capture1080p = NativeCameraCaptureSelection(NativeCameraSize(1920, 1080))
+        val selected4k = scenario in setOf("settings-local", "camera-remote")
         cameraView.setChoices(if (unavailable) listOf("自动选择") else listOf("自动选择", "USB 摄像头", "内置前置摄像头"))
+        cameraView.setCaptureChoices(when {
+            unavailable -> listOf(NativeCameraCaptureSelection.Automatic.label, "${capture4k.label}（不可用）")
+            scanning -> listOf(NativeCameraCaptureSelection.Automatic.label)
+            else -> listOf(NativeCameraCaptureSelection.Automatic.label, capture4k.label, capture1080p.label)
+        }, unavailablePosition = if (unavailable) 1 else null)
+        cameraView.captureSpinner.setSelection(if (unavailable || selected4k) 1 else 0)
+        cameraView.xmaxRotationSpinner.setSelection(if (scenario == "camera-remote") 2 else 0)
         cameraView.showMessage(when {
             unavailable -> "未检测到摄像头，请连接后重新检测"
             scanning -> "检测中…"
-            else -> "已连接 · USB 摄像头"
+            selected4k -> "实际 3840×2160"
+            else -> "实际 1920×1080"
         }, unavailable)
         if (!unavailable && !scanning) {
             cameraView.previewContainer.addView(ImageView(this).apply {
@@ -193,6 +209,8 @@ class UiPreviewActivity : Activity() {
             .put("screen", bounds(kiosk)).put("surface", bounds(kiosk.surface))
             .put("stage", bounds(kiosk.stage)).put("logo", bounds(kiosk.logo))
             .put("primary", bounds(kiosk.primary).put("text", kiosk.primary.text).put("alpha", kiosk.primary.alpha))
+            .put("stop", bounds(kiosk.stopButton).put("label", kiosk.stopButton.contentDescription))
+            .put("gestures", bounds(kiosk.gestures))
             .put("continue", bounds(kiosk.continueButton)).put("drawerOpen", kiosk.drawer.isOpen)
             .put("dialogVisible", dialog?.isShowing == true).put("dialogResult", dialogResult ?: JSONObject.NULL)
         if (dialog?.isShowing == true) settings?.let { content ->
@@ -200,6 +218,21 @@ class UiPreviewActivity : Activity() {
                 .put("backendIp", bounds(content.backendIp)).put("save", bounds(content.saveButton))
                 .put("cancel", bounds(content.cancelButton))
                 .put("cameraPreview", bounds(camera!!.previewContainer))
+                .put("captureResolution", bounds(camera!!.captureSpinner)
+                    .put("selected", camera!!.captureSpinner.selectedItem)
+                    .put("options", JSONArray().apply {
+                        val spinner = camera!!.captureSpinner
+                        for (index in 0 until spinner.count) put(JSONObject()
+                            .put("label", spinner.getItemAtPosition(index))
+                            .put("enabled", (spinner.adapter as? android.widget.ListAdapter)?.isEnabled(index) ?: true))
+                    }))
+                .put("xmaxInputDirection", bounds(camera!!.xmaxRotationSpinner)
+                    .put("selected", camera!!.xmaxRotationSpinner.selectedItem)
+                    .put("options", JSONArray().apply {
+                        val spinner = camera!!.xmaxRotationSpinner
+                        for (index in 0 until spinner.count) put(spinner.getItemAtPosition(index))
+                    }))
+                .put("cameraFeedback", camera!!.feedback.text)
         }
         fixtureDirectory.mkdirs()
         File(fixtureDirectory, "snapshot.json").writeText(result.toString(2))

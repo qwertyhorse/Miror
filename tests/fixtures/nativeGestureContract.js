@@ -7,6 +7,16 @@ export function runNativeGestureContract(createRuntime) {
     [.06, -.17], [.065, -.29], [.07, -.37], [.075, -.44],
     [.115, -.13], [.13, -.23], [.14, -.3], [.15, -.36]];
   const hand = (x = .30) => ({ handedness: 'Left', landmarks: palm.map(point => ({ x: x + point[0] * .5, y: .42 + point[1] * .5 })) });
+  const fist = x => {
+    const value = hand(x);
+    for (const start of [5, 9, 13, 17]) {
+      const base = value.landmarks[start];
+      value.landmarks[start + 2] = { x: base.x + .01, y: base.y - .035 };
+      value.landmarks[start + 3] = { x: base.x + .01, y: base.y + .015 };
+    }
+    return value;
+  };
+  const twoHands = time => time % 200 === 0 ? [hand(.7), hand(.3)] : [hand(.3), hand(.7)];
   const frame = (runtime, timestamp, hands = [hand()]) => runtime.push({ timestamp, hands, poses: [], aspectRatio: 1 });
   const run = (runtime, start, end, hands = () => [hand()]) => {
     const events = [];
@@ -27,6 +37,46 @@ export function runNativeGestureContract(createRuntime) {
     const confirmed = frame(runtime, 310);
     equal([confirmed.operatorStatus, confirmed.event], ['locked', 'open_palm'], 'same-frame confirmation');
     equal(run(runtime, 410, 4010), [], 'held palm must fire once');
+  });
+  test('either of two hands can confirm beside a closed hand without a body pose', () => {
+    for (const openIndex of [0, 1]) {
+      const runtime = createRuntime(); runtime.configure({ gestures: ['open_palm'] });
+      const hands = time => {
+        const values = [.3, .7].map((x, index) => index === openIndex ? hand(x) : fist(x));
+        return time % 200 === 0 ? values.reverse() : values;
+      };
+      equal(run(runtime, 0, 1800, hands), [{ at: 300, event: 'open_palm' }], 'either qualifying hand, held once');
+      equal(frame(runtime, 1900, hands(1900)).ambiguityReason, null, 'two hands are accepted');
+    }
+  });
+  test('two simultaneous palms share one action and holding or swapping order cannot repeat it', () => {
+    const runtime = createRuntime(); runtime.configure({ gestures: ['open_palm'] });
+    equal(run(runtime, 0, 1600, twoHands), [{ at: 300, event: 'open_palm' }], 'simultaneous palms');
+    run(runtime, 1700, 2400, () => []);
+    equal(run(runtime, 2500, 3600, twoHands), [{ at: 2800, event: 'open_palm' }], 'fresh two-palm presentation');
+  });
+  test('sustained no-hand observations reset with a frozen visible body, while a brief gap cannot repeat', () => {
+    const runtime = createRuntime(); runtime.configure({ gestures: ['open_palm'] });
+    const landmarks = Array.from({ length: 33 }, () => ({ x: .5, y: .5, visibility: .99 }));
+    for (const [index, x, y] of [[11, .35, .55], [12, .65, .55], [13, .3, .61], [14, .7, .61],
+      [15, .3, .42], [16, .7, .42], [23, .38, .85], [24, .62, .85]]) landmarks[index] = { x, y, visibility: .99 };
+    const events = [];
+    for (let at = 0; at <= 3700; at += 100) {
+      const absent = (at >= 1100 && at <= 1200) || (at >= 2000 && at <= 2500);
+      const result = runtime.push({ timestamp: at, hands: absent ? [] : twoHands(at), poses: [{ landmarks }], aspectRatio: 1 });
+      if (result.event) events.push({ at, event: result.event });
+      if (at === 2500) equal(result.needsRelease, false, '500 ms without hands resets even when raised body wrists stay visible');
+    }
+    equal(events, [{ at: 300, event: 'open_palm' }, { at: 2900, event: 'open_palm' }], 'only a sustained no-hand interval permits a new presentation');
+  });
+  test('two busy palms are discarded together and neither is replayed on resume', () => {
+    const runtime = createRuntime(); runtime.configure({ gestures: ['open_palm'] });
+    runtime.setBlocked(true);
+    equal(run(runtime, 0, 200, twoHands), [], 'two busy palms');
+    runtime.setBlocked(false);
+    equal(run(runtime, 300, 1500, twoHands), [], 'both held palms after completion');
+    run(runtime, 1600, 2300, () => []);
+    equal(run(runtime, 2400, 3500, twoHands), [{ at: 2700, event: 'open_palm' }], 'new two-palm action after release');
   });
   test('brief busy palm is consumed until release, never replayed', () => {
     const runtime = createRuntime(); runtime.configure({ gestures: ['open_palm'] });

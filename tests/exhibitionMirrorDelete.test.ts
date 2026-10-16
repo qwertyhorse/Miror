@@ -52,7 +52,7 @@ async function upload(mirror: ExhibitionService, bytes: string) {
 
 describe('recoverable smart mirror deletion', () => {
   it('removes only the selected registry entry, preserves assets and metadata, and survives restart', async () => {
-    const f = await fixture(); const state = await upload(f.mirror, await image()); const look = state.looks.at(-1)!;
+    const f = await fixture(); const state = await upload(f.mirror, await image()); const look = state.looks[0]!;
     const asset = f.mirror.asset(look.id).data; const beforeDefault = f.mirrors.getMirror().get();
     const durableState = f.store.mirrorState(f.id); const events = f.store.mirrorEvents(f.id);
     const result = await f.request('', { expectedRevision: state.revision }, 'DELETE');

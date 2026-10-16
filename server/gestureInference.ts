@@ -10,7 +10,7 @@ export interface GestureInferenceSettings {
 }
 export interface GestureInferenceResult {
   hands: Array<{ handedness: string; landmarks: Array<{ x: number; y: number; z: number }> }>;
-  poses: [];
+  poses: Array<{ landmarks: Array<{ x: number; y: number; z: number; visibility: number }> }>;
   width: number;
   height: number;
   inferenceMs: number;
@@ -26,6 +26,7 @@ export interface GestureInferenceOptions {
   pythonPath?: string;
   workerPath?: string;
   modelPath?: string;
+  poseModelPath?: string;
   startupTimeoutMs?: number;
   inferenceTimeoutMs?: number;
   closeGraceMs?: number;
@@ -38,9 +39,12 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 function validResult(value: unknown): value is GestureInferenceResult {
   if (!value || typeof value !== 'object') return false;
   const item = value as GestureInferenceResult;
-  return Number.isInteger(item.width) && item.width > 0 && item.width <= 640 &&
-    Number.isInteger(item.height) && item.height > 0 && item.height <= 640 &&
-    finite(item.inferenceMs) && item.inferenceMs >= 0 && Array.isArray(item.poses) && item.poses.length === 0 &&
+  return Number.isInteger(item.width) && item.width > 0 && item.width <= 960 &&
+    Number.isInteger(item.height) && item.height > 0 && item.height <= 960 &&
+    finite(item.inferenceMs) && item.inferenceMs >= 0 &&
+    Array.isArray(item.poses) && item.poses.length <= 2 && item.poses.every(pose =>
+      pose && Array.isArray(pose.landmarks) && pose.landmarks.length === 33 &&
+      pose.landmarks.every(point => point && finite(point.x) && finite(point.y) && finite(point.z) && finite(point.visibility))) &&
     Array.isArray(item.hands) && item.hands.length <= 2 && item.hands.every(hand =>
       hand && ['Left', 'Right'].includes(hand.handedness) && Array.isArray(hand.landmarks) &&
       hand.landmarks.length === 21 && hand.landmarks.every(point => point &&
@@ -52,7 +56,7 @@ function timeout(value: number | undefined, fallback: number) {
   return value;
 }
 
-/** One terminal owns one warm VIDEO model. Frames arriving during inference are rejected, never queued. */
+/** One terminal owns warm pose and hand VIDEO models. Overlapping frames are rejected, never queued. */
 export async function createGestureInference(options: GestureInferenceOptions = {}): Promise<GestureInference> {
   const startupTimeoutMs = timeout(options.startupTimeoutMs, 15_000);
   const inferenceTimeoutMs = timeout(options.inferenceTimeoutMs, 5_000);
@@ -60,9 +64,10 @@ export async function createGestureInference(options: GestureInferenceOptions = 
   const python = options.pythonPath ?? process.env.MIROR_GESTURE_PYTHON ?? resolve(homedir(), '.local/share/miror/gesture-runtime/bin/python');
   const worker = options.workerPath ?? resolve(projectRoot, 'scripts/gesture-worker.py');
   const model = options.modelPath ?? process.env.MIROR_GESTURE_MODEL ?? resolve(projectRoot, 'public/assets/exhibition-gestures/hand_landmarker.task');
+  const poseModel = options.poseModelPath ?? process.env.MIROR_GESTURE_POSE_MODEL ?? resolve(projectRoot, 'public/assets/body-scan/pose_landmarker_full.task');
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(python, ['-u', worker, '--model', model], {
+    child = spawn(python, ['-u', worker, '--model', model, '--pose-model', poseModel], {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1',
         GLOG_minloglevel: '2', TF_CPP_MIN_LOG_LEVEL: '2', OMP_NUM_THREADS: '2', OPENBLAS_NUM_THREADS: '1' },
@@ -140,7 +145,7 @@ export async function createGestureInference(options: GestureInferenceOptions = 
       if (reply.type === 'result' && validResult(reply.result)) {
         pending = undefined; clearTimeout(active.timer); active.resolve(reply.result);
       } else if (reply.type === 'error' && reply.code === 'INVALID_IMAGE') {
-        rejectPending(error('INVALID_IMAGE', 'Only complete JPEG frames of at most 640 × 640 are supported.'));
+        rejectPending(error('INVALID_IMAGE', 'Only complete JPEG frames of at most 960 × 960 are supported.'));
       } else {
         fail(error(reply.type === 'error' ? 'INFERENCE_FAILED' : 'RUNTIME_PROTOCOL', 'Gesture inference failed.')); return;
       }

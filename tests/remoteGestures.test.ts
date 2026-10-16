@@ -4,6 +4,7 @@ import type { GestureInference, GestureInferenceResult } from '../server/gesture
 import { resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
 import type { RemoteGestureSnapshot } from '../shared/remoteGestures.ts';
 import { createNativeGestureRuntime } from '../src/exhibition/nativeGestureRuntime.ts';
+import { ExhibitionMirrorGestureDetector } from '../src/exhibition/mirrorGestureDetector.ts';
 
 const settings = resolveExhibitionGestureSettings();
 const palm = [[0, 0], [-.04, -.05], [-.09, -.09], [-.12, -.14], [-.16, -.17],
@@ -12,10 +13,49 @@ const palm = [[0, 0], [-.04, -.05], [-.09, -.09], [-.12, -.14], [-.16, -.17],
   [.06, -.17], [.065, -.29], [.07, -.37], [.075, -.44],
   [.115, -.13], [.13, -.23], [.14, -.3], [.15, -.36]];
 type Hands = GestureInferenceResult['hands'];
-function hand(x = .30): Hands[number] {
-  return { handedness: 'Left', landmarks: palm.map(point => ({ x: x + point[0] * .5, y: .42 + point[1] * .5, z: 0 })) };
+type Frame = Pick<GestureInferenceResult, 'hands' | 'poses'>;
+function hand(x = .30, y = .42, handedness = 'Left'): Hands[number] {
+  return { handedness, landmarks: palm.map(point => ({ x: x + point[0] * .5, y: y + point[1] * .5, z: 0 })) };
+}
+function fist(x = .30): Hands[number] {
+  const value = hand(x);
+  for (const start of [5, 9, 13, 17]) {
+    const base = value.landmarks[start];
+    value.landmarks[start + 2] = { x: base.x + .01, y: base.y - .035, z: 0 };
+    value.landmarks[start + 3] = { x: base.x + .01, y: base.y + .015, z: 0 };
+  }
+  return value;
 }
 const result = (hands: Hands = []): GestureInferenceResult => ({ hands, poses: [], width: 480, height: 480, inferenceMs: 12 });
+
+// The same frontal body proportions used in exhibitionMirrorGestureDetector.test.ts.
+function pose(hands: Hands = [hand(), hand(.70, .42, 'Right')], centerX = .5): Frame['poses'][number] {
+  const offset = centerX - .5;
+  const landmarks = Array.from({ length: 33 }, () => ({ x: centerX, y: .5, z: 0, visibility: .99 }));
+  const set = (index: number, x: number, y: number) => { landmarks[index] = { x: x + offset, y, z: 0, visibility: .99 }; };
+  set(0, .5, .36); set(2, .46, .34); set(5, .54, .34); set(7, .42, .36); set(8, .58, .36);
+  set(11, .35, .55); set(12, .65, .55); set(13, .30, .61); set(14, .70, .61);
+  set(15, hands[0].landmarks[0].x, hands[0].landmarks[0].y);
+  set(16, hands[1]?.landmarks[0].x ?? .70, hands[1]?.landmarks[0].y ?? .42);
+  set(23, .38, .85); set(24, .62, .85);
+  return { landmarks };
+}
+function twoPalms(y = .42, reverse = false): Frame {
+  const hands = [hand(.30, y), hand(.70, y, 'Right')];
+  return { poses: [pose(hands)], hands: reverse ? hands.reverse() : hands };
+}
+function mirrored(frame: Frame): Frame {
+  const points = <T extends { x: number }>(landmarks: T[]) => landmarks.map(point => ({ ...point, x: 1 - point.x }));
+  return { hands: frame.hands.map(hand => ({ ...hand, landmarks: points(hand.landmarks) })),
+    poses: frame.poses.map(pose => ({ ...pose, landmarks: points(pose.landmarks) })) };
+}
+function expectWebState(remote: RemoteGestureSnapshot, web: ExhibitionMirrorGestureDetector, event: string | null) {
+  expect(remote).toMatchObject({ event,
+    operatorStatus: web.operatorStatus, controlSource: web.controlSource, ambiguityReason: web.ambiguityReason,
+    handDetected: web.handDetected, handRaised: web.handRaised, armed: web.armed, needsRelease: web.needsRelease,
+    confirmationState: web.confirmationState, palmHoldMs: web.palmHoldMs,
+    rawHandCount: web.rawHandCount, matchedHandCount: web.matchedHandCount });
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: Error) => void;
@@ -32,7 +72,11 @@ class FakeInference implements GestureInference {
     this.maximumActive = Math.max(this.maximumActive, this.active);
     const pending = this.next;
     this.next = null;
-    try { return pending ? await pending : result(JSON.parse(jpeg.toString()) as Hands); }
+    try {
+      if (pending) return await pending;
+      const frame = JSON.parse(jpeg.toString()) as Hands | Frame;
+      return Array.isArray(frame) ? result(frame) : { ...result(), ...frame };
+    }
     finally { this.active--; }
   });
   close = vi.fn(async () => {});
@@ -60,7 +104,7 @@ function fixture(options: Partial<ConstructorParameters<typeof RemoteGestureCoor
           blocked = value;
           return coordinator.control(state.sessionId, { epoch: ++epoch, blocked, reset });
         },
-        frame(timestamp: number, hands: Hands = [hand()], serverBlocked = false, guard?: () => boolean) {
+        frame(timestamp: number, hands: Hands | Frame = [hand()], serverBlocked = false, guard?: () => boolean) {
           return coordinator.frame(state.sessionId, { epoch, seq: ++seq, timestamp, blocked },
             Buffer.from(JSON.stringify(hands)), settings, serverBlocked, guard);
         },
@@ -142,6 +186,170 @@ describe('remote gesture sessions use the real V1.1 detector', () => {
     expect(remoteEvents).toHaveLength(2);
   });
 
+  it.each([0, 1])('lets hand %i confirm beside a closed hand without a pose in Linux and the Android runtime', async openIndex => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const native = createNativeGestureRuntime(); native.configure(settings);
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 2100; timestamp += 100) {
+      const hands = [.3, .7].map((x, index) => index === openIndex ? hand(x) : fist(x));
+      if (timestamp % 200 === 0) hands.reverse();
+      const remote = await s.frame(timestamp, hands);
+      const local = native.push({ timestamp, ...mirrored({ hands, poses: [] }), aspectRatio: 1 });
+      expect(remote).toMatchObject(local);
+      expect(remote.ambiguityReason).toBeNull();
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }]);
+  });
+
+  it('accepts two palms once per presentation in both runtimes regardless of hand array order', async () => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const native = createNativeGestureRuntime(); native.configure(settings);
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 3500; timestamp += 100) {
+      const hands = timestamp >= 1500 && timestamp <= 2200 ? [] : [hand(.3), hand(.7)];
+      if (timestamp % 200 === 0) hands.reverse();
+      const remote = await s.frame(timestamp, hands);
+      const local = native.push({ timestamp, ...mirrored({ hands, poses: [] }), aspectRatio: 1 });
+      expect(remote).toMatchObject(local);
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }, { timestamp: 2600, event: 'open_palm' }]);
+  });
+
+  it('resets after sustained no-hand observations even while a frozen body remains, without repeating on a brief gap', async () => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const native = createNativeGestureRuntime(); native.configure(settings);
+    const frozenPose = pose();
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 4300; timestamp += 100) {
+      const absent = (timestamp >= 1700 && timestamp <= 1800) || (timestamp >= 2600 && timestamp <= 3100);
+      const input: Frame = { hands: absent ? [] : twoPalms(.42, timestamp % 200 === 0).hands, poses: [frozenPose] };
+      const remote = await s.frame(timestamp, input);
+      const local = native.push({ timestamp, ...mirrored(input), aspectRatio: 1 });
+      expect(remote).toMatchObject(local);
+      if (timestamp === 3100) expect(remote.needsRelease).toBe(false);
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }, { timestamp: 3500, event: 'open_palm' }]);
+  });
+
+  it('does not replay either busy hand on resume in Linux or the Android runtime', async () => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const native = createNativeGestureRuntime(); native.configure(settings);
+    s.control(true); native.setBlocked(true);
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 3500; timestamp += 100) {
+      if (timestamp === 900) { s.control(false); native.setBlocked(false); }
+      const hands = timestamp >= 1800 && timestamp <= 2400 ? [] : [hand(.3), hand(.7)];
+      if (timestamp % 200 === 0) hands.reverse();
+      const remote = await s.frame(timestamp, hands);
+      const local = native.push({ timestamp, ...mirrored({ hands, poses: [] }), aspectRatio: 1 });
+      expect(remote).toMatchObject(local);
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 2800, event: 'open_palm' }]);
+  });
+
+  it('mirrors both hands and all pose landmarks exactly once before the shared detector', async () => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const input = twoPalms();
+    // Avoid symmetric coordinates hiding an extra or omitted mirror operation.
+    for (const value of [...input.hands, ...input.poses]) {
+      value.landmarks.forEach(point => { point.x -= .08; point.z = -.125; });
+    }
+    input.poses[0].landmarks[15].visibility = .83;
+    const original = structuredClone(input);
+    const update = vi.spyOn(ExhibitionMirrorGestureDetector.prototype, 'update');
+    try {
+      await s.frame(600, input);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(mirrored(original).poses, mirrored(original).hands, 600, 1);
+      expect(input).toEqual(original);
+    } finally { update.mockRestore(); }
+  });
+
+  it('matches every web state for one person with two palms, continuous holding, and lowering before re-raising', async () => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const web = new ExhibitionMirrorGestureDetector({ ...settings, allowRaise: false });
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 4000; timestamp += 100) {
+      const frame = twoPalms(timestamp >= 1900 && timestamp <= 2500 ? .80 : .42, timestamp % 200 === 0);
+      const remote = await s.frame(timestamp, frame);
+      const local = mirrored(frame);
+      expectWebState(remote, web, web.update(local.poses, local.hands, timestamp, 1));
+      if (timestamp >= 1000) expect(remote).toMatchObject({ operatorStatus: 'locked', controlSource: 'body',
+        ambiguityReason: null, rawHandCount: 2, matchedHandCount: 2 });
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    // Hand confirmation proceeds while the optional body association is still settling.
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }, { timestamp: 2900, event: 'open_palm' }]);
+  });
+
+  it.each([1, 2])('accepts %i qualifying hand(s) even when multiple people are visible, matching the web', async count => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const web = new ExhibitionMirrorGestureDetector({ ...settings, allowRaise: false });
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 2000; timestamp += 100) {
+      const frame = twoPalms();
+      frame.poses.push(pose(undefined, .64));
+      if (timestamp % 200 === 0) frame.poses.reverse();
+      frame.hands = frame.hands.slice(0, count);
+      if (timestamp % 200 === 0) frame.hands.reverse();
+      const remote = await s.frame(timestamp, frame);
+      const local = mirrored(frame);
+      expectWebState(remote, web, web.update(local.poses, local.hands, timestamp, 1));
+      expect(remote.ambiguityReason).toBeNull();
+      if (timestamp >= 800) expect(remote.operatorStatus).toBe('locked');
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }]);
+  });
+
+  it('discards a two-palm busy re-raise just like the web and never executes it on resume', async () => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const web = new ExhibitionMirrorGestureDetector({ ...settings, allowRaise: false });
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 5500; timestamp += 100) {
+      if (timestamp === 1700 || timestamp === 2700) {
+        const blocked = timestamp === 1700;
+        s.control(blocked);
+        web.setBlocked(blocked);
+      }
+      const lowering = (timestamp >= 1700 && timestamp <= 2400) || (timestamp >= 3800 && timestamp <= 4600);
+      const frame = twoPalms(lowering ? .80 : .42, timestamp % 200 === 0);
+      const remote = await s.frame(timestamp, frame);
+      const local = mirrored(frame);
+      expect(remote.event).toBe(web.update(local.poses, local.hands, timestamp, 1));
+      if (timestamp >= 2500 && timestamp <= 3700) expect(remote.event).toBeNull();
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }, { timestamp: 5000, event: 'open_palm' }]);
+  });
+
+  it.each(['client', 'server'] as const)('preserves the web body lock and a short valid lowering across %s busy boundaries', async boundary => {
+    const f = fixture(); const s = await f.open(); await s.release();
+    const web = new ExhibitionMirrorGestureDetector({ ...settings, allowRaise: false });
+    const events: { timestamp: number; event: string }[] = [];
+    for (let timestamp = 600; timestamp <= 3200; timestamp += 100) {
+      const blocked = timestamp >= 1700 && timestamp <= 2100;
+      if (timestamp === 1700 || timestamp === 2200) {
+        if (boundary === 'client') s.control(blocked);
+        web.setBlocked(blocked);
+      }
+      // This 400 ms drop exceeds the configured 350 ms lowering period. A busy
+      // transition must not spend it reacquiring a body that is still visible.
+      const frame = twoPalms(blocked ? .80 : .42);
+      const remote = await s.frame(timestamp, frame, boundary === 'server' && blocked);
+      const local = mirrored(frame);
+      expectWebState(remote, web, web.update(local.poses, local.hands, timestamp, 1));
+      if (timestamp >= 1000) expect(remote).toMatchObject({ operatorStatus: 'locked', controlSource: 'body', blocked });
+      if (timestamp === 2100) expect(remote.confirmationState).toBe('raise_required');
+      if (remote.event) events.push({ timestamp, event: remote.event });
+    }
+    expect(events).toEqual([{ timestamp: 900, event: 'open_palm' }, { timestamp: 2500, event: 'open_palm' }]);
+  });
+
   it('drops busy palms, counts release during busy, and never accumulates a busy re-raise', async () => {
     const f = fixture(); const s = await f.open(); await s.release();
     await s.frame(600); expect((await s.frame(910)).event).toBe('open_palm');
@@ -168,7 +376,7 @@ describe('remote gesture sessions use the real V1.1 detector', () => {
     expect(await s.run(2500, 3000)).toEqual([{ timestamp: 2800, event: 'open_palm' }]);
   });
 
-  it('keeps a second busy hand from rearming the first when ambiguity resolves', async () => {
+  it('keeps a second busy hand from rearming a continuously held first hand', async () => {
     const f = fixture(); const s = await f.open(); await s.release();
     await s.frame(600); await s.frame(910); s.control(true);
     expect(await s.run(1010, 1610, () => [hand(), hand(.7)])).toEqual([]);

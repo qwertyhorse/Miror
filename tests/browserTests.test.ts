@@ -71,7 +71,7 @@ function fixture() {
 async function image(color: string) { return (await sharp({ create: { width: 512, height: 512, channels: 4, background: color } }).png().toBuffer()).toString('base64'); }
 async function upload(source: ReturnType<typeof fixture>['source']) {
   const state = await source.upload({ name: '双图素材', category: '通勤', tags: [], imageBase64: await image('#dd1111'), referenceImageBase64: await image('#1133ee'), mode: 'clothx' });
-  const look = state.looks.at(-1)!;
+  const look = state.looks[0]!;
   source.command({ action: 'configure', enabledLookIds: [...state.enabledLookIds, look.id] });
   await source.preparePublication({ lookIds: [...state.enabledLookIds, look.id] });
   await vi.waitFor(() => expect([...state.enabledLookIds, look.id].every(id => !!source.readyReference(id))).toBe(true));
@@ -114,7 +114,7 @@ describe('independent complete browser tests', () => {
   it('copies both uploaded images with new owned URLs and isolates later source edits', async () => {
     const f = fixture(); const sourceLook = await upload(f.source);
     const created = f.manager.create(f.source); const { exhibition } = f.manager.resolve(created.mirror.id, created.token);
-    const copied = exhibition.read().looks.at(-1)!;
+    const copied = exhibition.read().looks[0]!;
     expect(copied.id).not.toBe(sourceLook.id); expect(exhibition.read().selectedLookId).toBe(copied.id);
     expect(copied.image).toContain(`/mirrors/${created.mirror.id}/assets/${copied.id}/display/`);
     expect(copied.referenceImage).toContain(`/mirrors/${created.mirror.id}/assets/${copied.id}/reference/`);

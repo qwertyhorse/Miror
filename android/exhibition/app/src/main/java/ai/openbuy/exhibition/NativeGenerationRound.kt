@@ -24,7 +24,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 /** One experience owns one reservation/RTC connection; same-mode choices update its conditions. */
-class NativeGenerationRound(
+internal class NativeGenerationRound(
     private val api: ExhibitionApi,
     private val mirrorId: String,
     private val deviceId: String,
@@ -37,6 +37,8 @@ class NativeGenerationRound(
     private val cameraPosition: CameraPosition = CameraPosition.BACK,
     private val cameraDeviceId: String? = null,
     private val cameraRotationDegrees: Int = 0,
+    private val cameraCaptureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
+    private val xmaxRotationDegrees: Int? = null,
     private val onBusyChanged: () -> Unit = {},
 ) {
     private var snapshot = JSONObject(state.toString())
@@ -242,6 +244,8 @@ class NativeGenerationRound(
                     image = if (mode == "mox") image else null,
                     cameraDeviceId = if (mode == "mox") null else cameraDeviceId,
                     cameraRotationDegrees = if (mode == "mox") 0 else cameraRotationDegrees,
+                    captureSelection = if (mode == "mox") NativeCameraCaptureSelection.Automatic else cameraCaptureSelection,
+                    xmaxRotationDegrees = if (mode == "mox") null else xmaxRotationDegrees,
                 )
                 NativeRoundMetadata.requireValid(NativeRoundMetadata.providerSessionId.matches(providerId), "实时会话编号无效。")
                 val linked = api.link(mirrorId, id, providerId)

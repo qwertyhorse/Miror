@@ -17,7 +17,6 @@ const GENERATION_DELAY_MS = 2_200;
 const HEARTBEAT_TIMEOUT_MS = LEASE_TTL_MS;
 const RENEWAL_PREPARE_WINDOW_MS = 20_000;
 const MAX_LOGS = 40;
-const MAX_LOOKS = 100;
 const MAX_INPUT_PIXELS = 32_000_000;
 const MIB = 1_048_576;
 const UPLOAD_ID = /^upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -206,7 +205,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     if (([4, 5].includes(migrated.schemaVersion as number) || state.lifecycle !== undefined) && !isExperienceLifecycle(state.lifecycle)) return null;
     const categories = nameList(state.categories, '分类', 40, false);
     const tags = nameList(state.tags, '标签', 80, true);
-    if (!Array.isArray(state.looks) || state.looks.length > MAX_LOOKS || !isMode(state.experienceMode)) return null;
+    if (!Array.isArray(state.looks) || !isMode(state.experienceMode)) return null;
     const ids = new Set<string>(); const skus = new Set<string>();
     for (const look of state.looks) {
       if (!isRecord(look) || typeof look.id !== 'string' || ids.has(look.id)) return null;
@@ -233,7 +232,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
     }
     const publication = state.publication;
     if (!isRecord(publication) || !isNonnegativeInteger(publication.revision) || !isTimestamp(publication.publishedAt)
-      || typeof publication.legacy !== 'boolean' || !Array.isArray(publication.looks) || publication.looks.length > MAX_LOOKS) return null;
+      || typeof publication.legacy !== 'boolean' || !Array.isArray(publication.looks)) return null;
     const publishedIds = new Set<string>();
     for (const look of publication.looks) {
       if (!isRecord(look) || typeof look.id !== 'string' || !ids.has(look.id) || publishedIds.has(look.id)
@@ -453,7 +452,7 @@ export class ExhibitionService {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_PUBLICATION', '请选择要发布的素材。');
     this.checkRevision(input.expectedRevision);
     const ids = input.lookIds ?? this.stored.state.enabledLookIds;
-    if (!Array.isArray(ids) || !ids.length || ids.length > MAX_LOOKS || new Set(ids).size !== ids.length
+    if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length
       || !ids.every(id => typeof id === 'string' && this.stored.state.looks.some(look => look.id === id))) throw new ApiError('EXHIBITION_INVALID_PUBLICATION', '发布素材不能重复、遗漏或不存在。');
     return ids as string[];
   }
@@ -988,7 +987,6 @@ export class ExhibitionService {
   }
   async upload(input: unknown): Promise<ExhibitionState> {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_METADATA', '请提供有效的服装信息。');
-    if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`);
     this.checkUploadAvailable();
     const details = this.lookMetadata(input);
     if (details.referenceKind === 'none' || typeof input.referenceImageBase64 !== 'string') throw new ApiError('EXHIBITION_REFERENCE_REQUIRED', '请选择 XMAX 参考图。');
@@ -1003,7 +1001,6 @@ export class ExhibitionService {
       if (!this.stored.state.categories.includes(details.category) || details.tags.some(tag => !this.stored.state.tags.includes(tag))) {
         throw new ApiError('EXHIBITION_UPLOAD_TAXONOMY_CHANGED', '所选分类或标签在上传期间已被移除，请重新选择后上传。', 409);
       }
-      if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`, 409);
       const duplicate = details.sku ? this.stored.state.looks.find(look => look.sku === details.sku) : undefined;
       if (duplicate) {
         const metadataMatches = Object.entries(details).every(([key, value]) => JSON.stringify(duplicate[key as keyof ExhibitionLook]) === JSON.stringify(value));
@@ -1017,7 +1014,7 @@ export class ExhibitionService {
       const image = this.newImage(id, 'display', display, written);
       const referenceImage = this.newImage(id, 'reference', reference, written);
       const draft = structuredClone(this.stored);
-      draft.state.looks.push({ id, ...details, referenceKind: 'image', referenceRoleSource: 'independent', image, referenceImage, referenceImageInfo: reference.info,
+      draft.state.looks.unshift({ id, ...details, referenceKind: 'image', referenceRoleSource: 'independent', image, referenceImage, referenceImageInfo: reference.info,
         ...display.info, palette: '', source: 'upload' });
       this.commit(draft, `服装「${details.name}」已上传，启用后会出现在大屏。`, this.now());
       return this.snapshotState();
@@ -1030,7 +1027,6 @@ export class ExhibitionService {
     this.editableInput(input);
     if (this.stored.state.live || this.uploadsInProgress > 0) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待目标设备的会话或素材处理结束，再复制素材。', 409);
     if (!isMode(input.mode)) throw new ApiError('EXHIBITION_INVALID_MODE', '请选择有效的目标分组。');
-    if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`, 409);
     this.checkUploadAvailable();
     const sourceState = source.read();
     const original = sourceState.looks.find(look => look.id === input.sourceLookId);
@@ -1063,7 +1059,6 @@ export class ExhibitionService {
       const reference = referenceBytes === displayBytes ? display : referenceBytes ? await prepareImage(referenceBytes.toString('base64'), limits, 'XMAX 参考图', true) : null;
       this.editableInput(input);
       if (this.stored.state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待目标设备的会话停止，再复制素材。', 409);
-      if (this.stored.state.looks.length >= MAX_LOOKS) throw new ApiError('EXHIBITION_CATALOG_FULL', `服装库最多保存 ${MAX_LOOKS} 套服装。`, 409);
       for (const prepared of [display, reference]) if (prepared) checkPreparedImage(prepared, this.stored.state.settings.uploadLimits);
       const taxonomy = mergeTaxonomy();
       const id = `upload-${randomUUID()}`;

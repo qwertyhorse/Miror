@@ -54,21 +54,21 @@ async function fixture(consoleView = false) {
 describe('material library summary in the mirror heading', () => {
   it('reports the current library filter without adding a library footer', async () => {
     const f = await fixture();
-    expect(f.summary).toHaveBeenLastCalledWith('ClothX · 2 份素材 · 1 份已启用');
+    expect(f.summary).toHaveBeenLastCalledWith('ClothX · 筛选 2 份素材');
     expect(host!.find(node => node.getReactProps().className === 'ex-library-summary')).toBeUndefined();
     expect(host!.find(node => node.textContent.includes('大屏只展示当前体验模式的已启用素材'))).toBeUndefined();
     expect(host!.find(node => node.getReactProps().className === 'ex-library-filters')!.childNodes.map(node => node.getReactProps().className)).toEqual(['ex-mode-choices', 'ex-library-search', 'ex-library-actions']);
     await f.chooseMode('free');
-    expect(f.summary).toHaveBeenLastCalledWith('Free · 1 份素材 · 1 份已启用');
+    expect(f.summary).toHaveBeenLastCalledWith('Free · 筛选 1 份素材');
     expect(f.state.experienceMode).toBe('clothx'); expect(f.controller.send).not.toHaveBeenCalled();
   });
 
   it('updates count changes and searches while keeping full-mode totals', async () => {
     const f = await fixture();
     f.state.enabledLookIds.push('b'); f.state.revision++; await f.render();
-    expect(f.summary).toHaveBeenLastCalledWith('ClothX · 2 份素材 · 2 份已启用');
+    expect(f.summary).toHaveBeenLastCalledWith('ClothX · 筛选 2 份素材');
     await act(async () => { host!.find(node => node.getReactProps()['aria-label'] === '搜索素材')!.getReactProps().onChange({ target: { value: '素材a' } }); });
-    expect(f.summary).toHaveBeenLastCalledWith('ClothX · 2 份素材 · 2 份已启用 · 搜索到 1 份');
+    expect(f.summary).toHaveBeenLastCalledWith('ClothX · 筛选 2 份素材 · 搜索到 1 份');
     await host!.close(); host = undefined;
     expect(f.summary).toHaveBeenLastCalledWith(null);
   });
@@ -97,12 +97,12 @@ describe('material library summary in the mirror heading', () => {
     expect(f.headerSummary()).toBeUndefined();
   });
 
-  it('omits the busy explanation while preserving material editing guards', async () => {
+  it('allows uploading and on-off changes during an active experience', async () => {
     const f = await fixture();
     f.state.phase = 'generating'; await f.render();
     expect(host!.find(node => node.getReactProps().className === 'ex-inline-note')).toBeUndefined();
-    const enable = host!.find(node => node.getReactProps()['aria-label'] === '启用素材a')!;
-    expect(enable.getReactProps().disabled).toBe(true);
+    const enable = host!.find(node => node.getReactProps()['aria-label'] === '上架素材a')!;
+    expect(enable.getReactProps().disabled).toBe(false);
     const upload = host!.find(node => node.nodeName === 'button' && node.textContent === '上传素材')!;
     expect(upload.getReactProps().disabled).toBe(false);
     expect(f.controller.send).not.toHaveBeenCalled();

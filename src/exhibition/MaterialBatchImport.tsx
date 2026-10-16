@@ -36,7 +36,7 @@ export function MaterialBatchImport({ controller }: { controller: ExhibitionCont
         try {
           await api(exhibitionApiPath('looks', mirrorId), 'POST', { sku: item.sku, name: item.name, mode: item.mode, category: item.category, prompt: item.prompt ?? '', description: '', imageBase64: await base64(byName.get(item.displayFile)!), referenceImageBase64: await base64(byName.get(item.referenceFile)!) }, abort.signal);
           if (abort.signal.aborted || !alive.current) return;
-          successful.current.add(item.sku); setResults(previous => ({ ...previous, [item.sku]: '草稿已保存' }));
+          successful.current.add(item.sku); setResults(previous => ({ ...previous, [item.sku]: '素材已保存' }));
         } catch (cause) { if (abort.signal.aborted || !alive.current) return; setResults(previous => ({ ...previous, [item.sku]: cause instanceof Error ? cause.message : '导入失败' })); }
       }
       await controller.refresh();
@@ -49,7 +49,7 @@ export function MaterialBatchImport({ controller }: { controller: ExhibitionCont
     <label>清单 CSV<input aria-label="素材清单 CSV" type="file" accept=".csv,text/csv" disabled={busy} onChange={event => { reset(); setManifest(event.target.files?.[0] ?? null); }} /></label>
     <label>配对图片<input aria-label="批量展示图和模型参考图" type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={busy} onChange={event => { reset(); setFiles(Array.from(event.target.files ?? [])); }} /></label>
     <label>素材文件夹<input aria-label="素材文件夹" type="file" multiple {...{ webkitdirectory: '' }} disabled={busy} onChange={event => { reset(); setFiles(Array.from(event.target.files ?? []).filter(file => /\.(jpe?g|png|webp)$/i.test(file.name))); }} /></label>
-    <button className="ex-button ex-primary" disabled={busy || complete || !manifest || !files.length} onClick={() => void run()}>{busy ? '导入中…' : complete ? '导入完成' : Object.keys(results).length ? '重试失败项' : '校验并导入草稿'}</button>
+    <button className="ex-button ex-primary" disabled={busy || complete || !manifest || !files.length} onClick={() => void run()}>{busy ? '导入中…' : complete ? '导入完成' : Object.keys(results).length ? '重试失败项' : '导入素材'}</button>
     <button className="ex-button" disabled={busy} onClick={() => setOpen(false)}>关闭</button>
     {error && <p role="alert" className="ex-field-error">{error}</p>}
     <ul aria-live="polite">{Object.entries(results).map(([sku, result]) => <li key={sku}>{sku} · {result}</li>)}</ul>

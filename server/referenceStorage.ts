@@ -13,7 +13,8 @@ export type ReplicaFailure =
   | 'malformed'
   | 'not_found'
   | 'denied'
-  | 'not_configured';
+  | 'not_configured'
+  | 'invalid_request';
 export interface ReferenceReplicaProvider {
   upload(
     bytes: Buffer,
@@ -54,7 +55,8 @@ export function createReferenceCosProvider(options: {
   const call = options.fetch ?? fetch;
   const timeout = options.timeoutMs ?? 20_000;
   const errorFor = (status: number): ReplicaFailure =>
-    status === 404 ? 'not_found' : status === 401 || status === 403 ? 'denied' : 'status';
+    status === 404 ? 'not_found' : status === 401 || status === 403 ? 'denied'
+      : status >= 400 && status < 500 && status !== 429 ? 'invalid_request' : 'status';
   type Sts = {
     bucket: string;
     region: string;
@@ -224,7 +226,7 @@ export function referenceStorage(apiKey: string, region: 'cn' | 'global', call: 
           body: JSON.stringify({ url: result.url }), signal, redirect: 'error',
         });
       } catch { throw new ReferencePreparationError('check', signal.aborted ? 'timeout' : 'network'); }
-      if (!response.ok) throw new ReferencePreparationError('check', response.status === 401 || response.status === 403 ? 'denied' : 'status');
+      if (!response.ok) throw new ReferencePreparationError('check', response.status === 401 || response.status === 403 ? 'denied' : response.status >= 400 && response.status < 500 && response.status !== 429 ? 'invalid_request' : 'status');
       let value;
       try { value = await response.json(); } catch { throw new ReferencePreparationError('check', 'malformed'); }
       if (value?.data?.safe === false) throw new ReferencePreparationError('check', 'unsafe');

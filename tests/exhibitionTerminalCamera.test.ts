@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, useEffect, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TerminalCameraEntry, TerminalCameraSettings, terminalCameraAvailable, terminalCameraRequestMatches, useTerminalCameraRequest, useTerminalCameraReport } from '../src/exhibition/TerminalCameraSettings';
@@ -286,8 +287,8 @@ describe('bound browser terminal camera diagnostics', () => {
   });
 
   it('keeps an XMAX allocation failure out of camera status and a healthy diagnostic preview', async () => {
-    const initial = { ...state(), providerMode: 'xmax' as const, experienceMode: 'free' as const,
-      looks: [{ ...state().looks[0], mode: 'free' as const, referenceKind: 'none' as const, prompt: '森林背景' }] };
+    const initial = materialCatalogFixture({ ...state(), providerMode: 'xmax' as const, experienceMode: 'free' as const,
+      looks: [{ ...state().looks[0], mode: 'free' as const, referenceKind: 'none' as const, prompt: '森林背景' }] });
     const f = await fixture(null, initial, true);
     expect(f.live.cameraStream).not.toBeNull();
     mocks.api.mockImplementation(async (path: string) => {

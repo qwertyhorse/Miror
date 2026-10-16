@@ -70,8 +70,7 @@ export function useReferencePreparation(mirrorId: string, catalogKey: string, en
           retryErrors: Object.fromEntries(Object.entries(previous.retryErrors).filter(([id]) => references[id]?.state === 'failed')) }));
       } catch {
         if (!stopped && sequence === listSequence) {
-          references = {};
-          update(previous => ({ ...previous, references, error: '素材准备状态获取失败', now: Date.now() }));
+          update(previous => ({ ...previous, error: '素材准备状态获取失败', now: Date.now() }));
         }
       } finally { if (listRequest.current === abort) listRequest.current = null; }
     };

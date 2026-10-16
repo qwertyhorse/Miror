@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, type ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionCommand, ExhibitionState } from '../shared/exhibition';
@@ -29,14 +30,14 @@ function deferred<T>() {
 }
 
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return {
+  return materialCatalogFixture({
     mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', providerMode: 'xmax',
     selectedLookId: 'commute', displayedLookId: null, looks: structuredClone(exhibitionLooks),
     enabledLookIds: ['commute', 'city', 'evening'], categories: [], tags: [],
     sessionNumber: 1, generationNumber: 1, updatedAt: 0, generationReadyAt: null, live: null, logs: [],
     settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } },
     ...overrides,
-  };
+  });
 }
 
 async function fixture(stateOverrides: Partial<ExhibitionState> = {}, overrides: Partial<ComponentProps<typeof Kiosk>> = {}) {
@@ -56,7 +57,7 @@ async function fixture(stateOverrides: Partial<ExhibitionState> = {}, overrides:
     deviceId: 'presenter-screen', secure: true, mirrored: true, startCamera: vi.fn(async () => true), stopGeneration: vi.fn(async () => true) } as unknown as ExhibitionLiveController;
   const props: ComponentProps<typeof Kiosk> = { state: snapshot(stateOverrides), send, live, ...overrides };
   const render = () => host!.render(createElement(Kiosk, props));
-  const update = async (changes: Partial<ExhibitionState>) => { props.state = { ...props.state, ...changes }; await render(); };
+  const update = async (changes: Partial<ExhibitionState>) => { props.state = materialCatalogFixture({ ...props.state, catalog: undefined, ...changes }); await render(); };
   await render();
   return { send, live, props, render, update };
 }

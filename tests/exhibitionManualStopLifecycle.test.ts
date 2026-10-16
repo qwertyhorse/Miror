@@ -1,4 +1,3 @@
-import { readyReferenceFixture } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps, type ExhibitionSdkSession } from '../src/exhibition/useExhibitionLive';
 import type { ConnectOptions } from '../src/liveTryOn';
@@ -21,16 +20,14 @@ function fixture() {
   const camera = { getVideoTracks: () => [cameraTrack], getTracks: () => [cameraTrack] } as unknown as MediaStream;
   const cloned = { getVideoTracks: () => [sdkTrack], getTracks: () => [sdkTrack] } as unknown as MediaStream;
   const local = { id: 'manual-stop-local', token: 'tk-isolated-manual-stop', model: 'x2.0', status: 'active', sourceKind: 'camera' as const,
-    sourceId: 'manual-stop-screen', sourceName: '停止测试', targetItemId: 'commute', referenceAsset: '/assets/exhibition/commute-cutout.png',
-    refImageUrl: '', referenceVersion: 0, pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none' as const,
+    sourceId: 'manual-stop-screen', sourceName: '停止测试', targetItemId: 'commute', referenceScope: 'account-scope', referenceAsset: '/assets/exhibition/commute-cutout.png',
+    refImageUrl: 'https://reference.fixture/first.png', referenceVersion: 1, pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none' as const,
     expiresAt: new Date(Date.now() + 120_000).toISOString(), exhibition: { mirrorId: 'east', deviceId: 'manual-stop-screen', lookId: 'commute', sessionNumber: 1, generationNumber: 1 } };
   const sdk: ExhibitionSdkSession = { getSessionUid: vi.fn(() => 'ums-manual-stop'), set: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   let callbacks!: ConnectOptions;
   const deps = {
-    preparedReference: async () => readyReferenceFixture('https://fixture.example/ref.png'),
     create: vi.fn(async () => ({ ...local })), reference: vi.fn(async () => new File(['fixture'], 'fixture.png', { type: 'image/png' })),
-    prepare: vi.fn(async () => {}), upload: vi.fn(async () => 'https://fixture.example/ref.png'),
-    bind: vi.fn(async () => ({ ...local, refImageUrl: 'https://fixture.example/ref.png', referenceVersion: 1 })),
+    prepare: vi.fn(async () => {}),
     connect: vi.fn(async (_source, _session, value) => { callbacks = value; return sdk; }),
     link: vi.fn(async () => ({ ...local, providerSessionId: 'ums-manual-stop', referenceVersion: 1 })),
     firstFrame: vi.fn(async () => local), stop: vi.fn(async () => ({ ...local, status: 'stopped' })),

@@ -66,3 +66,10 @@ it('clears successful DNS deadlines while preparing the upload', async () => {
     expect(call.mock.calls.some(([, init]) => init?.method === 'HEAD')).toBe(false);
   } finally { vi.useRealTimers(); }
 });
+
+it.each([[400, 'invalid_request'], [401, 'denied'], [429, 'status'], [503, 'status']] as const)('classifies XMAX HTTP %s before deciding whether background retries are allowed', async (status, failure) => {
+  const call = vi.fn<typeof fetch>(async () => new Response(null, { status }));
+  await expect(referenceStorage('uk-fixture', 'cn', call, async () => ['8.8.8.8']).upload(bytes, sha, 'image/png'))
+    .rejects.toMatchObject({ stage: 'credentials', failure });
+  expect(call).toHaveBeenCalledOnce();
+});

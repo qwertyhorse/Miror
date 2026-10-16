@@ -142,7 +142,9 @@ describe('mirror credentials HTTP boundary', () => {
     for (const field of ['totalLimit', 'allocatedCredits', 'remainingCredits']) expect(initial).not.toHaveProperty(field);
     const response = await a.put(); expect(response.status).toBe(200);
     const saved = await response.json(); expect(saved).toMatchObject({ source: 'mirror', revision: 1, editable: true });
-    expect(JSON.stringify(saved)).not.toMatch(/uk-|Cipher/u); expect(f.mirrors.getMirror().get()).toEqual(before);
+    expect(JSON.stringify(saved)).not.toMatch(/uk-|Cipher/u); const { revision, updatedAt, logs, ...afterState } = f.mirrors.getMirror().get();
+    const { revision: oldRevision, updatedAt: oldTime, logs: oldLogs, ...beforeState } = before;
+    expect(afterState).toEqual(beforeState); expect(revision).toBeGreaterThan(oldRevision);
     expect(await (await a.get(f.second.id)).json()).toMatchObject({ source: 'default', revision: 0 });
     expect((await a.put('default', mirrorKey, 0)).status).toBe(409);
     expect((await a.put('default', mirrorKey, 1)).status).toBe(200);

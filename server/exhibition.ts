@@ -101,7 +101,7 @@ async function prepareImage(value: unknown, limits: ExhibitionUploadLimits, labe
 }
 
 interface StoredExhibition {
-  schemaVersion: 3 | 4 | 5;
+  schemaVersion: 3 | 4 | 5 | 6;
   uploadLimitsVersion: 2;
   state: ExhibitionState;
   lastCommandAt: number;
@@ -121,9 +121,10 @@ function isUiSkin(value: unknown): value is ExhibitionUiSkin | null { return val
 function isNonnegativeInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
 function isTimestamp(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && value >= 0; }
 function isMode(value: unknown): value is ExhibitionExperienceMode { return EXHIBITION_EXPERIENCE_MODES.includes(value as ExhibitionExperienceMode); }
-function runtimeLooks(state: ExhibitionState): ExhibitionLook[] { return state.providerMode === 'xmax' && state.publication ? state.publication.looks : state.looks; }
-function activeLookIds(state: ExhibitionState): string[] { return state.providerMode === 'xmax' && state.publication ? state.publication.looks.filter(look => look.mode === state.experienceMode).map(look => look.id) : state.enabledLookIds.filter(id => state.looks.some(look => look.id === id && look.mode === state.experienceMode)); }
+function runtimeLooks(state: ExhibitionState): ExhibitionLook[] { const looks = state.catalog?.looks ?? state.looks; return state.activeLook ? [state.activeLook, ...looks.filter(look => look.id !== state.activeLook!.id)] : looks; }
+function activeLookIds(state: ExhibitionState): string[] { return state.catalog?.availableLookIds ?? state.enabledLookIds.filter(id => state.looks.some(look => look.id === id && look.mode === state.experienceMode)); }
 function reconcileSelection(state: ExhibitionState) {
+  if (state.activeLook && !['select', 'idle'].includes(state.phase)) return;
   const ids = activeLookIds(state);
   if (state.selectedLookId === null || !ids.includes(state.selectedLookId)) state.selectedLookId = ids[0] ?? null;
   if (state.selectedLookId === null) { state.phase = 'idle'; state.displayedLookId = null; state.generationReadyAt = null; }
@@ -153,7 +154,7 @@ function nameList(value: unknown, label: string, maximum: number, allowEmpty: bo
   return names;
 }
 function normalizeStored(value: unknown, assetBasePath: string): StoredExhibition | null {
-  if (!isRecord(value) || !isRecord(value.state) || ![1, 2, 3, 4, 5].includes(value.schemaVersion as number)) return null;
+  if (!isRecord(value) || !isRecord(value.state) || ![1, 2, 3, 4, 5, 6].includes(value.schemaVersion as number)) return null;
   const migrated = structuredClone(value);
   if (migrated.schemaVersion === 1) {
     const state = migrated.state as Record<string, unknown>;
@@ -178,8 +179,18 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
       }
     }
   }
-  if (migrated.schemaVersion === 5 && state.publication === undefined) return null;
-  if (state.publication === undefined && Array.isArray(state.looks) && Array.isArray(state.enabledLookIds)) state.publication = { revision: 0, publishedAt: state.updatedAt ?? 0, legacy: true, looks: structuredClone(state.looks.filter(look => isRecord(look) && (state.enabledLookIds as unknown[]).includes(look.id))) };
+  if (migrated.schemaVersion !== 6) {
+    if (migrated.schemaVersion === 5 && !isRecord(state.publication)) return null;
+    const previous = migrated.schemaVersion === 5 && isRecord(state.publication) && Array.isArray(state.publication.looks) ? state.publication.looks : (state.enabledLookIds as unknown[]).flatMap(id => (state.looks as unknown[]).filter(look => isRecord(look) && look.id === id));
+    state.materialVersions = structuredClone(previous);
+    state.enabledLookIds = previous.flatMap(look => isRecord(look) && typeof look.id === 'string' ? [look.id] : []);
+  }
+  if (Array.isArray(state.materialVersions)) for (const look of state.materialVersions) {
+    if (!isRecord(look)) continue;
+    for (const key of ['image', 'referenceImage']) if (typeof look[key] === 'string' && (look[key] as string).startsWith(`/api/exhibition/assets/${look.id}`)) look[key] = (look[key] as string).replace('/api/exhibition/assets', assetBasePath);
+  }
+  delete state.publication;
+  migrated.schemaVersion = 6;
   if (state.generationNumber === undefined) state.generationNumber = 0;
   if (state.live === undefined) state.live = null;
   if (state.autoSwitchAt === undefined) state.autoSwitchAt = null;
@@ -202,7 +213,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
   migrated.uploadLimitsVersion = 2;
   if (isRecord(state.live) && state.live.generationNumber === undefined) state.live.generationNumber = state.generationNumber;
   try {
-    if (([4, 5].includes(migrated.schemaVersion as number) || state.lifecycle !== undefined) && !isExperienceLifecycle(state.lifecycle)) return null;
+    if (([4, 5, 6].includes(value.schemaVersion as number) || state.lifecycle !== undefined) && !isExperienceLifecycle(state.lifecycle)) return null;
     const categories = nameList(state.categories, '分类', 40, false);
     const tags = nameList(state.tags, '标签', 80, true);
     if (!Array.isArray(state.looks) || !isMode(state.experienceMode)) return null;
@@ -230,12 +241,9 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
         || nameList(look.tags, '服装标签', 8, true).some(tag => !tags.includes(tag))) return null;
       ids.add(look.id);
     }
-    const publication = state.publication;
-    if (!isRecord(publication) || !isNonnegativeInteger(publication.revision) || !isTimestamp(publication.publishedAt)
-      || typeof publication.legacy !== 'boolean' || !Array.isArray(publication.looks)) return null;
-    const publishedIds = new Set<string>();
-    for (const look of publication.looks) {
-      if (!isRecord(look) || typeof look.id !== 'string' || !ids.has(look.id) || publishedIds.has(look.id)
+    if (!Array.isArray(state.materialVersions)) return null;
+    for (const look of [...state.materialVersions, ...(state.activeLook ? [state.activeLook] : []), ...(state.boundLook ? [state.boundLook] : [])]) {
+      if (!isRecord(look) || typeof look.id !== 'string' || !ids.has(look.id)
         || !isMode(look.mode) || (look.referenceKind !== undefined && !['image', 'none'].includes(look.referenceKind as string))
         || (look.referenceKind === 'none' && look.mode !== 'free')
         || (!assetFilename(look.image, look.id, assetBasePath) && !sampleImage(look.image, look.id))
@@ -245,7 +253,6 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
       if (look.referenceImageInfo !== undefined && !imageInfo(look.referenceImageInfo)) return null;
       if (look.sku !== undefined) shortText(look.sku, 'SKU', 80);
       if (look.mode === 'free') freePrompt(look.prompt);
-      publishedIds.add(look.id);
     }
     const isLook = (id: unknown) => typeof id === 'string' && ids.has(id);
     if (!(isNonnegativeInteger(state.revision) && isNonnegativeInteger(state.sessionNumber) && isNonnegativeInteger(state.generationNumber)
@@ -253,7 +260,7 @@ function normalizeStored(value: unknown, assetBasePath: string): StoredExhibitio
       && (state.displayedLookId === null || isLook(state.displayedLookId))
       && Array.isArray(state.enabledLookIds) && state.enabledLookIds.every(isLook)
       && new Set(state.enabledLookIds).size === state.enabledLookIds.length
-      && (state.selectedLookId === null ? !(state.providerMode === 'xmax' && isRecord(state.publication) && Array.isArray(state.publication.looks) ? state.publication.looks : state.looks).some(look => isRecord(look) && look.mode === state.experienceMode && (state.providerMode === 'xmax' || (state.enabledLookIds as unknown[]).includes(look.id))) && ['select', 'idle'].includes(state.phase as string) : (state.providerMode === 'xmax' ? publishedIds.has(state.selectedLookId as string) : state.enabledLookIds.includes(state.selectedLookId)) && (state.providerMode === 'xmax' && isRecord(state.publication) && Array.isArray(state.publication.looks) ? state.publication.looks : state.looks).some(look => isRecord(look) && look.id === state.selectedLookId && look.mode === state.experienceMode))
+
       && isTimestamp(state.updatedAt) && (state.generationReadyAt === null || isTimestamp(state.generationReadyAt))
       && (state.autoSwitchAt === null || isTimestamp(state.autoSwitchAt))
       && isRecord(state.settings) && isAutoReturn(state.settings.autoReturnSeconds) && validLimits(state.settings.uploadLimits) && isSwitchMode(state.settings.switchMode) && isAutoSwitchSeconds(state.settings.autoSwitchSeconds) && isUiSkinPreset(state.settings.uiSkinPreset) && isUiSkin(state.settings.uiSkin) && isMaterialDrawerColumns(state.settings.materialDrawerColumns) && ['demo', 'xmax'].includes(state.providerMode as string)
@@ -280,7 +287,9 @@ export class ExhibitionService {
   private stored: StoredExhibition;
   private uploadsInProgress = 0;
   private preparationsInProgress = 0;
-  private publicationPreparation?: Promise<void>;
+  private sourceCatalog?: ExhibitionService;
+  private boundLook?: ExhibitionLook;
+  private readonly materialRetainers = new Set<() => ExhibitionLook[]>();
   private removed = false;
   private liveService?: TryOnService;
   private durable = false;
@@ -306,7 +315,7 @@ export class ExhibitionService {
     mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
     const time = this.now();
     this.stored = {
-      schemaVersion: 5,
+      schemaVersion: 6,
       uploadLimitsVersion: 2,
       state: {
         mirrorId: this.mirrorId,
@@ -320,14 +329,19 @@ export class ExhibitionService {
     try { loaded = JSON.parse(readFileSync(this.filename, 'utf8')); }
     catch (error) { if ((error instanceof SyntaxError && options.strictStorage) || (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== 'ENOENT')) throw error; }
     const normalized = normalizeStored(loaded, this.assetBasePath);
-    if (loaded !== undefined && !normalized && (options.strictStorage || (isRecord(loaded) && (loaded.schemaVersion === 5 || loaded.state && isRecord(loaded.state) && loaded.state.publication !== undefined)))) throw new Error(`Invalid exhibition mirror data: ${this.mirrorId}`);
+    if (loaded !== undefined && !normalized && (options.strictStorage || (isRecord(loaded) && ([5, 6].includes(loaded.schemaVersion as number) || loaded.state && isRecord(loaded.state) && loaded.state.publication !== undefined)))) throw new Error(`Invalid exhibition mirror data: ${this.mirrorId}`);
     if (normalized) {
       const needsUpgrade = normalized.state.mirrorId !== this.mirrorId || JSON.stringify(normalized) !== JSON.stringify(loaded);
+      if (isRecord(loaded) && loaded.schemaVersion !== 6) {
+        const materialBackup = `${this.filename}.before-material-workflow.json`;
+        if (!existsSync(materialBackup)) writeFileSync(materialBackup, JSON.stringify(loaded), { mode: 0o600, flag: 'wx' });
+      }
       if (isRecord(loaded) && [1, 2].includes(loaded.schemaVersion as number)) {
         const backup = `${this.filename}.before-six-modes.json`;
         if (!existsSync(backup)) copyFileSync(this.filename, backup);
       }
       normalized.state.mirrorId = this.mirrorId;
+      this.boundLook = normalized.state.live ? structuredClone(normalized.state.boundLook ?? normalized.state.activeLook) : undefined;
       this.stored = normalized; this.stored.state.logs = this.stored.state.logs.slice(0, MAX_LOGS);
       if (!['select', 'idle'].includes(normalized.state.phase)) {
         const recovered = structuredClone(this.stored); this.reset(recovered, 'select'); recovered.lastCommandAt = time;
@@ -335,7 +349,7 @@ export class ExhibitionService {
       } else if (needsUpgrade) {
         this.commit(structuredClone(this.stored), '服装库已升级，原有服装选择和展会设置已保留。', time);
       }
-    } else { this.stored.state.looks = this.stored.state.looks.map(look => ({ ...look, referenceImage: look.image, referenceRoleSource: 'legacy-shared' })); this.stored.state.publication = { revision: 0, publishedAt: time, legacy: true, looks: structuredClone(this.stored.state.looks) }; this.commit(this.stored, '局域网交互演示已就绪，未连接 XMAX 或摄像头。', time); }
+    } else { this.stored.state.looks = this.stored.state.looks.map(look => ({ ...look, referenceImage: look.image, referenceRoleSource: 'legacy-shared' })); this.stored.state.materialVersions = structuredClone(this.stored.state.looks); this.commit(this.stored, '局域网交互演示已就绪，未连接 XMAX 或摄像头。', time); }
   }
 
   read(): ExhibitionState { this.assertPresent(); return this.snapshotState(); }
@@ -354,6 +368,9 @@ export class ExhibitionService {
     }
   }
   markRemoved(): void {
+    const retained = this.retainedMaterials();
+    this.sourceCatalog?.materialRetainers.delete(this.sourceRetention);
+    if (this.sourceCatalog) for (const look of retained) this.sourceCatalog.cleanupUnusedImages(look);
     this.removed = true;
     for (const notify of this.changes) { try { notify(); } catch { /* Removal remains committed if a subscriber has closed. */ } }
     this.changes.clear();
@@ -362,7 +379,7 @@ export class ExhibitionService {
     if (this.removed) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这台智能镜，请重新选择设备。', 404);
   }
   sessionLimits(): ExhibitionSessionLimits {
-    if (this.durable && this.liveService?.status(this.mirrorId).providerId === 'decart') return { credits: null, expireSeconds: 120 };
+    if (this.durable && this.liveService?.providerDescriptor(this.mirrorId).providerId === 'decart') return { credits: null, expireSeconds: 120 };
     return resolveSessionLimits(this.stored.state.settings.sessionLimits, {
       credits: DEFAULT_SESSION_LIMITS.credits,
       expireSeconds: Math.max(CONTINUOUS_MIN_EXPIRY_SECONDS,
@@ -373,7 +390,74 @@ export class ExhibitionService {
     const limits = this.sessionLimits();
     return { credits: limits.credits ?? CONTINUOUS_SEGMENT_CREDITS, expireSeconds: limits.expireSeconds };
   }
+  private retainedMaterials(): ExhibitionLook[] { return [...(this.boundLook ? [this.boundLook] : []), ...(this.stored.state.activeLook ? [this.stored.state.activeLook] : []), ...[...this.materialRetainers].flatMap(read => read())]; }
+  /** Browser tests share descriptors and source files, retaining only their current input. */
+  syncSourceCatalog(source: ExhibitionService): void {
+    if (this.sourceCatalog !== source) {
+      this.sourceCatalog?.materialRetainers.delete(this.sourceRetention);
+      this.sourceCatalog = source; source.materialRetainers.add(this.sourceRetention);
+    }
+    const incoming = source.read(); const state = this.stored.state;
+    const idle = ['select', 'idle'].includes(state.phase);
+    const descriptors = { looks: incoming.looks, materialVersions: incoming.materialVersions, enabledLookIds: incoming.enabledLookIds, ...(idle ? { experienceMode: incoming.experienceMode, settings: incoming.settings } : {}), categories: incoming.categories, tags: incoming.tags };
+    const descriptorsChanged = Object.entries(descriptors).some(([key, value]) => JSON.stringify(state[key as keyof ExhibitionState]) !== JSON.stringify(value));
+    const draft = structuredClone(this.stored); Object.assign(draft.state, structuredClone(descriptors));
+    this.refreshCatalog(draft.state);
+    if (!descriptorsChanged && draft.state.catalog?.revision === state.catalog?.revision) return;
+    reconcileSelection(draft.state);
+    this.commit(draft, '素材目录已更新。', this.now());
+  }
+  refreshMaterials(): void { this.commit(structuredClone(this.stored), '素材可用状态已更新。', this.now()); }
+  private readonly sourceRetention = () => this.retainedMaterials();
+  private materialVersion(look: ExhibitionLook): string {
+    return createHash('sha256').update(JSON.stringify([look.id, look.image, exhibitionReferenceImage(look), look.mode, look.referenceKind, look.prompt ?? '', look.name, look.description, look.category, look.tags])).digest('hex');
+  }
+  private assertMaterialVersion(look: ExhibitionLook, version: unknown): void {
+    if (version !== undefined && version !== look.contentVersion) throw new ApiError('MATERIAL_VERSION_CHANGED', '素材已更新，请重新选择。', 409);
+  }
+  /** One projection owns all selectable IDs. Permanent references have no local TTL. */
+  private refreshCatalog(state: ExhibitionState = this.stored.state): void {
+    const histories = new Map<string, ExhibitionLook[]>();
+    for (const item of state.materialVersions ?? []) { const history = histories.get(item.id) ?? []; history.push(item); histories.set(item.id, history); }
+    const effective: ExhibitionLook[] = [];
+    const provider = state.providerMode === 'xmax' ? this.liveService?.providerDescriptor(this.mirrorId).providerId : undefined;
+    const ready = (look: ExhibitionLook, target?: 'xmax' | 'decart') => {
+      if (state.providerMode === 'demo' && !target) return true;
+      if (!this.liveService?.materialProviderConfigured(this.mirrorId, target)) return false;
+      if ((target ?? provider) === 'decart' && look.mode !== 'clothx') return false;
+      try { const identity = this.identityForLook(look); return !identity || !!this.liveService?.readyReferenceIdentity(this.mirrorId, identity, target); } catch { return false; }
+    };
+    const retained: ExhibitionLook[] = [];
+    const enabled = new Set(state.enabledLookIds);
+    for (const look of state.looks) {
+      look.contentVersion = this.materialVersion(look);
+      const history = [look, ...(histories.get(look.id) ?? []).filter(item => item.contentVersion !== look.contentVersion)];
+      const chosen = history.find(item => ready(item));
+      if (chosen && enabled.has(look.id) && chosen.mode === state.experienceMode) effective.push(structuredClone(chosen));
+      // Retain newest input and the last usable version for each supplier independently.
+      const keep = new Map<string, ExhibitionLook>();
+      for (const item of (!this.liveService || state.providerMode === 'demo' || (state.live && !this.boundLook) ? history : [look, history.find(item => ready(item, 'xmax')), history.find(item => ready(item, 'decart'))])) {
+        if (item) { item.contentVersion ??= this.materialVersion(item); keep.set(item.contentVersion, structuredClone(item)); }
+      }
+      retained.push(...keep.values());
+    }
+    state.materialVersions = retained;
+    const order = new Map(state.enabledLookIds.map((id, index) => [id, index]));
+    const looks = effective.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+    for (const look of looks) look.contentVersion ??= this.materialVersion(look);
+    const signature = createHash('sha256').update(JSON.stringify([(state.providerMode === 'xmax' ? this.liveService?.materialScope?.(this.mirrorId) : '') ?? '', provider, state.experienceMode, looks.map(look => [look.id, look.contentVersion])])).digest('hex');
+    const revision = Number.parseInt(signature.slice(0, 12), 16);
+    const eligible = state.looks.filter(look => enabled.has(look.id) && look.mode === state.experienceMode);
+    let emptyMessage: string | undefined;
+    if (!looks.length) {
+      if (!eligible.length) emptyMessage = '当前模式暂无上架素材';
+      else { const statuses = eligible.map(look => { try { const identity = this.identityForLook(look); return identity && this.liveService?.referencePreparationStatus(this.mirrorId, identity.sha256, identity.mime); } catch { return { state: 'failed' }; } });
+        emptyMessage = statuses.some(status => status?.state === 'unconfigured') ? '请配置当前服务' : statuses.some(status => status?.state === 'failed') ? '素材上传失败，请在后台重试' : '素材处理中'; }
+    }
+    state.catalog = { revision, providerId: provider, looks, availableLookIds: looks.map(look => look.id), ...(emptyMessage ? { emptyMessage } : {}) };
+  }
   private snapshotState(): ExhibitionState {
+    this.refreshCatalog();
     const state = structuredClone(this.stored.state);
     state.settings.sessionLimits = this.sessionLimits();
     if (state.live?.sessionId && this.liveService?.options?.store) {
@@ -393,11 +477,18 @@ export class ExhibitionService {
     if (persisted !== undefined) {
       const restored = normalizeStored(persisted, this.assetBasePath);
       if (!restored) throw new Error('Invalid durable mirror state');
+      if (isRecord(persisted) && persisted.schemaVersion !== 6) { const backup = `${this.filename}.before-material-workflow.json`; if (!existsSync(backup)) writeFileSync(backup, JSON.stringify(persisted), { mode: 0o600, flag: 'wx' }); }
+      this.boundLook = restored.state.live ? structuredClone(restored.state.boundLook ?? restored.state.activeLook) : undefined;
+      if (!this.boundLook && restored.state.live?.sessionId) {
+        try { const session = store.get(restored.state.live.sessionId);
+          this.boundLook = structuredClone([...restored.state.looks, ...(restored.state.materialVersions ?? [])].find(look => exhibitionReferenceImage(look) === session.referenceAsset));
+        } catch { /* A legacy unknown lease retains all historical files until reconciliation. */ }
+      }
       this.stored = restored;
     }
     this.durable = true;
     const draft = structuredClone(this.stored);
-    draft.schemaVersion = 5;
+    draft.schemaVersion = 6;
     draft.state.lifecycle ??= initialLifecycle();
     if (!['idle', 'select'].includes(draft.state.phase)) {
       this.reset(draft, 'select');
@@ -414,146 +505,132 @@ export class ExhibitionService {
 
   private referenceSource(lookId: string, published = false) {
     this.assertPresent();
-    const look = (published ? this.stored.state.publication?.looks ?? this.stored.state.looks : this.stored.state.looks).find(item => item.id === lookId);
+    const look = (published ? runtimeLooks(this.stored.state) : this.stored.state.looks).find(item => item.id === lookId);
     if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
     const image = exhibitionReferenceImage(look);
-    return image === null ? null : this.readImage(look.id, image);
+    return image === null ? null : this.sourceCatalog ? this.sourceCatalog.readImage(look.id, image) : this.readImage(look.id, image);
   }
-  private referenceIdentity(lookId: string) {
-    const source = this.referenceSource(lookId, true);
-    return source ? { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime } : undefined;
+  private identityForLook(look: ExhibitionLook) {
+    const image = exhibitionReferenceImage(look);
+    if (!image) return undefined;
+    const cached = this.referenceIdentities.get(image);
+    if (cached) return cached;
+    const source = this.sourceCatalog ? this.sourceCatalog.readImage(look.id, image) : this.readImage(look.id, image);
+    const identity = { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime };
+    this.referenceIdentities.set(image, identity);
+    return identity;
   }
-  private requireReady(lookId: string) {
-    const look = this.stored.state.publication?.looks.find(item => item.id === lookId);
-    if (this.liveService?.status(this.mirrorId).providerId === 'decart' && look?.mode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', '这件暂不可用，请换一件。', 409);
-    const source = this.referenceSource(lookId, true);
-    if (!source) return null;
-    const ready = this.liveService?.readyReference(this.mirrorId, source.data, source.mime);
-    if (!ready || ready.freshUntil <= this.now() + 30_000) throw new ApiError('REFERENCE_NOT_READY', '这件暂不可用，请换一件。', 409);
-    this.liveService!.assertReferenceBinding(this.mirrorId, ready.bindingId, { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime });
+  private referenceIdentity(lookId: string) { const look = runtimeLooks(this.stored.state).find(item => item.id === lookId); return look ? this.identityForLook(look) : undefined; }
+  private requireReady(lookId: string, material?: ExhibitionLook) {
+    const look = material ?? runtimeLooks(this.stored.state).find(item => item.id === lookId);
+    if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
+    if (this.liveService?.providerDescriptor(this.mirrorId).providerId === 'decart' && look.mode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', '这件暂不可用，请换一件。', 409);
+    const identity = this.identityForLook(look);
+    if (!identity) return null;
+    const ready = this.liveService?.readyReferenceIdentity(this.mirrorId, identity);
+    if (!ready) throw new ApiError('REFERENCE_NOT_READY', '素材处理中，请选择其他素材。', 409);
+    this.liveService!.assertReferenceBinding(this.mirrorId, ready.bindingId, identity);
     return ready;
   }
-  publicationStatus() {
-    const state = this.stored.state; const publication = state.publication!;
-    const readyLookIds = publication.looks.filter(look => {
-      try { return look.referenceKind === 'none' || !!this.requireReady(look.id); } catch { return false; }
-    }).map(look => look.id);
-    const draftReadyLookIds = state.enabledLookIds.filter(id => { try { return state.looks.find(look => look.id === id)?.referenceKind === 'none' || !!this.readyReference(id); } catch { return false; } });
-    const targetProvider = this.liveService?.providerSettings?.(this.mirrorId)?.desired ?? this.liveService?.status(this.mirrorId).providerId ?? 'xmax';
-    const targetLookIds = publication.looks.filter(look => look.mode === state.experienceMode).map(look => look.id);
-    const targetReadyLookIds = publication.looks.filter(look => targetLookIds.includes(look.id)).filter(look => { if (targetProvider === 'decart' && look.mode !== 'clothx') return false; try { const identity = this.referenceIdentity(look.id); return look.referenceKind === 'none' || (!!identity && !!this.liveService?.isReferenceReadyForProvider(this.mirrorId, identity, targetProvider)); } catch { return false; } }).map(look => look.id);
-    const lookIds = publication.looks.map(look => look.id);
-    const drafts = state.enabledLookIds.map(id => state.looks.find(look => look.id === id)).filter(Boolean);
-    return { preparing: !!this.publicationPreparation, stateRevision: state.revision, targetProvider, targetReadyLookIds, targetLookIds, targetUnavailableLookIds: targetLookIds.filter(id => !targetReadyLookIds.includes(id)), publication: { revision: publication.revision, publishedAt: publication.publishedAt, legacy: publication.legacy,
-      lookIds, readyLookIds, eligibleLookIds: readyLookIds, draftReadyLookIds, draftUnavailableLookIds: state.enabledLookIds.filter(id => !draftReadyLookIds.includes(id)), unavailableLookIds: lookIds.filter(id => !readyLookIds.includes(id)),
-      draftChanged: JSON.stringify(drafts) !== JSON.stringify(publication.looks) }, references: this.referencePreparationStatuses() };
-  }
-  private publicationInput(input: unknown): string[] {
-    if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_PUBLICATION', '请选择要发布的素材。');
-    this.checkRevision(input.expectedRevision);
-    const ids = input.lookIds ?? this.stored.state.enabledLookIds;
-    if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length
-      || !ids.every(id => typeof id === 'string' && this.stored.state.looks.some(look => look.id === id))) throw new ApiError('EXHIBITION_INVALID_PUBLICATION', '发布素材不能重复、遗漏或不存在。');
-    return ids as string[];
-  }
-  async preparePublication(input: unknown) {
-    const ids = this.publicationInput(input);
-    const target = (input as Record<string, unknown>).provider;
-    if (target !== undefined && target !== 'xmax' && target !== 'decart') throw new ApiError('EXHIBITION_INVALID_PUBLICATION', '供应商无效。');
-    if (!this.publicationPreparation) {
-      const publishedIds = (this.stored.state.publication?.looks ?? []).map(look => look.id);
-      this.preparationsInProgress++;
-      // One bounded coordinator per mirror; HTTP returns immediately and duplicate requests coalesce.
-      this.publicationPreparation = (async () => {
-        for (const id of publishedIds) { try { await this.prepareReference(id, target as 'xmax' | 'decart' | undefined, true); } catch { /* Existing publication remains available. */ } }
-        for (const id of ids) { try { await this.prepareReference(id, target as 'xmax' | 'decart' | undefined); } catch { /* Safe item status remains visible. */ } }
-      })().finally(() => { this.publicationPreparation = undefined; this.preparationsInProgress--; for (const listener of this.changes) { try { listener(); } catch { /* Subscriber failures never reject background preparation. */ } } });
+  materialReadinessStatus() {
+    const state = this.snapshotState();
+    const targetProvider = this.liveService?.providerSettings?.(this.mirrorId)?.desired ?? this.liveService?.providerDescriptor(this.mirrorId).providerId ?? 'xmax';
+    const enabled = new Set(state.enabledLookIds);
+    const histories = new Map<string, ExhibitionLook[]>();
+    for (const look of state.materialVersions ?? []) { const history = histories.get(look.id) ?? []; history.push(look); histories.set(look.id, history); }
+    const effective = new Map<string, ExhibitionLook>();
+    if (this.liveService?.materialProviderConfigured(this.mirrorId, targetProvider)) for (const look of state.looks) {
+      const ready = [look, ...(histories.get(look.id) ?? [])].find(item => {
+        if (targetProvider === 'decart' && item.mode !== 'clothx') return false;
+        try { const identity = this.identityForLook(item); return !identity || !!this.liveService?.isReferenceReadyForProvider(this.mirrorId, identity, targetProvider); } catch { return false; }
+      });
+      if (ready) effective.set(look.id, ready);
     }
-    return this.publicationStatus();
-  }
-  publishPublication(input: unknown) {
-    const ids = this.publicationInput(input); const state = this.stored.state;
-    if (!['idle', 'select'].includes(state.phase) || state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请先结束体验再发布素材。', 409);
-    const ready = ids.filter(id => { try { const look = state.looks.find(item => item.id === id)!; return look.referenceKind === 'none' || !!this.readyReference(id); } catch { return false; } });
-    if (!ready.length || (ready.length !== ids.length && (input as Record<string, unknown>).allowPartial !== true)) throw new ApiError('EXHIBITION_PUBLICATION_NOT_READY', '素材尚未全部就绪，当前发布已保留。', 409);
-    const draft = structuredClone(this.stored);
-    draft.state.publication = { revision: (state.publication?.revision ?? 0) + 1, publishedAt: this.now(), legacy: false,
-      looks: ready.map(id => structuredClone(state.looks.find(look => look.id === id)!)) };
-    reconcileSelection(draft.state);
-    const previousPublished = state.publication?.looks ?? [];
-    this.commit(draft, `已发布 ${ready.length} 件素材。`, this.now());
-    for (const look of previousPublished) this.cleanupUnusedImages(look);
-    return this.publicationStatus();
+    const targetLookIds = state.looks.filter(look => enabled.has(look.id) && (look.mode === state.experienceMode || effective.get(look.id)?.mode === state.experienceMode)).map(look => look.id);
+    const targetReadyLookIds = targetLookIds.filter(id => effective.get(id)?.mode === state.experienceMode);
+    return { stateRevision: state.revision, catalog: state.catalog, targetProvider, targetLookIds, targetReadyLookIds, targetUnavailableLookIds: targetLookIds.filter(id => !targetReadyLookIds.includes(id)), references: this.referencePreparationStatuses() };
   }
   readyReference(lookId: string, published = false) {
-    const source = this.referenceSource(lookId, published);
-    const ready = source ? this.liveService?.readyReference(this.mirrorId, source.data, source.mime) ?? null : null;
-    if (!ready || ready.freshUntil <= this.now() + 30_000 || !source) return null;
-    try { this.liveService!.assertReferenceBinding(this.mirrorId, ready.bindingId, { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime }); return ready; } catch { return null; }
+    const look = (published ? runtimeLooks(this.stored.state) : this.stored.state.looks).find(item => item.id === lookId);
+    if (!look) { if (!this.stored.state.looks.some(item => item.id === lookId)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404); return null; }
+    const identity = this.identityForLook(look);
+    return identity ? this.liveService?.readyReferenceIdentity(this.mirrorId, identity) ?? null : null;
   }
-  async prepareReference(lookId: string, target?: 'xmax' | 'decart', published = false, replace = false) {
+  async prepareReference(lookId: string, target?: 'xmax' | 'decart', published = false, replace = false, manualRetry = false) {
     let source: ReturnType<ExhibitionService['referenceSource']>;
-    try { source = this.referenceSource(lookId, published); }
+    try { source = this.referenceSource(lookId, published); const look = (published ? runtimeLooks(this.stored.state) : this.stored.state.looks).find(item => item.id === lookId); if (look) this.referenceSourceFailures.delete(exhibitionReferenceImage(look) ?? lookId); }
     catch (error) { if (this.stored.state.looks.some(look => look.id === lookId)) this.referenceSourceUnavailable(lookId); throw error; }
     this.preparationsInProgress += 1;
     try {
-      if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime, target, replace);
+      if (source) await this.liveService?.prepareReference(this.mirrorId, source.data, source.mime, target, replace, manualRetry);
       const latest = this.referenceSource(lookId, published);
       return latest ? this.liveService?.readyReference(this.mirrorId, latest.data, latest.mime, target) ?? null : null; // Re-read after await: removal/replacement must win.
-    } finally { this.preparationsInProgress -= 1; }
+    } finally { this.preparationsInProgress -= 1; this.commit(structuredClone(this.stored), '素材处理状态已更新。', this.now()); }
   }
   private referenceSourceUnavailable(lookId: string): ReferencePreparationStatus {
-    this.referenceIdentities.delete(lookId);
-    const status: ReferencePreparationStatus = { state: 'failed', message: '本地图片不可用，请重新上传。', retryAt: this.now() + 60_000, updatedAt: this.now() };
-    this.referenceSourceFailures.set(lookId, status);
+    const look = this.stored.state.looks.find(item => item.id === lookId);
+    const key = look ? exhibitionReferenceImage(look) ?? lookId : lookId;
+    const status: ReferencePreparationStatus = { state: 'failed', message: '本地图片不可用，请重新上传。', updatedAt: this.now() };
+    this.referenceSourceFailures.set(key, status);
     return { ...status };
   }
   referencePreparationStatus(lookId: string, published = false, target?: 'xmax' | 'decart'): ReferencePreparationStatus {
-    const looks = published ? this.stored.state.publication?.looks ?? [] : this.stored.state.looks;
+    const looks = published ? this.stored.state.materialVersions ?? [] : this.stored.state.looks;
     const look = looks.find(item => item.id === lookId);
     if (!look) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材不存在。', 404);
+    if (look.referenceKind === 'none' && this.stored.state.providerMode === 'demo') return { state: 'not_required' };
+    if (!this.liveService || !this.liveService.materialProviderConfigured(this.mirrorId, target)) return { state: 'unconfigured' };
+    if ((target ?? this.liveService.providerDescriptor(this.mirrorId).providerId) === 'decart' && look.mode !== 'clothx') return { state: 'unconfigured', message: 'Decart 当前不支持此模式。' };
     if (look.referenceKind === 'none') return { state: 'not_required' };
-    if (!this.liveService) return { state: 'unconfigured' };
     try {
-      const cacheKey = published ? `published:${lookId}:${exhibitionReferenceImage(look)}` : lookId;
+      const cacheKey = exhibitionReferenceImage(look)!;
       const failure = this.referenceSourceFailures.get(cacheKey);
-      if (failure && (failure.retryAt ?? 0) > this.now()) return { ...failure };
-      let identity = this.referenceIdentities.get(cacheKey);
-      if (!identity) {
-        const source = this.referenceSource(lookId, published)!;
-        identity = { sha256: createHash('sha256').update(source.data).digest('hex'), mime: source.mime };
-        this.referenceIdentities.set(cacheKey, identity); this.referenceSourceFailures.delete(cacheKey);
-      }
+      if (failure && (failure.retryAt === undefined || failure.retryAt > this.now())) return { ...failure };
+      const identity = this.identityForLook(look)!;
       return this.liveService.referencePreparationStatus(this.mirrorId, identity.sha256, identity.mime, target);
     } catch {
-      const key = published ? `published:${lookId}:${exhibitionReferenceImage(look)}` : lookId;
+      const key = exhibitionReferenceImage(look)!;
       this.referenceIdentities.delete(key);
-      const failure: ReferencePreparationStatus = { state: 'failed', message: '本地图片不可用，请重新上传。', retryAt: this.now() + 60_000, updatedAt: this.now() };
+      const failure: ReferencePreparationStatus = { state: 'failed', message: '本地图片不可用，请重新上传。', updatedAt: this.now() };
       this.referenceSourceFailures.set(key, failure); return { ...failure };
     }
   }
-  assertProviderPublicationReady(target: 'xmax' | 'decart') {
+  assertProviderMaterialsReady(target: 'xmax' | 'decart') {
     const state = this.stored.state;
     if (target === 'decart' && state.experienceMode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
-    const looks = (state.publication?.looks ?? []).filter(look => look.mode === state.experienceMode);
-    if (!looks.length || looks.some(look => {
-      if (look.referenceKind === 'none') return false;
-      const identity = this.referenceIdentity(look.id);
-      return !identity || !this.liveService?.isReferenceReadyForProvider(this.mirrorId, identity, target);
-    })) throw new ApiError('EXHIBITION_PUBLICATION_NOT_READY', '目标服务素材尚未就绪，当前服务已保留。', 409);
+    const looks = state.looks.filter(look => state.enabledLookIds.includes(look.id) && look.mode === state.experienceMode);
+    if (!looks.some(look => [look, ...(state.materialVersions ?? []).filter(item => item.id === look.id)].some(item => {
+      if (item.referenceKind === 'none') return true;
+      const identity = this.identityForLook(item);
+      return !!identity && !!this.liveService?.isReferenceReadyForProvider(this.mirrorId, identity, target);
+    }))) throw new ApiError('EXHIBITION_PUBLICATION_NOT_READY', '目标服务素材尚未就绪，当前服务已保留。', 409);
   }
   referencePreparationStatuses(): Record<string, ReferencePreparationStatus> {
     const ids = new Set(this.stored.state.looks.map(look => look.id));
-    const retained = new Set([...ids, ...(this.stored.state.publication?.looks ?? []).map(look => `published:${look.id}:${exhibitionReferenceImage(look)}`)]);
+    const retained = new Set([...this.stored.state.looks, ...(this.stored.state.materialVersions ?? []), ...this.retainedMaterials()].map(look => exhibitionReferenceImage(look)).filter(Boolean));
     for (const id of this.referenceIdentities.keys()) if (!retained.has(id)) this.referenceIdentities.delete(id);
     for (const id of this.referenceSourceFailures.keys()) if (!retained.has(id)) this.referenceSourceFailures.delete(id);
-    return Object.fromEntries([...ids].map(id => [id, this.referencePreparationStatus(id)]));
+    this.refreshCatalog();
+    const effective = new Map<string, ExhibitionLook>();
+    for (const look of this.stored.state.materialVersions ?? []) {
+      if (effective.has(look.id)) continue;
+      try { const identity = this.identityForLook(look); if (!identity || this.liveService?.readyReferenceIdentity(this.mirrorId, identity)) effective.set(look.id, look); } catch { /* A later retained version can still be usable. */ }
+    }
+    const newestById = new Map(this.stored.state.looks.map(look => [look.id, look]));
+    return Object.fromEntries([...ids].map(id => {
+      const current = this.referencePreparationStatus(id); const usable = effective.get(id); const newest = newestById.get(id)!;
+      if (usable && usable.contentVersion !== newest.contentVersion && current.state !== 'ready') {
+        const identity = this.identityForLook(usable); const ready = identity && this.liveService?.readyReferenceIdentity(this.mirrorId, identity);
+        if (ready) return [id, { ...current, state: 'ready', freshUntil: ready.freshUntil, refreshState: current.state === 'failed' ? 'failed' : 'preparing' }];
+      }
+      return [id, current];
+    }));
   }
   retryReferencePreparation(lookId: string, replace = false): ReferencePreparationStatus {
     const current = this.referencePreparationStatus(lookId);
     if (current.refreshState === 'preparing' || (current.retryAt ?? 0) > this.now() || (current.state === 'ready' && !replace) || current.state === 'unconfigured' || current.state === 'not_required' || current.state === 'preparing') return current;
     // Preparation is shared with the idle worker and deduplicates by credential scope and bytes.
-    void this.prepareReference(lookId, undefined, false, replace).catch(() => undefined);
+    void this.prepareReference(lookId, undefined, false, replace, true).catch(() => undefined);
     return this.referencePreparationStatus(lookId);
   }
   liveStatus(): ExhibitionLiveStatus {
@@ -583,18 +660,20 @@ export class ExhibitionService {
     if (state.live) throw new ApiError('EXHIBITION_DEVICE_BUSY', '已有大屏占用本轮体验，请先结束或等待会话停止。', 409);
     if (state.lifecycle?.ownerDeviceId && state.lifecycle.ownerDeviceId !== deviceId) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '当前体验仍由原大屏持有。', 409);
     if (this.renewalHandoff && (this.renewalHandoff.deviceId !== deviceId || this.renewalHandoff.sessionNumber !== state.sessionNumber || this.renewalHandoff.generationNumber !== state.generationNumber)) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '续接只允许原大屏连接。', 409);
+    this.refreshCatalog(state);
     const look = runtimeLooks(state).find(item => item.id === input.lookId);
-    if (!look || look.id !== state.selectedLookId || !activeLookIds(state).includes(look.id)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材与当前模式或体验不一致。');
+    if (!look || look.id !== state.selectedLookId || !(activeLookIds(state).includes(look.id) || state.activeLook?.id === look.id)) throw new ApiError('EXHIBITION_INVALID_LOOK', '素材与当前模式或体验不一致。');
     if (!this.liveService) throw new ApiError('EXHIBITION_LIVE_UNAVAILABLE', '实时换装服务尚未连接。', 503);
     const blocked = this.liveService.hasBlockingMirrorSessions?.(this.mirrorId)
       ?? ('options' in this.liveService && !!this.liveService.options?.store.unreleasedMirror(this.mirrorId).length);
     if (blocked) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '旧连接尚未确认释放。', 409);
+    this.assertMaterialVersion(look, input.contentVersion);
     const prepared = this.requireReady(look.id);
     const service = this.liveService;
-    if (prepared) service.assertReferenceBinding(this.mirrorId, prepared.bindingId, this.referenceIdentity(look.id)!);
     const sessionLimits = this.sessionLimits();
     const live = { deviceId, generationNumber: state.generationNumber, sessionId: null as string | null, lookId: look.id, status: 'preparing' as const, updatedAt: this.now(), heartbeatAt: this.now() };
-    const draft = structuredClone(this.stored); draft.state.live = live;
+    this.boundLook = structuredClone(look);
+    const draft = structuredClone(this.stored); draft.state.live = live; draft.state.activeLook = structuredClone(look);
     const lifecycle = draft.state.lifecycle ??= initialLifecycle();
     lifecycle.controllerEpoch++; lifecycle.connection = 'connecting'; delete lifecycle.healthySince; lifecycle.ownerDeviceId = deviceId;
     delete lifecycle.retryAt; delete lifecycle.reason;
@@ -603,7 +682,7 @@ export class ExhibitionService {
     this.renewalHandoff = undefined;
     let reservedId: string | undefined;
     try {
-      const created = await service.createExhibition({ mirrorId: this.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: exhibitionReferenceImage(look) ?? '', referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits }, {
+      const created = await service.createExhibition({ mirrorId: this.mirrorId, referenceMirrorId: this.sourceCatalog?.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: exhibitionReferenceImage(look) ?? '', referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits }, {
         onReserved: id => {
           reservedId = id;
           const reserved = structuredClone(this.stored);
@@ -772,8 +851,9 @@ export class ExhibitionService {
     const { state, look, service } = this.currentConditionIntent(id, input);
     this.requireReady(look.id);
     const intent = input as Record<string, unknown>;
+    this.assertMaterialVersion(look, intent.contentVersion);
     return service.updateExhibitionCondition(id, {
-      mirrorId: this.mirrorId, deviceId: state.live!.deviceId, lookId: look.id,
+      mirrorId: this.mirrorId, referenceMirrorId: this.sourceCatalog?.mirrorId, deviceId: state.live!.deviceId, lookId: look.id,
       sessionNumber: state.sessionNumber, generationNumber: state.generationNumber,
       referenceAsset: exhibitionReferenceImage(look) ?? '',
       referenceKind: look.referenceKind, mode: state.experienceMode,
@@ -795,11 +875,13 @@ export class ExhibitionService {
     }
     // A duplicate acknowledgement must not reset an automatic display interval.
     if (state.phase === 'showcase' && state.displayedLookId === look.id && state.live!.generationNumber === state.generationNumber) return this.get();
+    const oldBound = this.boundLook; this.boundLook = structuredClone(look);
     const draft = structuredClone(this.stored);
     draft.state.live!.lookId = look.id; draft.state.live!.generationNumber = state.generationNumber;
     draft.state.live!.status = 'running'; draft.state.live!.updatedAt = this.now();
     draft.state.phase = 'showcase'; draft.state.displayedLookId = look.id; draft.state.generationReadyAt = null;
     this.commit(draft, `${look.name}已更新至当前 XMAX 实时会话。`, this.now());
+    if (oldBound) this.cleanupUnusedImages(oldBound);
     return this.get();
   }
 
@@ -807,7 +889,7 @@ export class ExhibitionService {
     const state = this.stored.state;
     return this.keepsLiveConnection(state) && state.live!.sessionId === id && state.live!.deviceId === input.deviceId
       && state.sessionNumber === input.sessionNumber && state.generationNumber === input.generationNumber
-      && state.selectedLookId === input.lookId && activeLookIds(state).includes(String(input.lookId));
+      && state.selectedLookId === input.lookId && (activeLookIds(state).includes(String(input.lookId)) || state.activeLook?.id === input.lookId);
   }
 
   private currentConditionIntent(id: string, input: unknown) {
@@ -848,7 +930,11 @@ export class ExhibitionService {
   reconcileLive(): Promise<void> {
     if (this.reconcilingLive) return this.reconcilingLive;
     this.reconcilingLive = this.reconcileLiveNow().then(() => {
-      if (this.durable && ['idle', 'select'].includes(this.stored.state.phase) && !this.stored.state.live) this.liveService?.finishProviderSwitch?.(this.mirrorId);
+      if (this.durable && ['idle', 'select'].includes(this.stored.state.phase) && !this.stored.state.live) {
+        const previousScope = this.liveService?.materialScope(this.mirrorId);
+        this.liveService?.finishProviderSwitch?.(this.mirrorId);
+        if (previousScope !== this.liveService?.materialScope(this.mirrorId)) this.refreshMaterials();
+      }
     }).finally(() => { this.reconcilingLive = undefined; });
     return this.reconcilingLive;
   }
@@ -948,13 +1034,15 @@ export class ExhibitionService {
   }
   /** Current display bytes, including legacy materials. HTTP reads use exact resource identity below. */
   asset(id: string): { data: Buffer; mime: 'image/webp' | 'image/png' } {
+    if (this.sourceCatalog) return this.sourceCatalog.asset(id);
     const look = this.stored.state.looks.find(item => item.id === id);
     if (!look || !assetFilename(look.image, id, this.assetBasePath)) throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到素材图片。', 404);
     return this.readImage(id, look.image);
   }
   assetResource(id: string, role?: string, assetId?: string): { data: Buffer; mime: 'image/webp' | 'image/png' } {
+    if (this.sourceCatalog) return this.sourceCatalog.assetResource(id, role, assetId);
     const image = role === undefined ? `${this.assetBasePath}/${id}` : `${this.assetBasePath}/${id}/${role}/${assetId}`;
-    const look = [...this.stored.state.looks, ...(this.stored.state.publication?.looks ?? [])].find(item => item.id === id && (item.image === image || item.referenceImage === image));
+    const look = [...this.stored.state.looks, ...(this.stored.state.materialVersions ?? []), ...this.retainedMaterials()].find(item => item.id === id && (item.image === image || item.referenceImage === image));
     if (!look || !assetFilename(image, id, this.assetBasePath) || (look.image !== image && look.referenceImage !== image)) {
       throw new ApiError('EXHIBITION_ASSET_NOT_FOUND', '未找到素材图片。', 404);
     }
@@ -967,6 +1055,7 @@ export class ExhibitionService {
     // Track before writing: a failed write can still leave a partial file.
     written.push(filename);
     writeFileSync(filename, prepared.data, { mode: 0o600, flag: 'wx' });
+    this.referenceIdentities.set(image, { sha256: createHash('sha256').update(prepared.data).digest('hex'), mime: 'image/webp' });
     return image;
   }
   private localImages(look: ExhibitionLook): string[] {
@@ -977,10 +1066,11 @@ export class ExhibitionService {
     for (const file of files) { try { rmSync(file, { force: true }); } catch { /* Catalog membership gates stale and partially written resources. */ } }
   }
   private cleanupUnusedImages(look: ExhibitionLook): void {
-    const retained = new Set([...this.stored.state.looks, ...(this.stored.state.publication?.looks ?? [])].flatMap(item => this.localImages(item)));
+    if (this.sourceCatalog) return this.sourceCatalog.cleanupUnusedImages(look);
+    const retained = new Set([...this.stored.state.looks, ...(this.stored.state.materialVersions ?? []), ...this.retainedMaterials()].flatMap(item => this.localImages(item)));
     this.cleanupFiles(this.localImages(look).filter(file => !retained.has(file)).map(file => join(this.assetsDirectory, file)));
   }
-  private invalidateReference(id: string): void { this.referenceIdentities.delete(id); this.referenceSourceFailures.delete(id); }
+  private invalidateReference(_id: string): void { /* Immutable image paths retain their cached digest. */ }
   private checkUploadAvailable(): void {
     this.assertPresent();
     if (this.uploadConcurrency.inProgress >= this.uploadConcurrency.limit) throw new ApiError('EXHIBITION_UPLOAD_BUSY', '已有素材正在处理，请稍后再试。', 429);
@@ -1016,7 +1106,8 @@ export class ExhibitionService {
       const draft = structuredClone(this.stored);
       draft.state.looks.unshift({ id, ...details, referenceKind: 'image', referenceRoleSource: 'independent', image, referenceImage, referenceImageInfo: reference.info,
         ...display.info, palette: '', source: 'upload' });
-      this.commit(draft, `服装「${details.name}」已上传，启用后会出现在大屏。`, this.now());
+      draft.state.enabledLookIds.unshift(id);
+      this.commit(draft, `服装「${details.name}」已上传。`, this.now());
       return this.snapshotState();
     } catch (error) { this.cleanupFiles(written); throw error; }
     finally { this.uploadConcurrency.inProgress -= 1; this.uploadsInProgress -= 1; }
@@ -1086,12 +1177,12 @@ export class ExhibitionService {
     this.editableInput(input);
     if (this.stored.state.live || this.uploadsInProgress > 0) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待此设备的会话或素材上传结束，再复制数据。', 409);
     sourceState ??= source.get();
-    if (input.copySettings && sourceState.providerMode === 'xmax' && !this.liveService?.status(this.mirrorId).configured) throw new ApiError('MISSING_API_KEY', '请先配置 XMAX 服务端凭证。', 503);
+    if (input.copySettings && sourceState.providerMode === 'xmax' && !this.liveService?.providerDescriptor(this.mirrorId).configured) throw new ApiError('MISSING_API_KEY', '请先配置 XMAX 服务端凭证。', 503);
     // A replace operation may delete every prior uploaded file. Publish a complete
     // restorable snapshot before writing any replacement asset or state.
     this.backupBeforeCopy(source.mirrorId, input);
     const draft = structuredClone(this.stored);
-    const previousLooks = input.copyLooks ? [...draft.state.looks, ...(draft.state.publication?.looks ?? [])] : [];
+    const previousLooks = input.copyLooks ? [...draft.state.looks, ...(draft.state.materialVersions ?? [])] : [];
     const copiedFiles: string[] = [];
     try {
       if (input.copyLooks) {
@@ -1111,16 +1202,11 @@ export class ExhibitionService {
           remapped.set(look.id, id);
           return next;
         });
-        const sourcePublication = sourceState.publication;
-        draft.state.publication = {
-          revision: (draft.state.publication?.revision ?? 0) + 1, publishedAt: this.now(), legacy: sourcePublication?.legacy ?? true,
-          looks: (sourcePublication?.looks ?? []).map(look => {
-            const id = remapped.get(look.id);
-            if (!id) throw new ApiError('EXHIBITION_INVALID_PUBLICATION', '源发布素材版本不存在。', 409);
-            const copyImage = (image: string, role: ImageRole) => sampleImage(image, look.id) ? image : this.newImage(id, role, { data: source.readImage(look.id, image).data }, copiedFiles);
-            return { ...structuredClone(look), id, image: copyImage(look.image, 'display'), ...(look.referenceImage ? { referenceImage: copyImage(look.referenceImage, 'reference') } : {}) };
-          }),
-        };
+        draft.state.materialVersions = (sourceState.materialVersions ?? []).map(look => {
+          const id = remapped.get(look.id)!;
+          const copyImage = (image: string, role: ImageRole) => sampleImage(image, look.id) ? image : this.newImage(id, role, { data: source.readImage(look.id, image).data }, copiedFiles);
+          return { ...structuredClone(look), id, image: copyImage(look.image, 'display'), ...(look.referenceImage ? { referenceImage: copyImage(look.referenceImage, 'reference') } : {}) };
+        });
         draft.state.categories = [...sourceState.categories];
         draft.state.tags = [...sourceState.tags];
         draft.state.enabledLookIds = sourceState.enabledLookIds.map(id => remapped.get(id)!);
@@ -1152,7 +1238,7 @@ export class ExhibitionService {
       mkdirSync(this.copyBackupsDirectory, { recursive: true, mode: 0o700 });
       mkdirSync(staging, { mode: 0o700 });
       writeFileSync(join(staging, 'exhibition.json'), JSON.stringify(this.stored), { flag: 'wx', mode: 0o600 });
-      const images = [...new Set([...this.stored.state.looks, ...(this.stored.state.publication?.looks ?? [])].flatMap(look => this.localImages(look)))];
+      const images = [...new Set([...this.stored.state.looks, ...(this.stored.state.materialVersions ?? [])].flatMap(look => this.localImages(look)))];
       if (images.length) {
         const assets = join(staging, 'exhibition-assets'); mkdirSync(assets, { mode: 0o700 });
         for (const filename of new Set(images)) writeFileSync(join(assets, filename), readFileSync(join(this.assetsDirectory, filename)), { flag: 'wx', mode: 0o600 });
@@ -1187,6 +1273,7 @@ export class ExhibitionService {
     if (details.sku && this.stored.state.looks.some(look => look.sku === details.sku && look.id !== id)) throw new ApiError('EXHIBITION_DUPLICATE_SKU', 'SKU 不能重复。', 409);
     if (payload.imageBase64 !== undefined || hasReference) return this.replaceLookImages(existing, payload, details);
     const draft = structuredClone(this.stored); draft.state.looks[index] = { ...existing, ...details };
+    if (details.mode !== 'free') delete draft.state.looks[index]!.prompt;
     reconcileSelection(draft.state);
     this.commit(draft, `服装「${details.name}」的信息已保存。`, this.now()); return this.snapshotState();
   }
@@ -1204,6 +1291,7 @@ export class ExhibitionService {
 
       for (const prepared of [display, reference]) if (prepared) checkPreparedImage(prepared, this.stored.state.settings.uploadLimits);
       const next: ExhibitionLook = { ...existing, ...details };
+      if (details.mode !== 'free') delete next.prompt;
       // Pin a legacy shared image before replacing its display role.
       if (display && !reference && !existing.referenceImage && existing.referenceKind !== 'none') {
         next.referenceImage = existing.image;
@@ -1230,8 +1318,8 @@ export class ExhibitionService {
     const remainingEnabled = state.enabledLookIds.filter(lookId => lookId !== id);
     const draft = structuredClone(this.stored);
     draft.state.looks = draft.state.looks.filter(look => look.id !== id);
-    const withdrawn = state.publication?.looks.filter(look => look.id === id) ?? [];
-    if (draft.state.publication && withdrawn.length) { draft.state.publication.looks = draft.state.publication.looks.filter(look => look.id !== id); draft.state.publication.revision++; draft.state.publication.publishedAt = this.now(); }
+    const withdrawn = state.materialVersions?.filter(look => look.id === id) ?? [];
+    draft.state.materialVersions = draft.state.materialVersions?.filter(look => look.id !== id);
     draft.state.enabledLookIds = remainingEnabled;
     reconcileSelection(draft.state);
     if (draft.state.displayedLookId === id) draft.state.displayedLookId = null;
@@ -1279,6 +1367,7 @@ export class ExhibitionService {
   }
 
   uiSkinAsset(id: string): { data: Buffer; mime: 'image/webp' } {
+    if (this.sourceCatalog) return this.sourceCatalog.uiSkinAsset(id);
     const skin = this.stored.state.settings.uiSkin;
     if (!skin || skin.image !== `${this.assetBasePath.replace(/\/assets$/u, '/skin')}/${id}`) throw new ApiError('EXHIBITION_SKIN_NOT_FOUND', '未找到界面皮肤。', 404);
     return this.skinStore.asset(id);
@@ -1311,8 +1400,9 @@ export class ExhibitionService {
     const draft = structuredClone(this.stored); const state = draft.state; const time = this.now(); let message: string;
     if (state.live?.renewal && ['switch', 'next', 'previous', 'select'].includes(input.action)) throw new ApiError('EXHIBITION_RENEWAL_PENDING', '正在续接体验，请稍候再换装。', 409);
     const isLookId = (id: unknown): id is string => typeof id === 'string' && state.looks.some(look => look.id === id);
-    const currentModeIds = activeLookIds(state);
-    const requireSelection = () => { if (state.selectedLookId === null || !currentModeIds.includes(state.selectedLookId)) throw new ApiError('EXHIBITION_NO_ENABLED_LOOKS', '当前模式暂无启用素材，请先上传并启用素材。', 409); };
+    this.refreshCatalog(state);
+    let currentModeIds = activeLookIds(state);
+    const requireSelection = () => { if (state.selectedLookId === null || (!currentModeIds.includes(state.selectedLookId) && state.activeLook?.id !== state.selectedLookId)) throw new ApiError('EXHIBITION_NO_ENABLED_LOOKS', '当前模式暂无启用素材，请先上传并启用素材。', 409); };
     const requirePhase = (...phases: ExhibitionPhase[]) => { if (!phases.includes(state.phase)) throw new ApiError('EXHIBITION_INVALID_PHASE', '当前体验阶段无法执行此操作。', 409); };
     switch (input.action) {
       case 'keepalive':
@@ -1324,15 +1414,17 @@ export class ExhibitionService {
       case 'begin':
         requirePhase('select', 'idle');
         if (state.live) throw new ApiError('EXHIBITION_LIVE_STOP_PENDING', '上一轮停止尚未确认，请重试停止后再开始。', 409);
-        requireSelection();
         if (state.providerMode === 'xmax') {
           const pending = this.liveService?.providerSettings?.(this.mirrorId);
           if (pending?.pending && pending.desired === 'decart' && state.experienceMode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
-          if (pending?.pending) this.assertProviderPublicationReady(pending.desired);
-          else this.requireReady(state.selectedLookId!);
+          if (pending?.pending) this.assertProviderMaterialsReady(pending.desired);
           this.liveService?.activatePendingProvider?.(this.mirrorId);
-          if (this.liveService?.status(this.mirrorId).providerId === 'decart' && state.experienceMode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
+          this.refreshCatalog(state); reconcileSelection(state); currentModeIds = activeLookIds(state);
+          requireSelection();
+          this.requireReady(state.selectedLookId!, state.catalog?.looks.find(look => look.id === state.selectedLookId));
+          if (this.liveService?.providerDescriptor(this.mirrorId).providerId === 'decart' && state.experienceMode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
         }
+        requireSelection();
         state.phase = 'generating'; state.sessionNumber += 1; state.generationNumber += 1; state.displayedLookId = null;
         state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = state.providerMode === 'demo' ? `第 ${state.sessionNumber} 轮演示已开始，正在准备换装画面。` : `第 ${state.sessionNumber} 轮体验已开始，等待大屏连接实时换装。`; break;
@@ -1353,10 +1445,11 @@ export class ExhibitionService {
       case 'next':
       case 'previous': {
         requirePhase('generating', 'showcase'); requireSelection(); const current = currentModeIds.indexOf(state.selectedLookId!); const direction = input.action === 'next' ? 1 : -1;
-        if (currentModeIds.length === 1) return this.snapshotState();
-        if (state.providerMode === 'xmax') this.requireReady(currentModeIds[(current + direction + currentModeIds.length) % currentModeIds.length]);
+        if (!currentModeIds.length) throw new ApiError('EXHIBITION_NO_ENABLED_LOOKS', '当前模式暂无可用素材。', 409);
+        if (currentModeIds.length === 1 && current >= 0) return this.snapshotState();
+        if (state.providerMode === 'xmax') this.requireReady(currentModeIds[current < 0 ? (direction === 1 ? 0 : currentModeIds.length - 1) : (current + direction + currentModeIds.length) % currentModeIds.length]);
         state.settings.switchMode = 'manual'; state.autoSwitchAt = null;
-        state.selectedLookId = currentModeIds[(current + direction + currentModeIds.length) % currentModeIds.length];
+        state.selectedLookId = currentModeIds[current < 0 ? (direction === 1 ? 0 : currentModeIds.length - 1) : (current + direction + currentModeIds.length) % currentModeIds.length];
         state.phase = 'generating'; state.generationNumber += 1; state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
         message = `正在切换至${this.lookName(state.selectedLookId)}${state.providerMode === 'demo' ? '演示图' : '实时造型'}。`; break;
       }
@@ -1418,9 +1511,9 @@ export class ExhibitionService {
         message = '素材顺序已保存，大屏选择和自动换装按此顺序播放。'; break;
       }
       case 'configure': {
-        const otherSettings = input.enabledLookIds !== undefined || input.autoReturnSeconds !== undefined || input.uploadLimits !== undefined || input.providerMode !== undefined || input.experienceMode !== undefined || input.uiSkinPreset !== undefined || input.materialDrawerColumns !== undefined || input.gestureRecognition !== undefined || input.sessionLimits !== undefined;
+        const otherSettings = input.autoReturnSeconds !== undefined || input.uploadLimits !== undefined || input.providerMode !== undefined || input.experienceMode !== undefined || input.uiSkinPreset !== undefined || input.materialDrawerColumns !== undefined || input.gestureRecognition !== undefined || input.sessionLimits !== undefined;
         if (otherSettings) requirePhase('select', 'idle');
-        if (!otherSettings && input.switchMode === undefined && input.autoSwitchSeconds === undefined) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请提供要更新的展会设置。');
+        if (!otherSettings && input.enabledLookIds === undefined && input.switchMode === undefined && input.autoSwitchSeconds === undefined) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请提供要更新的展会设置。');
         if (input.materialDrawerColumns !== undefined) {
           if (!isMaterialDrawerColumns(input.materialDrawerColumns)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '素材列数请选择一列或两列。');
           if (state.live) throw new ApiError('EXHIBITION_MIRROR_BUSY', '请等待实时会话停止后再修改素材列数。', 409);
@@ -1471,14 +1564,15 @@ export class ExhibitionService {
         }
         if (input.providerMode !== undefined) {
           if (input.providerMode !== 'demo' && input.providerMode !== 'xmax') throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请选择演示或 XMAX 实时模式。');
-          if (input.providerMode === 'xmax' && !this.liveService?.status(this.mirrorId).configured) throw new ApiError('MISSING_API_KEY', '请先配置 XMAX 服务端凭证。', 503);
+          if (input.providerMode === 'xmax' && !this.liveService?.providerDescriptor(this.mirrorId).configured) throw new ApiError('MISSING_API_KEY', '请先配置 XMAX 服务端凭证。', 503);
           state.providerMode = input.providerMode;
         }
-        reconcileSelection(state); message = '展会设置已保存。'; break;
+        this.refreshCatalog(state); reconcileSelection(state); message = '展会设置已保存。'; break;
       }
       default: throw new ApiError('EXHIBITION_INVALID_COMMAND', '未知的展会操作。');
     }
     const live = state.live;
+    if (['begin', 'switch', 'next', 'previous'].includes(input.action)) { const next = state.catalog?.looks.find(look => look.id === state.selectedLookId); if (next) state.activeLook = structuredClone(next); }
     const materialChanged = live?.generationNumber !== state.generationNumber || live?.lookId !== state.selectedLookId;
     const interruptedSession = live?.sessionId && (state.providerMode !== 'xmax' || !['generating', 'showcase'].includes(state.phase)
       || (materialChanged && !this.keepsLiveConnection(state))) ? live.sessionId : undefined;
@@ -1513,10 +1607,11 @@ export class ExhibitionService {
     const prompt = mode === 'free' ? freePrompt(input.prompt) : undefined;
     const category = shortText(input.category ?? this.stored.state.categories[0], '分类', 20); const tags = nameList(input.tags ?? [], '服装标签', 8, true);
     if (!this.stored.state.categories.includes(category) || tags.some(tag => !this.stored.state.tags.includes(tag))) throw new ApiError('EXHIBITION_UNKNOWN_TAXONOMY', '请先在分类标签管理中添加分类或标签。');
-    return { name, description, category, tags, mode, prompt, ...(sku ? { sku } : {}), ...(referenceKind === undefined ? {} : { referenceKind }) };
+    return { name, description, category, tags, mode, ...(prompt === undefined ? {} : { prompt }), ...(sku ? { sku } : {}), ...(referenceKind === undefined ? {} : { referenceKind }) };
   }
   private lookName(id: string | null): string { return this.stored.state.looks.find(look => look.id === id)?.name ?? '素材'; }
   private reset(draft: StoredExhibition, phase: 'idle' | 'select') {
+    delete draft.state.activeLook;
     draft.state.phase = phase; draft.state.displayedLookId = null; draft.state.generationReadyAt = null; draft.state.autoSwitchAt = null; draft.pausedPhase = null; draft.pausedRemainingMs = 0;
     reconcileSelection(draft.state);
   }
@@ -1533,7 +1628,9 @@ export class ExhibitionService {
     const draft = structuredClone(this.stored); const state = draft.state;
     const ids = activeLookIds(state).filter(id => { if (state.providerMode === 'demo') return true; try { this.requireReady(id); return true; } catch { return false; } }); const current = ids.indexOf(state.selectedLookId!);
     if (!ids.length || (ids.length < 2 && current >= 0)) return;
-    state.selectedLookId = ids[current < 0 ? 0 : (current + 1) % ids.length]; state.phase = 'generating'; state.generationNumber += 1;
+    state.selectedLookId = ids[current < 0 ? 0 : (current + 1) % ids.length];
+    state.activeLook = structuredClone(state.catalog!.looks.find(look => look.id === state.selectedLookId)!);
+    state.phase = 'generating'; state.generationNumber += 1;
     state.generationReadyAt = state.providerMode === 'demo' ? time + GENERATION_DELAY_MS : null;
     draft.lastCommandAt = time;
     this.commit(draft, `自动切换至${this.lookName(state.selectedLookId)}。`, time);
@@ -1572,6 +1669,11 @@ export class ExhibitionService {
   private commit(draft: StoredExhibition, message: string, time: number) {
     this.assertPresent();
     const previous = this.stored.state;
+    const previousBound = this.boundLook;
+    if (!draft.state.live) { this.boundLook = undefined; delete draft.state.boundLook; }
+    else if (this.boundLook) draft.state.boundLook = structuredClone(this.boundLook);
+    this.refreshCatalog(draft.state);
+    if (['idle', 'select'].includes(draft.state.phase)) reconcileSelection(draft.state);
     const lifecycle = draft.state.lifecycle ??= structuredClone(previous.lifecycle ?? initialLifecycle());
     if (draft.state.sessionNumber !== previous.sessionNumber) {
       lifecycle.experienceId = randomUUID(); lifecycle.state = 'active'; lifecycle.connection = 'idle';
@@ -1587,7 +1689,8 @@ export class ExhibitionService {
     }
     if (!this.autoSwitchEligible(draft.state, time)) draft.state.autoSwitchAt = null;
     else if (draft.state.autoSwitchAt == null) draft.state.autoSwitchAt = time + (draft.state.settings.autoSwitchSeconds ?? EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS) * 1_000;
-    draft.schemaVersion = 5;
+    draft.schemaVersion = 6;
+    delete draft.state.publication;
     draft.state.revision = this.stored.state.revision + 1; draft.state.updatedAt = time;
     message = message.replace(/(?:tk|uk|sk)-[A-Za-z0-9_-]+/gi, '[凭证已隐藏]').replace(/(?:https?|wss?):\/\/\S+/gi, '[连接地址]');
     if (draft.state.live?.error) draft.state.live.error = draft.state.live.error.replace(/(?:tk|uk|sk)-[A-Za-z0-9_-]+/gi, '[凭证已隐藏]').replace(/(?:https?|wss?):\/\/\S+/gi, '[连接地址]');
@@ -1607,5 +1710,6 @@ export class ExhibitionService {
       finally { rmSync(temporary, { force: true }); }
     }
     for (const listener of this.changes) listener();
+    for (const look of [...(previous.materialVersions ?? []), ...(previous.activeLook ? [previous.activeLook] : []), ...(previousBound ? [previousBound] : [])]) this.cleanupUnusedImages(look);
   }
 }

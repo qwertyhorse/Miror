@@ -20,7 +20,7 @@ export class DecartProvider implements Provider {
       method: body === undefined ? 'GET' : 'POST', headers: { 'x-api-key': this.key, ...(typeof body === 'string' ? { 'Content-Type': 'application/json' } : {}) },
       body, redirect: 'error', signal: AbortSignal.timeout(15_000),
     }); } catch { throw new ApiError('PROVIDER_NETWORK_ERROR', 'Decart 请求超时或网络不可用。', 502); }
-    if (!response.ok) throw new ApiError(response.status === 429 ? 'PROVIDER_CAPACITY' : 'PROVIDER_REQUEST_REJECTED', response.status === 429 ? 'Decart 暂无可用容量，请稍后重试。' : 'Decart 拒绝请求，请检查密钥与服务状态。', response.status === 429 ? 429 : 502);
+    if (!response.ok) throw new ApiError(response.status === 429 ? 'PROVIDER_CAPACITY' : response.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REQUEST_REJECTED', response.status === 429 ? 'Decart 暂无可用容量，请稍后重试。' : 'Decart 拒绝请求，请检查密钥与服务状态。', response.status === 429 ? 429 : 502);
     let data: unknown; try { data = await response.json(); } catch { /* fail closed */ }
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw new ApiError('PROVIDER_INVALID_RESPONSE', 'Decart 返回格式无效。', 502);
     return data as Record<string, unknown>;

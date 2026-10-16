@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,10 +19,10 @@ let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'generating', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'generating', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
     looks: ['first', 'second', 'third'].map(id => ({ id, mode: 'clothx', name: id, image: `/assets/${id}.png`, source: 'sample', description: '', category: '', tags: [], palette: '' })),
     enabledLookIds: ['first', 'second', 'third'], categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
-    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 0, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides };
+    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 0, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides });
 }
 function track() { const value = { readyState: 'live', onended: null, getSettings: () => ({ deviceId: 'camera-fixture' }), clone: () => track(),
   stop: vi.fn(() => { value.readyState = 'ended'; }) }; return value; }
@@ -46,17 +47,17 @@ async function fixture(initialState = snapshot(), continuous = false) {
     if (path.endsWith('/live/status')) return { configured: true, perSessionLimit: 30 };
     if (path.endsWith('/live/session')) {
       record = { id: continuous ? `segment-${++segments}` : 'same-session', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'camera', sourceKind: 'camera', sourceName: '摄像头',
-        targetItemId: 'exhibition-first', lookId: input!.lookId, referenceAsset: referenceAsset(input!.lookId), refImageUrl: '', referenceVersion: 0,
+        targetItemId: 'exhibition-first', lookId: input!.lookId, referenceScope: 'account-scope', referenceAsset: referenceAsset(input!.lookId), refImageUrl: `https://reference.fixture/${referenceAsset(input!.lookId).split('/').pop()}`, referenceVersion: 1,
         expiresAt: new Date(Date.now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none',
         exhibition: { mirrorId: 'default', deviceId: input!.deviceId, lookId: input!.lookId, sessionNumber: 1, generationNumber: input!.generationNumber,
           mode: 'clothx', prompt: exhibitionPromptForLook({ mode: 'clothx' }), ...(continuous ? { continuous: true } : {}) } };
       return { ...record };
     }
-    if (path.endsWith('/reference')) { record = { ...record, refImageUrl: resolvedBinding(input!.bindingId), referenceVersion: 1 }; return { ...record }; }
+    if (path.endsWith('/reference')) { record = { ...record, refImageUrl: `https://reference.fixture/${referenceAsset(input!.lookId).split('/').pop()}`, referenceVersion: 1 }; return { ...record }; }
     if (path.endsWith('/link')) { record = { ...record, providerSessionId: input!.providerSessionId }; return { ...record }; }
     if (path.endsWith('/condition')) {
-      if (record.exhibition.generationNumber !== input!.generationNumber) record = { ...record, lookId: input!.lookId, referenceAsset: referenceAsset(input!.lookId),
-        refImageUrl: resolvedBinding(input!.bindingId), referenceVersion: record.referenceVersion + 1, exhibition: { ...record.exhibition, lookId: input!.lookId, generationNumber: input!.generationNumber } };
+      if (record.exhibition.generationNumber !== input!.generationNumber) record = { ...record, lookId: input!.lookId, referenceScope: 'account-scope', referenceAsset: referenceAsset(input!.lookId),
+        refImageUrl: `https://reference.fixture/${referenceAsset(input!.lookId).split('/').pop()}`, referenceVersion: record.referenceVersion + 1, exhibition: { ...record.exhibition, lookId: input!.lookId, generationNumber: input!.generationNumber } };
       return { ...record };
     }
     if (path.endsWith('/condition/applied')) return {};

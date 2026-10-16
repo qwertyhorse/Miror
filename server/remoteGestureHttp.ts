@@ -107,19 +107,19 @@ export async function remoteGestureRequest(request: IncomingMessage, response: S
         throw new ApiError('GESTURE_INVALID_IMAGE', '手势画面格式无效。', 400);
       const state = current.get();
       const runtimeLookIds = (value: ReturnType<ExhibitionService['get']>) =>
-        value.providerMode === 'xmax' && value.publication
-          ? value.publication.looks.filter(look => look.mode === value.experienceMode).map(look => look.id)
+        value.providerMode === 'xmax'
+          ? value.catalog?.availableLookIds ?? []
           : value.enabledLookIds.filter(id => value.looks.some(look => look.id === id && look.mode === value.experienceMode));
       const scope = (value: ReturnType<ExhibitionService['get']>) => JSON.stringify([
         value.sessionNumber, value.generationNumber, value.experienceMode, value.phase, value.selectedLookId,
-        value.providerMode, runtimeLookIds(value), value.providerMode === 'xmax' ? value.publication?.revision : null,
+        value.providerMode, runtimeLookIds(value), value.providerMode === 'xmax' ? value.catalog?.revision : null,
         value.settings.gestureRecognition,
         // Heartbeats must not invalidate every camera sample. Only ownership/completion boundaries matter.
         value.live?.deviceId, value.live?.sessionId, value.live?.status, value.live?.localEnded,
       ]);
       const before = scope(state);
       const serverBlocked = state.providerMode !== 'xmax' || state.experienceMode === 'mox'
-        || runtimeLookIds(state).length < 2 || !['idle', 'select', 'showcase'].includes(state.phase) || state.live?.localEnded === true;
+        || !runtimeLookIds(state).some(id => id !== state.selectedLookId) || !['idle', 'select', 'showcase'].includes(state.phase) || state.live?.localEnded === true;
       const result = await coordinator.frame(id, metadata, jpeg, resolveExhibitionGestureSettings(state.settings.gestureRecognition), serverBlocked, () => {
         try { authenticate(terminalId, token); assertSession(id, owner); return !response.destroyed && before === scope(current.get()); }
         catch { return false; }

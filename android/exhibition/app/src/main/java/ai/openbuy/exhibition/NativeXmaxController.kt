@@ -126,11 +126,9 @@ internal class NativeXmaxController(
         cameraDeviceId: String? = null,
         cameraRotationDegrees: Int = 0,
         captureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
-        xmaxRotationDegrees: Int? = null,
     ): String = withContext(Dispatchers.Main.immediate) {
         require(model == "x2.0") { "当前仅支持 X2.0" }
         require(cameraRotationDegrees in listOf(0, 90, 180, 270)) { "摄像头方向无效" }
-        require(xmaxRotationDegrees == null || xmaxRotationDegrees in listOf(0, 90, 180, 270)) { "XMAX输入方向无效" }
         mutex.withLock {
             check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
             release()
@@ -144,9 +142,8 @@ internal class NativeXmaxController(
                     require(image.isNotEmpty() && image.size <= 64 * 1024 * 1024) { "输入图片不可用" }
                     next.createLocalImageStream(image)
                 } else {
-                    // Explicit input direction replaces the preview's installation correction;
-                    // do not add both angles. Geometry is resolved again before RTC encoding.
-                    camera(next, position, cameraDeviceId, xmaxRotationDegrees ?: cameraRotationDegrees, captureSelection)
+                    // Preview and model share the same installation correction.
+                    camera(next, position, cameraDeviceId, cameraRotationDegrees, captureSelection)
                 }
                 localStream = source
                 activeView.videoContentMode = VideoContentMode.FILL

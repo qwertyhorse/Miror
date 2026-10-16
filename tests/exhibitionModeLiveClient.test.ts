@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps, type ExhibitionSdkSession } from '../src/exhibition/useExhibitionLive';
 import { EXHIBITION_EXPERIENCE_MODES, exhibitionPromptForLook, type ExhibitionExperienceMode } from '../shared/exhibition';
@@ -11,16 +10,14 @@ function setup(mode: ExhibitionExperienceMode, freePrompt = '保持人物动作�
   const track = { readyState: 'live', onended: null, stop: vi.fn() };
   const stream = { getVideoTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream;
   const reference = new File(['reference'], 'reference.png', { type: 'image/png' });
-  const created = { id: 'session-1', token: 'test-token', model: 'x2.0', sourceKind: mode === 'mox' ? 'photo' : 'camera', referenceAsset: referenceKind === 'none' ? '' : '/asset.webp', refImageUrl: '', referenceVersion: 0, expiresAt: new Date(Date.now() + 60000).toISOString(),
+  const created = { id: 'session-1', token: 'test-token', model: 'x2.0', sourceKind: mode === 'mox' ? 'photo' : 'camera', referenceScope: 'account-scope', referenceAsset: referenceKind === 'none' ? '' : '/asset.webp', refImageUrl: referenceKind === 'none' ? '' : 'https://reference.test/image.webp', referenceVersion: referenceKind === 'none' ? 0 : 1, expiresAt: new Date(Date.now() + 60000).toISOString(),
     exhibition: { mirrorId: 'mirror-a', lookId: 'look-a', deviceId: 'device-a', generationNumber: 1, sessionNumber: 1, mode, prompt } } as any;
   const sdk: ExhibitionSdkSession = { getSessionUid: () => 'provider-a', set: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}),
     media: { streamSetting: { width: 512, height: 768 } }, beginDrag: vi.fn(), endDrag: vi.fn(), sendTracks: vi.fn(async () => {}) };
   let callbacks!: Parameters<ExhibitionLiveDeps['connect']>[2];
   const deps = { create: vi.fn(async () => created), reference: vi.fn(async () => reference), prepare: vi.fn(async () => {}), readyLookup: vi.fn(async () => 'https://reference.test/image.webp'),
-    bind: vi.fn(async () => ({ ...created, referenceVersion: 1, refImageUrl: 'https://reference.test/image.webp' })),
     connect: vi.fn(async (_source, _local, next) => { callbacks = next; return sdk; }), link: vi.fn(async () => ({ ...created, providerSessionId: 'provider-a', referenceVersion: referenceKind === 'none' ? 0 : 1 })),
-    firstFrame: vi.fn(async () => created), stop: vi.fn(async () => created), heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => stream), now: () => 42 } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
-  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
+    firstFrame: vi.fn(async () => created), stop: vi.fn(async () => created), heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => stream), now: () => 42 } satisfies ExhibitionLiveDeps & { readyLookup: (...args: any[]) => Promise<string> };
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), interaction: vi.fn<(value: MoXInteraction | null) => void>(), presentation: vi.fn() };
   const connection = new ExhibitionLiveConnection({ mirrorId: 'mirror-a', lookId: 'look-a', deviceId: 'device-a', generationNumber: 1, sessionNumber: 1, expectedRevision: 1, image: '/asset.webp', referenceKind, mode, prompt: freePrompt, stream: mode === 'mox' ? undefined : stream }, events, deps);
   running.push(connection);
@@ -37,7 +34,7 @@ describe('mode-specific exhibition generation', () => {
   });
   it('rejects mismatched mode before sending the reference or any input', async () => {
     const f = setup('charx'); f.created.exhibition.mode = 'clothx'; await f.connection.start();
-    expect(f.deps.readyLookup).toHaveBeenCalledOnce(); expect(f.deps.connect).not.toHaveBeenCalled(); expect(f.deps.stop).toHaveBeenCalledWith('session-1');
+    expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.deps.connect).not.toHaveBeenCalled(); expect(f.deps.stop).toHaveBeenCalledWith('session-1');
   });
   it('rejects a changed Free prompt rather than generating from stale data', async () => {
     const f = setup('free'); f.created.exhibition.prompt = 'other instruction'; await f.connection.start();
@@ -70,8 +67,8 @@ describe('mode-specific exhibition generation', () => {
     await f.connection.start();
     expect(f.deps.create.mock.invocationCallOrder[0]).toBeLessThan(f.deps.prepare.mock.invocationCallOrder[0]);
     expect(f.deps.prepare).toHaveBeenCalledWith('global');
-    expect(f.deps.reference).not.toHaveBeenCalled(); expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.deps.bind).not.toHaveBeenCalled();
-    expect(f.deps.connect).toHaveBeenCalledWith(f.stream, expect.objectContaining({ referenceAsset: '', refImageUrl: '', referenceVersion: 0 }), expect.any(Object));
+    expect(f.deps.reference).not.toHaveBeenCalled(); expect(f.deps.readyLookup).not.toHaveBeenCalled();
+    expect(f.deps.connect).toHaveBeenCalledWith(f.stream, expect.objectContaining({ referenceScope: 'account-scope', referenceAsset: '', refImageUrl: '', referenceVersion: 0 }), expect.any(Object));
     expect(f.deps.link.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.sdk.set).mock.invocationCallOrder[0]);
     expect(f.sdk.set).toHaveBeenCalledExactlyOnceWith({ prompt: '保持人物动作，将背景变成童话森林' });
     expect(f.deps.clone).toHaveBeenCalledTimes(1);
@@ -95,7 +92,7 @@ describe('mode-specific exhibition generation', () => {
   });
 
   it.each([
-    { referenceAsset: '/asset.webp' }, { refImageUrl: 'https://unexpected.test/ref.webp' }, { referenceVersion: 1 },
+    { referenceScope: 'account-scope', referenceAsset: '/asset.webp' }, { refImageUrl: 'https://unexpected.test/ref.webp' }, { referenceVersion: 1 },
   ])('rejects an unexpected reference in a prompt-only server snapshot: %j', async change => {
     const f = setup('free', '童话森林', 'none'); Object.assign(f.created, change);
     await f.connection.start();

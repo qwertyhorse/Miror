@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
@@ -14,10 +15,10 @@ function material(id: string, mode: ExhibitionExperienceMode = 'clothx'): Exhibi
   return { id, mode, name: `素材-${id}`, description: '用于测试的素材说明', image: '/assets/test.webp', source: 'sample', palette: '', category: '隐藏旧分类', tags: ['隐藏旧标签'], ...(mode === 'free' ? { prompt: '保留人物动作，更换背景' } : {}) };
 }
 function state(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'default', revision: 4, phase: 'idle', experienceMode: 'clothx', selectedLookId: 'cloth', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'default', revision: 4, phase: 'idle', experienceMode: 'clothx', selectedLookId: 'cloth', displayedLookId: null,
     looks: [material('cloth'), material('character', 'charx')], enabledLookIds: ['cloth', 'character'], categories: ['隐藏旧分类'], tags: ['隐藏旧标签'],
     sessionNumber: 0, generationNumber: 0, updatedAt: 1_800_000_000_000, generationReadyAt: null, providerMode: 'demo', live: null, logs: [],
-    settings: { autoReturnSeconds: 60, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, maxWidth: 2048, minHeight: 64, maxHeight: 2048 } }, ...overrides };
+    settings: { autoReturnSeconds: 60, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, maxWidth: 2048, minHeight: 64, maxHeight: 2048 } }, ...overrides });
 }
 function controller(snapshot: ExhibitionState, options: Partial<ExhibitionController> = {}): ExhibitionController {
   return { state: snapshot, mirrorId: snapshot.mirrorId!, pending: false, connected: true, error: '', send: vi.fn(async () => true), upload: vi.fn(async () => null),
@@ -60,7 +61,7 @@ describe('six-mode console presentation', () => {
 
   it('allows the final enabled material to be disabled or deleted', () => {
     const html = renderToStaticMarkup(createElement(WardrobePanel, { controller: controller(state({ looks: [material('cloth')], enabledLookIds: ['cloth'] })) }));
-    const toggle = html.match(/<input[^>]*aria-label="启用素材-cloth"[^>]*>/)?.[0];
+    const toggle = html.match(/<input[^>]*aria-label="上架素材-cloth"[^>]*>/)?.[0];
     const remove = html.match(/<button[^>]*aria-label="素材-cloth的更多操作"[^>]*>/)?.[0];
     expect(toggle).toBeDefined(); expect(toggle).not.toContain('disabled');
     expect(remove).toBeDefined(); expect(remove).not.toContain('disabled');
@@ -153,14 +154,14 @@ describe('six-mode console presentation', () => {
 
   it('does not fall back to an enabled material from another mode in current control', () => {
     const html = consoleHtml(state({ experienceMode: 'mox', selectedLookId: 'cloth' }));
-    expect(html).toContain('请在素材管理中为 MoX 上传并启用素材后再开始体验。');
+    expect(html).toContain('请在素材管理中为 MoX 上传素材，处理完成后开始体验。');
     expect(html).not.toContain('素材-cloth'); expect(primaryButton(html)).toContain('disabled');
   });
 
   it('renders an entirely empty library with a disabled start button and available mode selection', () => {
     const html = consoleHtml(state({ looks: [], enabledLookIds: [], selectedLookId: null }));
     expect(primaryButton(html)).toContain('disabled'); expect(modeFieldset(html)).not.toContain('disabled');
-    expect(html).toContain('请在素材管理中为 ClothX 上传并启用素材后再开始体验。');
+    expect(html).toContain('请在素材管理中为 ClothX 上传素材，处理完成后开始体验。');
   });
 
   it('only allows mode switching while idle/select with no active live session and a connected controller', () => {
@@ -250,4 +251,12 @@ describe('six-mode console presentation', () => {
     expect(secondaryButtons(html).at(-1)).toEqual({ label: '正在停止…', disabled: true });
     expect(primaryButton(html)).toContain('disabled'); expect(modeFieldset(html)).toContain('disabled');
   });
+});
+
+it('allows moving from an off-sale active material to the sole remaining available choice', () => {
+  const current = state({ phase: 'showcase', providerMode: 'xmax', selectedLookId: 'cloth', enabledLookIds: ['other'],
+    activeLook: material('cloth'), catalog: { revision: 2, providerId: 'xmax', looks: [material('other')], availableLookIds: ['other'] } });
+  const html = consoleHtml(current);
+  const next = html.match(/<button[^>]*aria-label="下一份"[^>]*>/)?.[0];
+  expect(next).toBeDefined(); expect(next).not.toContain('disabled');
 });

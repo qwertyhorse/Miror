@@ -26,7 +26,11 @@ export function exhibitionLiveFailure(cause: unknown, fallbackMessage: string): 
   const code = typeof error?.code === 'string' ? error.code : '';
   const reason = typeof details?.reason_code === 'string' ? details.reason_code : '';
   let message = safeExhibitionErrorMessage(fallbackMessage);
-  if (code === 'INVALID_API_KEY') message = 'XMAX 凭证无效，请检查后台配置。';
+  if (code === 'MATERIAL_VERSION_CHANGED') message = '素材已更新，请重新选择。';
+  else if (code === 'MATERIAL_NOT_READY' || code === 'REFERENCE_NOT_READY') message = '素材处理中，请稍后重试。';
+  else if (code === 'PROVIDER_REJECTED') message = '换装服务拒绝请求，请检查服务配置。';
+  else if (code === 'BACKEND_UNAVAILABLE' || code === 'NETWORK_UNAVAILABLE') message = '连接中断，请检查网络后重试。';
+  else if (code === 'INVALID_API_KEY') message = 'XMAX 凭证无效，请检查后台配置。';
   else if (details?.business_code === 500 || (typeof details?.http_status === 'number' && details.http_status >= 500))
     message = 'XMAX 生成服务暂时异常，请稍后重试。';
   else if (reason === 'remote_first_frame_timeout') message = '生成画面等待超时，请检查镜端网络后重试。';

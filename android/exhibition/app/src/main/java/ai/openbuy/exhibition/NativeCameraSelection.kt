@@ -95,3 +95,9 @@ internal data class NativeCameraSelection(val cameraId: String? = null) {
         }
     }
 }
+
+/** Conflicting former preview/model settings require a human calibration before generation. */
+internal object NativeCameraCalibration {
+    fun needsCalibration(installation: Int, legacyModel: Int): Boolean =
+        legacyModel in listOf(0, 90, 180, 270) && legacyModel != installation
+}

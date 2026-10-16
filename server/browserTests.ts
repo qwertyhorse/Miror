@@ -13,6 +13,8 @@ const TEST_ID = /^test-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{
 interface TestEntry {
   id: string; name: string; directory: string; tokenHash: Buffer; expiresAt: number; lastSeen: number;
   exhibition: ExhibitionService; service: TryOnService; closing: boolean; cleanup?: Promise<void>;
+  source: ExhibitionService; sourceScope: string; unsubscribe?: () => void;
+  invalidated?: boolean;
 }
 interface ClosedEntry { tokenHash: Buffer; expiresAt: number; }
 export interface BrowserTestContext {
@@ -20,7 +22,7 @@ export interface BrowserTestContext {
 }
 export interface CreatedBrowserTest { mirror: ExhibitionMirrorSummary; token: string; expiresAt: number; }
 
-/** Browser tests have their own ownership, state and assets; only the credential snapshot and audit store are shared. */
+/** Browser tests own their connection, but consume the source mirror's material catalog. */
 export class BrowserTests {
   private readonly directory: string;
   private readonly now: () => number;
@@ -43,7 +45,7 @@ export class BrowserTests {
   create(source: ExhibitionService, sourceName?: string): CreatedBrowserTest {
     if (this.destroyed || !this.liveService) throw new ApiError('BROWSER_TEST_UNAVAILABLE', '浏览器测试暂不可用。', 503);
     if (this.entries.size >= BROWSER_TEST_LIMIT) throw new ApiError('BROWSER_TEST_LIMIT', '浏览器测试已满，请先关闭一个测试。', 429);
-    const sourceState = source.read();
+    const sourceScope = this.liveService.materialScope(source.mirrorId);
     const service = this.liveService.forBrowserTest(source.mirrorId);
     const id = `test-${randomUUID()}`; const token = randomBytes(32).toString('hex');
     const directory = join(this.directory, id); const expiresAt = this.now() + BROWSER_TEST_TTL_MS;
@@ -52,16 +54,16 @@ export class BrowserTests {
       exhibition = new ExhibitionService(directory, { now: this.now, mirrorId: id,
         assetBasePath: `/api/exhibition/mirrors/${id}/assets`, strictStorage: true });
       exhibition.attachLiveService(service);
-      const copied = exhibition.copyFrom(source, { expectedRevision: exhibition.read().revision, copyLooks: true, copySettings: true }, sourceState);
+      exhibition.syncSourceCatalog(source);
       exhibition.command({ action: 'configure', providerMode: 'xmax' });
-      const selectedIndex = sourceState.looks.findIndex(look => look.id === sourceState.selectedLookId);
-      const selected = copied.looks[selectedIndex];
-      if (selected && copied.enabledLookIds.includes(selected.id) && selected.mode === sourceState.experienceMode) {
-        exhibition.command({ action: 'select', lookId: selected.id });
+      const selectedLookId = source.read().selectedLookId;
+      if (selectedLookId && exhibition.read().catalog?.availableLookIds.includes(selectedLookId)) {
+        exhibition.command({ action: 'select', lookId: selectedLookId });
       }
       const entry: TestEntry = { id, name: sourceName ? `${sourceName} · 浏览器测试` : '浏览器测试', directory,
-        tokenHash: this.hash(token), expiresAt, lastSeen: this.now(), exhibition, service, closing: false };
+        tokenHash: this.hash(token), expiresAt, lastSeen: this.now(), exhibition, service, closing: false, source, sourceScope };
       this.entries.set(id, entry);
+      entry.unsubscribe = source.subscribe(() => this.synchronize(entry));
       return { mirror: this.summary(entry), token, expiresAt };
     } catch (error) {
       exhibition?.markRemoved();
@@ -72,6 +74,8 @@ export class BrowserTests {
 
   resolve(id: string, token: unknown): BrowserTestContext {
     const entry = this.authorized(id, token);
+    if (entry && !entry.closing) this.synchronize(entry);
+    if (entry?.invalidated) throw new ApiError('BROWSER_TEST_SOURCE_CHANGED', '设备配置已更新，请重新打开浏览器测试。', 410);
     if (!entry || entry.closing) throw this.expired();
     if (this.now() >= entry.expiresAt) {
       void this.finish(entry).catch(() => undefined);
@@ -92,6 +96,7 @@ export class BrowserTests {
   async sweep(): Promise<void> {
     for (const [id, entry] of this.closed) if (this.now() >= entry.expiresAt) this.closed.delete(id);
     await Promise.allSettled([...this.entries.values()].map(async entry => {
+      if (!entry.closing) this.synchronize(entry);
       if (entry.closing || this.now() >= entry.expiresAt || this.now() - entry.lastSeen >= BROWSER_TEST_IDLE_MS || this.destroyed) await this.finish(entry);
       else await entry.exhibition.sweepLive();
     }));
@@ -106,8 +111,20 @@ export class BrowserTests {
     if (entry.cleanup) return entry.cleanup;
     // Close admission synchronously, including when expiry is discovered by resolve.
     entry.closing = true;
+    entry.unsubscribe?.(); entry.unsubscribe = undefined;
     entry.cleanup = this.cleanup(entry).finally(() => { entry.cleanup = undefined; });
     return entry.cleanup;
+  }
+  private synchronize(entry: TestEntry): void {
+    if (entry.closing) return;
+    try {
+      if (this.liveService?.materialScope(entry.source.mirrorId) !== entry.sourceScope) throw new Error('Source account changed');
+      entry.exhibition.syncSourceCatalog(entry.source);
+    } catch {
+      entry.invalidated = true;
+      // Revoke only this test's credentials; the physical mirror owns its own session.
+      void this.finish(entry).catch(() => undefined);
+    }
   }
   private async cleanup(entry: TestEntry): Promise<void> {
     entry.exhibition.command({ action: 'idle' });

@@ -178,26 +178,12 @@ class ExhibitionApi(
         lookId: String,
         generationNumber: Long,
         revision: Long,
+        contentVersion: String = "",
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session", "POST", JSONObject()
         .put("deviceId", deviceId).put("lookId", lookId)
-        .put("generationNumber", generationNumber).put("expectedRevision", revision)
+        .put("generationNumber", generationNumber).put("expectedRevision", revision).put("contentVersion", contentVersion)
         .put("terminalId", terminalId).put("terminalToken", terminalToken), 30_000,
-        headers = mapOf("X-Miror-Material" to "binding-v1"))
-
-    suspend fun bindReference(
-        mirrorId: String,
-        sessionId: String,
-        deviceId: String,
-        lookId: String,
-        bindingId: String,
-    ): JSONObject = json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/reference", "POST",
-        JSONObject().put("deviceId", deviceId).put("lookId", lookId)
-            .put("bindingId", bindingId), 20_000)
-
-    suspend fun readyReference(mirrorId: String, lookId: String): JSONObject? {
-        require(Regex("[A-Za-z0-9_-]{1,100}").matches(lookId)) { "素材编号无效。" }
-        return json("${mirrorPath(mirrorId)}/references/$lookId", timeoutMs = 1_500).optJSONObject("reference")
-    }
+        headers = mapOf("X-Miror-Material" to "catalog-v2"))
 
     suspend fun condition(mirrorId: String, sessionId: String, input: JSONObject): JSONObject =
         json("${mirrorPath(mirrorId)}/live/session/${sessionId(sessionId)}/condition", "POST", input, 12_000)

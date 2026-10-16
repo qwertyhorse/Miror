@@ -64,7 +64,7 @@ describe('exhibition upload validation and persistence', () => {
     expect(new ExhibitionService(directory, { now }).get().settings.uploadLimits).toEqual(customLimits);
   });
 
-  it('decodes an image, stores a sanitized asset, leaves it disabled, then supports enabling its dynamic ID and restarting', async () => {
+  it('decodes an image, stores a sanitized asset, enables it automatically and supports its dynamic ID and restarting', async () => {
     const { service, directory, now } = fixture();
     const bytes = await image();
     const initial = service.get();
@@ -76,8 +76,8 @@ describe('exhibition upload validation and persistence', () => {
     expect(look.id).toMatch(/^upload-[a-f0-9-]{36}$/);
     expect(look.image).toMatch(new RegExp(`^/api/exhibition/assets/${look.id}/display/[a-f0-9-]{36}$`));
     expect(look.referenceImage).toMatch(new RegExp(`^/api/exhibition/assets/${look.id}/reference/[a-f0-9-]{36}$`));
-    expect(uploaded.enabledLookIds).not.toContain(look.id);
-    expect(() => service.command({ action: 'select', lookId: look.id })).toThrow(errorCode('EXHIBITION_INVALID_LOOK'));
+    expect(uploaded.enabledLookIds).toContain(look.id);
+    expect(service.command({ action: 'select', lookId: look.id }).selectedLookId).toBe(look.id);
     const asset = service.asset(look.id);
     expect(asset.mime).toBe('image/webp'); expect(asset.data.length).toBe(look.bytes);
     expect(await sharp(asset.data).metadata()).toMatchObject({ format: 'webp', width: 512, height: 768, hasAlpha: true });
@@ -100,7 +100,7 @@ describe('exhibition upload validation and persistence', () => {
     expect(migrated).toMatchObject({ selectedLookId: 'evening', enabledLookIds: ['evening', 'city'], sessionNumber: 1,
       settings: { autoReturnSeconds: 180, uploadLimits: EXHIBITION_DEFAULT_UPLOAD_LIMITS } });
     expect(migrated.looks).toHaveLength(3); expect(migrated.revision).toBe(old.state.revision + 1);
-    expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).schemaVersion).toBe(5);
+    expect(JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8')).schemaVersion).toBe(6);
   });
 
   it('rejects fake, truncated, unsupported and malformed images independently of the client MIME or filename', async () => {
@@ -147,12 +147,12 @@ describe('exhibition upload validation and persistence', () => {
     advance(2200); const latest = service.get(); expect(latest.phase).toBe('showcase');
     const appended = await pending;
     expect(appended.looks).toHaveLength(4);
-    const { looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, ...visitor } = appended;
-    const { looks: _oldLooks, revision: _oldRevision, updatedAt: _oldUpdatedAt, logs: _oldLogs, ...expectedVisitor } = latest;
-    expect(visitor).toEqual(expectedVisitor); expect(appended.enabledLookIds).toEqual(['evening']);
+    const { looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, catalog: _catalog, materialVersions: _versions, enabledLookIds: _enabled, ...visitor } = appended;
+    const { looks: _oldLooks, revision: _oldRevision, updatedAt: _oldUpdatedAt, logs: _oldLogs, catalog: _oldCatalog, materialVersions: _oldVersions, enabledLookIds: _oldEnabled, ...expectedVisitor } = latest;
+    expect(visitor).toEqual(expectedVisitor); expect(appended.enabledLookIds).toEqual([appended.looks[0]!.id, 'evening']);
   });
 
-  it('allows disabled garment uploads in every phase without resetting playback or extending the idle deadline', async () => {
+  it('allows enabled garment uploads in every phase without resetting playback or extending the idle deadline', async () => {
     const bytes = await image();
     for (const phase of ['select', 'idle', 'generating', 'showcase', 'paused']) {
       const { service, directory, advance } = fixture();
@@ -167,8 +167,8 @@ describe('exhibition upload validation and persistence', () => {
       const appended = await service.upload(uploadInput(bytes, { expectedRevision: 0 }));
       const afterStorage = JSON.parse(readFileSync(join(directory, 'exhibition.json'), 'utf8'));
       expect(appended).toMatchObject({ phase, selectedLookId: before.selectedLookId, displayedLookId: before.displayedLookId,
-        enabledLookIds: before.enabledLookIds, live: before.live, sessionNumber: before.sessionNumber, generationNumber: before.generationNumber, generationReadyAt: before.generationReadyAt });
-      expect(appended.enabledLookIds).not.toContain(appended.looks[0]!.id);
+        enabledLookIds: [appended.looks[0]!.id, ...before.enabledLookIds], live: before.live, sessionNumber: before.sessionNumber, generationNumber: before.generationNumber, generationReadyAt: before.generationReadyAt });
+      expect(appended.enabledLookIds).toContain(appended.looks[0]!.id);
       expect(afterStorage.lastCommandAt).toBe(beforeStorage.lastCommandAt);
       expect(afterStorage.pausedPhase).toBe(beforeStorage.pausedPhase); expect(afterStorage.pausedRemainingMs).toBe(beforeStorage.pausedRemainingMs);
     }
@@ -235,7 +235,7 @@ describe('exhibition upload validation and persistence', () => {
     const second = (await service.upload(uploadInput(bytes, { name: '第二件' }))).looks[0]!;
     expect(service.get().looks.map(look => look.id)).toEqual([second.id, first.id, ...before.looks.map(look => look.id)]);
     expect(service.get().selectedLookId).toBe(before.selectedLookId);
-    expect(service.get().enabledLookIds).toEqual(before.enabledLookIds);
+    expect(service.get().enabledLookIds).toEqual([second.id, first.id, ...before.enabledLookIds]);
     const manualOrder = [first.id, 'city', second.id, 'commute', 'evening'];
     service.command({ action: 'reorder', experienceMode: 'clothx', lookIds: manualOrder });
     await service.updateLook(second.id, { name: '改名后的第二件' });
@@ -275,7 +275,7 @@ describe('exhibition flat classification and metadata', () => {
     service.command({ action: 'begin' });
     expect(() => service.taxonomy({ categories: initial.categories, tags: initial.tags })).toThrow(errorCode('EXHIBITION_INVALID_PHASE'));
     expect(service.updateLook('commute', { name: '名字' })).toMatchObject({ phase: 'generating' });
-    expect(service.get().publication!.looks[0].name).toBe(initial.looks[0].name);
+    expect(service.get().activeLook!.name).toBe(initial.looks[0].name);
     expect((await service.upload(uploadInput(await image()))).phase).toBe('generating');
   });
 });
@@ -393,7 +393,8 @@ describe('exhibition upload HTTP boundary', () => {
       expect(edited.status).toBe(200); const changed = (await edited.json() as ExhibitionState).looks[0]!;
       expect(changed.image).not.toBe(look.image); expect(changed.referenceImage).toBe(look.referenceImage);
       expect(Buffer.from(await (await fetch(`${base}${changed.referenceImage}`)).arrayBuffer())).toEqual(originalReference);
-      expect((await fetch(`${base}${look.image}`)).status).toBe(404);
+      // Demo editing retains the prior pair until provider readiness can authorize cleanup.
+      expect((await fetch(`${base}${look.image}`)).status).toBe(200);
       expect((await fetch(`${base}/api/exhibition/assets/${look.id}`)).status).toBe(404);
       expect((await fetch(`${base}${look.referenceImage!.replace('/reference/', '/display/')}`)).status).toBe(404);
       const tooLarge = await fetch(`${base}/api/exhibition/looks/${look.id}`, { method: 'PATCH', headers,

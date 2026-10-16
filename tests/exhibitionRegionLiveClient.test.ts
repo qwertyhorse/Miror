@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import type { XmaxRegion } from '../shared/xmax';
@@ -32,15 +31,13 @@ function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion, pref
   const cloned = { getVideoTracks: () => [clonedTrack], getTracks: () => [clonedTrack] } as unknown as MediaStream;
   const created: LocalSession = {
     id: 'region-session', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'source-fixture', sourceKind: 'camera',
-    sourceName: 'Fixture camera', targetItemId: 'look-fixture', referenceAsset: '/reference.png', refImageUrl: '', referenceVersion: 0,
+    sourceName: 'Fixture camera', targetItemId: 'look-fixture', referenceScope: 'account-scope', referenceAsset: '/reference.png', refImageUrl: `https://${providerRegion ?? 'global'}.fixture.test/reference.png`, referenceVersion: 1,
     expiresAt: new Date(Date.now() + 120000).toISOString(), pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none',
     ...(providerRegion ? { providerRegion } : {}),
     exhibition: { mirrorId: 'default', deviceId: 'device-fixture', lookId: 'look-fixture', sessionNumber: 1, generationNumber: 1 },
   };
   const deps = {
-    preparedReference: async () => readyReferenceFixture(`https://${providerRegion ?? 'global'}.fixture.test/reference.png`),
     create: vi.fn(async () => ({ ...created })), reference: vi.fn(async () => new File(['fixture'], 'reference.png', { type: 'image/png' })),
-    bind: vi.fn(async (_id, input) => ({ ...created, providerRegion: boundRegion, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 })),
     link: vi.fn(async (_id, providerSessionId) => ({ ...created, providerSessionId, referenceVersion: 1 })),
     firstFrame: vi.fn(async () => created), stop: vi.fn(async () => ({ ...created, status: 'stopped' })),
     heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => cloned), now: () => 0,
@@ -119,9 +116,10 @@ describe('exhibition session SDK region', () => {
     expect(f.originalTrack.stop).not.toHaveBeenCalled();
   });
 
-  it('keeps the created session region when a later reference response reports another region', async () => {
+  it('uses the bound creation response without a second reference lookup', async () => {
     const f = fixture('cn', 'global');
     await f.connection.start();
+
 
     expect(sdkMocks.cn.createXmaxClient).toHaveBeenCalledTimes(1);
     expect(sdkMocks.cn.connect).toHaveBeenCalledOnce();
@@ -136,7 +134,7 @@ describe('exhibition session SDK region', () => {
 
     expect(sdkMocks.cn.createXmaxClient).not.toHaveBeenCalled();
     expect(sdkMocks.global.createXmaxClient).not.toHaveBeenCalled();
-    expect(f.deps.bind).not.toHaveBeenCalled();
+
     expect(f.deps.link).not.toHaveBeenCalled();
     expect(sdkMocks.sdk.set).not.toHaveBeenCalled();
     expect(f.deps.create).toHaveBeenCalledOnce();

@@ -2,6 +2,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { ReferencePreparationError } from '../server/referencePreparation';
 import { ReferenceAssets } from '../server/referenceAssets';
 const directories: string[] = [];
 afterEach(() => directories.splice(0).forEach(p => rmSync(p, { recursive: true, force: true })));
@@ -45,7 +47,7 @@ it('honors real supplier expiry and preserves a still-usable old file during fai
   const provider = { upload: vi.fn(async () => ({ url: 'file_legacy', providerExpiresAt: f.now() + 600_000 })), check: f.provider.check };
   const old = await f.assets.prepare(f.input, provider);
   f.advance(400_000); provider.upload.mockRejectedValueOnce(Error('offline'));
-  await expect(f.assets.prepare(f.input, provider)).rejects.toThrow('offline');
+  await expect(f.assets.prepare(f.input, provider, { replace: true })).rejects.toThrow('offline');
   expect(f.assets.acquire(old.bindingId, { ...f.input, sha256: old.sha256 })).toEqual(old);
   f.advance(171_000);
   expect(f.assets.ready(f.input)).not.toBeNull(); expect(f.assets.acquire(old.bindingId, { ...f.input, sha256: old.sha256 })).toBeNull();
@@ -73,4 +75,42 @@ it('a delayed worker cannot overwrite a newer persisted replica from another wor
   const winner = await second.prepare(f.input, f.provider);
   finish('https://fixture-123.cos.ap-test.myqcloud.com/old.png');
   expect(await pending).toEqual(winner); expect(f.assets.ready(f.input)).toEqual(winner);
+});
+
+it('bounds transient upload attempts across restarts and explicit retry resets the failed identity', async () => {
+  const f = fixture(); const failing = { upload: vi.fn(async () => { throw new ReferencePreparationError('upload', 'timeout'); }) };
+  const identity = { scope: f.input.scope, mime: f.input.mime, sha256: createHash('sha256').update(f.input.bytes).digest('hex') };
+  let assets = f.assets;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await expect(assets.prepare(f.input, failing)).rejects.toThrow();
+    expect(assets.status(identity).retryAt !== undefined).toBe(attempt < 3);
+    f.advance(60_001); assets = new ReferenceAssets(f.directory, { now: f.now });
+  }
+  expect(assets.status(identity)).toMatchObject({ state: 'failed' });
+  expect(assets.status(identity).retryAt).toBeUndefined();
+  await expect(assets.prepare(f.input, failing)).rejects.toThrow('manual retry');
+  expect(failing.upload).toHaveBeenCalledTimes(3);
+  await expect(assets.prepare(f.input, failing, { manualRetry: true })).rejects.toThrow();
+  expect(assets.status(identity).retryAt).toBeGreaterThan(f.now());
+  expect(failing.upload).toHaveBeenCalledTimes(4);
+  expect(readFileSync(join(f.directory, 'prepared-references', readdirSync(join(f.directory, 'prepared-references'))[0]), 'utf8')).not.toContain('tk-');
+});
+it.each(['denied', 'not_configured', 'unsafe', 'malformed', 'not_found', 'invalid_request'] as const)('requires manual retry after permanent %s failures and isolates new account/content identities', async failure => {
+  const f = fixture(); const failing = { upload: vi.fn(async () => { throw new ReferencePreparationError('credentials', failure); }) };
+  await expect(f.assets.prepare(f.input, failing)).rejects.toThrow(); f.advance(600_000);
+  const reopened = new ReferenceAssets(f.directory, { now: f.now });
+  await expect(reopened.prepare(f.input, failing)).rejects.toThrow('manual retry'); expect(failing.upload).toHaveBeenCalledOnce();
+  await expect(reopened.prepare(f.input, f.provider, { manualRetry: true })).resolves.toHaveProperty('bindingId');
+  await expect(reopened.prepare({ ...f.input, scope: 'new-account' }, f.provider)).resolves.toHaveProperty('bindingId');
+  await expect(reopened.prepare({ ...f.input, bytes: Buffer.from('new-content') }, f.provider)).resolves.toHaveProperty('bindingId');
+});
+it('counts an interrupted upload attempt after reopening and recovers its unfinished work', async () => {
+  const f = fixture(); let finish!: (value: string) => void;
+  const task = f.assets.prepare(f.input, { upload: () => new Promise(resolve => { finish = resolve; }) });
+  const reopened = new ReferenceAssets(f.directory, { now: f.now });
+  const failed = { upload: vi.fn(async () => { throw new ReferencePreparationError('upload', 'network'); }) };
+  await expect(reopened.prepare(f.input, failed)).rejects.toThrow(); f.advance(60_001);
+  await expect(reopened.prepare(f.input, failed)).rejects.toThrow(); f.advance(60_001);
+  await expect(reopened.prepare(f.input, failed)).rejects.toThrow('manual retry'); expect(failed.upload).toHaveBeenCalledTimes(2);
+  finish('https://fixture-123.cos.ap-test.myqcloud.com/recovered.png'); await task;
 });

@@ -123,15 +123,17 @@ it('caches immutable source digests for repeated batch reads and bounds missing-
   const look = state.looks[0]!;
   const asset = vi.spyOn(f.mirror as unknown as { readImage: (id: string, image: string) => { data: Buffer; mime: string } }, 'readImage');
   f.mirror.referencePreparationStatuses(); f.mirror.referencePreparationStatuses();
-  expect(asset.mock.calls.filter(([id]) => id === look.id)).toHaveLength(1);
+  expect(asset.mock.calls.filter(([id]) => id === look.id)).toHaveLength(0);
   asset.mockImplementation(() => { throw new Error('local path /secret/unavailable'); });
   await expect(f.mirror.prepareReference(look.id)).rejects.toThrow();
   const failed = f.mirror.referencePreparationStatus(look.id);
-  expect(failed).toEqual({ state: 'failed', message: '本地图片不可用，请重新上传。', retryAt: f.now() + 60_000, updatedAt: f.now() });
+  expect(failed).toEqual({ state: 'failed', message: '本地图片不可用，请重新上传。', updatedAt: f.now() });
   f.mirror.referencePreparationStatuses(); f.mirror.referencePreparationStatuses();
-  expect(asset.mock.calls.filter(([id]) => id === look.id)).toHaveLength(2);
+  expect(asset.mock.calls.filter(([id]) => id === look.id)).toHaveLength(1);
   f.advance(60_001); asset.mockRestore();
-  expect(f.mirror.referencePreparationStatus(look.id)).toEqual({ state: 'queued' });
+  expect(f.mirror.referencePreparationStatus(look.id)).toEqual(failed);
+  f.mirror.retryReferencePreparation(look.id);
+  await vi.waitFor(() => expect(f.mirror.referencePreparationStatus(look.id).state).not.toBe('failed'));
 });
 
 it('restores persistent readiness after restart without availability probes', async () => {

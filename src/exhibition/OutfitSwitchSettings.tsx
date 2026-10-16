@@ -25,7 +25,7 @@ export function OutfitSwitchSettings({ controller }: { controller: ExhibitionCon
   const disabled = pending || saving || !connected;
   const count = enabledLooksForMode(state).length;
   const hint = mode === 'manual' ? '由工作人员选择素材或点击上一份／下一份切换。'
-    : count < 2 ? '当前模式至少启用 2 份素材后才能自动换装。'
+    : count < 2 ? '当前模式至少有 2 份可用素材后才能自动换装。'
     : state.phase === 'paused' ? '体验已暂停，恢复后继续自动换装。'
     : `开始体验并显示生成结果后，每 ${seconds} 秒按素材顺序切换。`;
 

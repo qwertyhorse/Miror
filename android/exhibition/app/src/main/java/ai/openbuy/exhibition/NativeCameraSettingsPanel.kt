@@ -21,7 +21,6 @@ internal class NativeCameraSettingsPanel(
     initialRotationDegrees: Int = 0,
     private val onState: (String, NativeCameraSnapshot, NativeCameraSelection, String?, String?) -> Unit = { _, _, _, _, _ -> },
     initialCaptureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
-    initialXmaxRotationDegrees: Int? = null,
 ) : NativeCameraSettingsView(context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var operation: Job? = null
@@ -43,8 +42,6 @@ internal class NativeCameraSettingsPanel(
         private set
     var captureSelection = initialCaptureSelection
         private set
-    var xmaxRotationDegrees = initialXmaxRotationDegrees
-        private set
     private var snapshot = NativeCameraSnapshot(emptyList())
     private var previewedDeviceId: String? = null
 
@@ -54,7 +51,6 @@ internal class NativeCameraSettingsPanel(
 
     init {
         require(initialRotationDegrees in listOf(0, 90, 180, 270))
-        require(initialXmaxRotationDegrees == null || initialXmaxRotationDegrees in listOf(0, 90, 180, 270))
         rotationSpinner.setSelection(initialRotationDegrees / 90)
         rotationSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -62,16 +58,6 @@ internal class NativeCameraSettingsPanel(
                 if (position !in 0..3 || position * 90 == rotationDegrees) return
                 rotationDegrees = position * 90
                 if (initialized) launchOperation { showPreview() }
-            }
-        }
-        xmaxRotationSpinner.setSelection(initialXmaxRotationDegrees?.let { it / 90 + 1 } ?: 0)
-        xmaxRotationSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (closed || position !in 0..4) return
-                // This is the absolute input correction for the next XMAX session.
-                // Changing it must not reconnect or invalidate this local preview.
-                xmaxRotationDegrees = if (position == 0) null else (position - 1) * 90
             }
         }
         previewContainer.addView(preview, FrameLayout.LayoutParams(-1, -1))

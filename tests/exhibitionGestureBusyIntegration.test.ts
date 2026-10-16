@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, type ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionState } from '../shared/exhibition';
@@ -61,7 +62,7 @@ async function fixture(settings: Partial<ExhibitionGestureSettings> = {}, initia
   vi.stubGlobal('Worker', InferenceWorker);
   vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ close: vi.fn() })));
   Object.assign(document, { hidden: false });
-  let state: ExhibitionState = {
+  let state: ExhibitionState = materialCatalogFixture({
     mirrorId: 'busy-integration', revision: 1, phase: 'showcase', experienceMode: 'clothx',
     looks: structuredClone(exhibitionLooks), enabledLookIds: ['commute', 'city', 'evening'],
     selectedLookId: 'commute', displayedLookId: 'commute', categories: [], tags: [],
@@ -69,7 +70,8 @@ async function fixture(settings: Partial<ExhibitionGestureSettings> = {}, initia
     providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90,
       uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 },
       gestureRecognition: { ...resolveExhibitionGestureSettings(), ...settings } }, ...initial,
-  };
+  });
+  state.catalog = { revision: 1, providerId: 'xmax', looks: structuredClone(state.looks), availableLookIds: [...state.enabledLookIds] };
   const live = { cameraStream: stream, outputStream: null, opening: false, error: '', status: 'running',
     deviceId: 'integration-camera', mirrored: false, secure: true, stopGeneration: vi.fn(async () => true) } as unknown as ExhibitionLiveController;
   const send = vi.fn(async (_command: unknown) => true);

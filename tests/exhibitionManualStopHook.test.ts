@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,10 +13,10 @@ let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; await flushReact(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 function deferred<T>() { let resolve!: (value: T) => void; return { promise: new Promise<T>(done => { resolve = done; }), resolve }; }
 function state(): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'generating', experienceMode: 'free', selectedLookId: 'look', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'generating', experienceMode: 'free', selectedLookId: 'look', displayedLookId: null,
     looks: [{ id: 'look', mode: 'free', name: '隔离效果', prompt: '背景换成森林', referenceKind: 'none', image: '/fixture.png', description: '', palette: '', category: '', tags: [], source: 'sample' }],
     enabledLookIds: ['look'], categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
-    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 0, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } } };
+    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 0, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } } });
 }
 async function fixture() {
   host = await createReactHost();

@@ -8,7 +8,6 @@ import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
@@ -18,7 +17,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -38,7 +36,6 @@ internal class NativeGenerationRound(
     private val cameraDeviceId: String? = null,
     private val cameraRotationDegrees: Int = 0,
     private val cameraCaptureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
-    private val xmaxRotationDegrees: Int? = null,
     private val onBusyChanged: () -> Unit = {},
 ) {
     private var snapshot = JSONObject(state.toString())
@@ -68,7 +65,6 @@ internal class NativeGenerationRound(
         }
     private var stopReason = "provider_rejected"
     private var leaseDeadline = 0L
-    private var referencePreparation: Deferred<String?>? = null
 
     fun canReuse(state: JSONObject, look: JSONObject): Boolean = connected && !renewalStopping && mode != "mox"
         && state.optString("providerMode") == "xmax" && state.optString("phase") in listOf("generating", "showcase")
@@ -83,7 +79,6 @@ internal class NativeGenerationRound(
         key = nextKey
         isBusy = true
         retryable = false
-        referencePreparation?.cancel()
         updates.trySend(JSONObject(state.toString()) to JSONObject(look.toString()))
     }
 
@@ -97,6 +92,7 @@ internal class NativeGenerationRound(
 
     private var localSessionId: String? = null
     private var providerRegion: String? = null
+    private var referenceScope: String? = null
     private var allocationStarted = false
     private var hasRun = false
     private val remoteFirstFrame = CompletableDeferred<Unit>()
@@ -109,22 +105,19 @@ internal class NativeGenerationRound(
         val experienceStartedAt = SystemClock.elapsedRealtime()
         try {
             coroutineScope {
-                NativeRoundMetadata.requireValid(snapshot.optJSONObject("publication") != null, "请更新后台并发布素材后开始体验。")
+                NativeRoundMetadata.requireValid(snapshot.optJSONObject("catalog") != null, "请更新后台以使用自动素材目录。")
                 NativeRoundMetadata.validateSnapshot(snapshot, selection, mirrorId, deviceId)
                 val noReference = selection.optString("referenceKind", "image") == "none"
                 val referenceImage = NativeRoundMetadata.referenceImage(selection)
                 val prompt = NativeRoundMetadata.prompt(selection)
                 status("准备素材")
-                // A bad or missing local asset must fail before requesting a paid credential.
-                val prepared = if (noReference) null else preparedReference(selection)
-                if (!noReference) requirePrepared(prepared)
                 // MoX still needs the local photo as its video source, never as an SDK upload.
                 val image = if (mode == "mox") api.image(referenceImage!!).also(NativeRoundMetadata::imageMime) else null
 
                 status("连接中")
                 allocationStarted = true
                 val allocationSentAt = SystemClock.elapsedRealtime()
-                val created = api.createSession(mirrorId, deviceId, lookId, generationNumber, revision)
+                val created = api.createSession(mirrorId, deviceId, lookId, generationNumber, revision, selection.optString("contentVersion"))
                 // Retain ownership immediately, including when subsequent metadata is invalid.
                 created.optString("id").takeIf(NativeRoundMetadata.sessionId::matches)?.let {
                     localSessionId = it
@@ -226,10 +219,9 @@ internal class NativeGenerationRound(
                 }
                 launch { val message = controllerFailure.await(); stopReason = "rtc_failed"; throw NativeRoundException(message) }
 
-                val scope = created.optString("referenceScope")
                 val reference = if (!noReference) {
-                    val binding = requirePrepared(prepared, scope)
-                    val bound = if (prebound) created else api.bindReference(mirrorId, id, deviceId, lookId, binding)
+                    NativeRoundMetadata.requireValid(prebound && created.optString("referenceScope").isNotBlank(), "后台未绑定本轮素材。")
+                    val bound = created
                     val url = bound.optString("refImageUrl")
                     NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(url), "后台参考图无效。")
                     validateRecord(bound, false, prompt, 1, url, null)
@@ -245,7 +237,6 @@ internal class NativeGenerationRound(
                     cameraDeviceId = if (mode == "mox") null else cameraDeviceId,
                     cameraRotationDegrees = if (mode == "mox") 0 else cameraRotationDegrees,
                     captureSelection = if (mode == "mox") NativeCameraCaptureSelection.Automatic else cameraCaptureSelection,
-                    xmaxRotationDegrees = if (mode == "mox") null else xmaxRotationDegrees,
                 )
                 NativeRoundMetadata.requireValid(NativeRoundMetadata.providerSessionId.matches(providerId), "实时会话编号无效。")
                 val linked = api.link(mirrorId, id, providerId)
@@ -284,19 +275,10 @@ internal class NativeGenerationRound(
                         val none = selection.optString("referenceKind", "image") == "none"
                         val nextPrompt = NativeRoundMetadata.prompt(selection)
                         status("准备素材")
-                        val referenceValue = supervisorScope {
-                            // Only independent image preparation is cancelled by a newer choice.
-                            // Backend binding and SDK condition updates remain serialized.
-                            val preparing = async {
-                                if (none) null else requirePrepared(preparedReference(selection), scope)
-                            }
-                            referencePreparation = preparing
-                            try { preparing.await() } finally { referencePreparation = null }
-                        }
                         if (operationKey != key) continue
                         val intent = JSONObject().put("deviceId", deviceId).put("lookId", lookId)
+                            .put("contentVersion", selection.optString("contentVersion"))
                             .put("sessionNumber", sessionNumber).put("generationNumber", generationNumber)
-                        if (referenceValue != null) intent.put("bindingId", referenceValue)
                         val bound = api.condition(mirrorId, id, intent)
                         val url = if (none) null else bound.optString("refImageUrl").also {
                             NativeRoundMetadata.requireValid(NativeRoundMetadata.isRemoteImage(it), "后台参考图无效。")
@@ -375,22 +357,6 @@ internal class NativeGenerationRound(
         }
     }
 
-    private suspend fun preparedReference(look: JSONObject): JSONObject? = try {
-        api.readyReference(mirrorId, look.getString("id"))?.takeIf {
-            NativeRoundMetadata.isRemoteImage(it.optString("url")) && it.optString("scope").isNotEmpty()
-                && it.optLong("freshUntil") > System.currentTimeMillis()
-        }
-    } catch (cancelled: CancellationException) { throw cancelled }
-    catch (_: Exception) { null } // Published catalogs reject unavailable bindings before allocating a credential.
-
-    private fun requirePrepared(value: JSONObject?, expectedScope: String? = null): String {
-        NativeRoundMetadata.requireValid(value != null && value.optString("bindingId").isNotBlank()
-            && value.optLong("freshUntil") > System.currentTimeMillis()
-            && (expectedScope == null || (expectedScope.isNotBlank() && value.optString("scope") == expectedScope)),
-            "这件素材暂不可用，请在后台检查。")
-        return value!!.getString("bindingId")
-    }
-
     private suspend fun status(value: String) = withContext(Dispatchers.Main.immediate) { onStatus(value) }
 
     private fun validateRecord(
@@ -419,6 +385,10 @@ internal class NativeGenerationRound(
         NativeRoundMetadata.requireValid(NativeRoundMetadata.integer(record, "referenceVersion") == referenceVersion
             && record.optString("refImageUrl") == referenceUrl
             && record.optString("providerSessionId") == providerId.orEmpty(), "后台会话关联未确认。")
+        val scope = record.optString("referenceScope")
+        NativeRoundMetadata.requireValid((noReference || scope.isNotBlank()) &&
+            (referenceScope == null || referenceScope == scope), "素材账号作用域已变化，请重新开始。")
+        referenceScope = scope
         val region = record.optString("providerRegion")
         NativeRoundMetadata.requireValid(region in setOf("cn", "global")
             && (providerRegion == null || providerRegion == region), "服务区域无效。")

@@ -125,12 +125,12 @@ describe('exhibition six-mode catalogue and migration', () => {
     expect(() => service.updateLook('commute', { mode: 'unknown' })).toThrow(code('EXHIBITION_INVALID_MODE'));
   });
 
-  it('uploads new-mode materials without legacy taxonomy and keeps them disabled', async () => {
+  it('uploads new-mode materials without legacy taxonomy and puts them on shelf', async () => {
     const { service, directory, now } = fixture();
     const imageBase64 = (await sharp({ create: { width: 512, height: 512, channels: 4, background: '#9999ff' } }).png().toBuffer()).toString('base64');
     const state = await service.upload({ name: '拖拽场景', mode: 'mox', imageBase64, referenceImageBase64: imageBase64 });
     const look = state.looks[0]!;
-    expect(look).toMatchObject({ name: '拖拽场景', mode: 'mox', tags: [] }); expect(state.enabledLookIds).not.toContain(look.id);
+    expect(look).toMatchObject({ name: '拖拽场景', mode: 'mox', tags: [] }); expect(state.enabledLookIds).toContain(look.id);
     expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(state);
     await expect(service.upload({ name: '自定义', mode: 'free', imageBase64 })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PROMPT' });
     expect(readdirSync(join(directory, 'exhibition-assets')).sort()).toEqual([`${look.id}.display.${look.image.split('/').at(-1)}.webp`, `${look.id}.reference.${look.referenceImage!.split('/').at(-1)}.webp`].sort());
@@ -182,7 +182,6 @@ describe('authoritative exhibition mode session snapshots', () => {
   it('creates and links prompt-only Free sessions without using or binding their cover', async () => {
     const { service, live, store, issue } = liveFixture();
     service.updateLook('commute', { mode: 'free', prompt: '视频变成水彩画', referenceKind: 'none' });
-    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax', experienceMode: 'free', autoReturnSeconds: 0 });
     service.command({ action: 'begin' });
     const session = await create(service);
@@ -207,7 +206,6 @@ describe('authoritative exhibition mode session snapshots', () => {
   it.each(EXHIBITION_EXPERIENCE_MODES)('snapshots %s inputs before issuance and retains reference binding and first-frame evidence', async mode => {
     const { service, live, store, issue } = liveFixture();
     setLookMode(service, 'commute', mode, mode === 'free' ? '人物变成水彩画' : undefined);
-    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax', experienceMode: mode, autoReturnSeconds: 0 });
     service.command({ action: 'begin' });
     const session = await create(service, { mode: 'free', prompt: 'untrusted client prompt' });
@@ -221,7 +219,6 @@ describe('authoritative exhibition mode session snapshots', () => {
 
   it('rejects a different-mode live material and empty modes without allocating credits', async () => {
     const { service, issue, store } = liveFixture(); setLookMode(service, 'city', 'charx');
-    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax' }); service.command({ action: 'begin' });
     await expect(create(service, { lookId: 'city' })).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_LOOK' });
     service.command({ action: 'end' }); setMode(service, 'mox');
@@ -232,7 +229,6 @@ describe('authoritative exhibition mode session snapshots', () => {
 
   it('does not change mode while any live lease is stopping, and resumes MoX with a new photo generation', async () => {
     const { service, provider, store, issue } = liveFixture(); setLookMode(service, 'commute', 'mox');
-    service.publishPublication({ expectedRevision: service.get().revision });
     service.command({ action: 'configure', providerMode: 'xmax', experienceMode: 'mox' }); service.command({ action: 'begin' });
     const session = await create(service); const generation = service.get().generationNumber;
     service.command({ action: 'pause' }); await service.reconcileLive();

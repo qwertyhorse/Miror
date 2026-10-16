@@ -238,6 +238,7 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
   return <dialog ref={dialog} className="ex-terminal-camera" aria-labelledby="terminal-camera-title" onCancel={event => { event.preventDefault(); void cancel(); }}>
     <header><h2 id="terminal-camera-title"><Camera size={22} />摄像头</h2><button type="button" aria-label="取消摄像头设置" disabled={closing} onClick={() => void cancel()}><X size={22} /></button></header>
     <div className="ex-terminal-camera-preview">{live.cameraStream ? <StreamVideo stream={live.cameraStream} mirrored={live.mirrored} label="摄像头检测预览" onFirstFrame={setPreviewFrame} /> : <Camera size={44} />}</div>
+    <p className="ex-form-note">浏览器使用摄像头原始方向；旋转安装请使用原生镜端。</p>
     <div className="ex-terminal-camera-controls"><label>摄像头<select value={selected} disabled={live.opening || closing} onChange={event => { setSelected(event.target.value); void preview(event.target.value); }}>
       {!devices.some(device => device.id === selected) && <option value={selected}>{selected ? '已选摄像头未连接' : '选择摄像头'}</option>}
       {devices.map(device => <option key={device.id} value={device.id}>{device.label}</option>)}

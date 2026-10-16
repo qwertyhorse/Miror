@@ -147,7 +147,8 @@ describe('exhibition configuration and storage', () => {
     });
     expect(() => service.command({ action: 'select', lookId: 'commute' })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_LOOK' }));
     beginGeneration(service);
-    expect(() => service.command({ action: 'configure', enabledLookIds: ['commute'] })).toThrow(expect.objectContaining({ code: 'EXHIBITION_INVALID_PHASE' }));
+    expect(service.command({ action: 'configure', enabledLookIds: ['commute'] }).phase).toBe('generating');
+    service.command({ action: 'configure', enabledLookIds: ['evening', 'city'] });
     advance(2_200);
     expect(service.command({ action: 'previous' }).selectedLookId).toBe('city');
     advance(2_200);

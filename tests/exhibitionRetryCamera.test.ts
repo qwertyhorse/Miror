@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -26,13 +27,13 @@ afterEach(async () => {
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return {
+  return materialCatalogFixture({
     mirrorId: 'default', revision: 1, phase: 'paused', experienceMode: 'clothx', selectedLookId: 'look', displayedLookId: null,
     looks: [{ id: 'look', mode: 'clothx', name: '测试', image: '/reference.png', source: 'sample', description: '', category: '', tags: [], palette: '' }],
     enabledLookIds: ['look'], categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
     providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 0,
       uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides,
-  };
+  });
 }
 class FixtureStream {
   constructor(private tracks: ReturnType<typeof cameraTrack>[]) {}
@@ -68,7 +69,7 @@ async function fixture(initial = snapshot()) {
     if (path.endsWith('/live/status')) return { configured: true, perSessionLimit: 30 };
     if (path.endsWith('/live/session')) {
       created = { id: 'retry-session-fixture', token: 'temporary-retry-fixture', model: 'x2.0', status: 'active', sourceId: 'camera-fixture', sourceKind: 'camera',
-        sourceName: '摄像头', targetItemId: 'look', referenceAsset: '/reference.png', refImageUrl: '', referenceVersion: 0,
+        sourceName: '摄像头', targetItemId: 'look', referenceScope: 'account-scope', referenceAsset: '/reference.png', refImageUrl: 'https://reference.fixture/garment.png', referenceVersion: 1,
         expiresAt: new Date(Date.now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0, resultAvailable: false, verification: 'none',
         exhibition: { mirrorId: value.mirrorId, deviceId: input!.deviceId, lookId: input!.lookId,
           sessionNumber: value.state.sessionNumber, generationNumber: input!.generationNumber } };

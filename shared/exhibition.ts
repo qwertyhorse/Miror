@@ -43,6 +43,8 @@ export const EXHIBITION_DEFAULT_UPLOAD_LIMITS: Readonly<ExhibitionUploadLimits> 
 };
 export interface ExhibitionLook {
   id: ExhibitionLookId;
+  /** Immutable effective display/reference metadata version. */
+  contentVersion?: string;
   /** Exact business identity supplied by an import manifest. */
   sku?: string;
   name: string;
@@ -91,7 +93,7 @@ export interface ExhibitionLookInput {
   referenceImageBase64?: string;
 }
 export interface ExhibitionUploadInput extends ExhibitionLookInput {
-  /** Uploads prepend a disabled garment in any phase. Accepted for compatibility, but global revisions do not lock uploads. */
+  /** Uploads prepend an enabled garment in any phase. Accepted for compatibility, but global revisions do not lock uploads. */
   expectedRevision?: number;
   /** Raw base64 or a data URL. Only fully decoded, static PNG/JPEG/WebP images are accepted. */
   imageBase64: string;
@@ -139,7 +141,13 @@ export interface ExhibitionPublicationStatus {
   lookIds: string[]; readyLookIds: string[]; unavailableLookIds: string[]; draftChanged: boolean;
 }
 export interface ExhibitionState {
+  /** Legacy import only; removed when schema 6 is saved. */
   publication?: ExhibitionPublication;
+  materialVersions?: ExhibitionLook[];
+  activeLook?: ExhibitionLook;
+  /** Last provider-applied input, retained until the credential is confirmed stopped. */
+  boundLook?: ExhibitionLook;
+  catalog?: { revision: number; providerId?: 'xmax' | 'decart'; emptyMessage?: string; looks: ExhibitionLook[]; availableLookIds: string[] };
   lifecycle?: import('./exhibitionLifecycle.js').ExperienceLifecycle;
   /** Stable registered mirror; deviceId in live state is a separate browser lease. */
   mirrorId?: string;

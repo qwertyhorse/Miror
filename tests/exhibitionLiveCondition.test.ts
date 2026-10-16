@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import { exhibitionPromptForLook } from '../shared/exhibition';
@@ -20,7 +19,7 @@ function fixture(mode: 'clothx' | 'free' = 'clothx', prefetchImages?: string[]) 
   const first: Input = { mirrorId: 'default', deviceId: 'screen-a', sessionNumber: 1, generationNumber: 1, lookId: 'first', expectedRevision: 1,
     image: '/assets/first.png', stream, mode, prefetchImages };
   let record = { id: 'same-credential', token: 'temporary-fixture', model: 'x2.0', status: 'active', sourceId: 'camera-a', sourceKind: 'camera' as const,
-    sourceName: '摄像头', targetItemId: 'exhibition-first', lookId: first.lookId, referenceAsset: first.image, refImageUrl: '', referenceVersion: 0,
+    sourceName: '摄像头', targetItemId: 'exhibition-first', lookId: first.lookId, referenceScope: 'account-scope', referenceAsset: first.image, refImageUrl: 'https://reference.fixture/first.png', referenceVersion: 1,
     providerSessionId: undefined as string | undefined, expiresAt: new Date(Date.now() + 120_000).toISOString(), pointsLimit: 30, consumedCredits: 0,
     resultAvailable: false, verification: 'none' as const, exhibition: { mirrorId: 'default', deviceId: first.deviceId, sessionNumber: 1, generationNumber: 1,
       lookId: first.lookId, mode, prompt: exhibitionPromptForLook({ mode }) } };
@@ -29,8 +28,8 @@ function fixture(mode: 'clothx' | 'free' = 'clothx', prefetchImages?: string[]) 
     disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const condition = async (_id: string, intent: Parameters<NonNullable<ExhibitionLiveDeps['updateCondition']>>[1]) => {
     if (record.exhibition.generationNumber !== intent.generationNumber) {
-      record = { ...record, lookId: intent.lookId, targetItemId: `exhibition-${intent.lookId}`, referenceAsset: resolvedBinding(intent.bindingId) ? `/assets/${intent.lookId}.png` : '',
-        refImageUrl: resolvedBinding(intent.bindingId) ?? '', referenceVersion: record.referenceVersion + 1,
+      record = { ...record, lookId: intent.lookId, targetItemId: `exhibition-${intent.lookId}`, referenceScope: 'account-scope', referenceAsset: intent.lookId === 'prompt-only' ? '' : `/assets/${intent.lookId}.png`,
+        refImageUrl: intent.lookId === 'prompt-only' ? '' : `https://reference.fixture/${intent.lookId}.png`, referenceVersion: record.referenceVersion + 1,
         exhibition: { ...record.exhibition, generationNumber: intent.generationNumber, lookId: intent.lookId } };
     }
     return { ...record, exhibition: { ...record.exhibition } };
@@ -38,14 +37,12 @@ function fixture(mode: 'clothx' | 'free' = 'clothx', prefetchImages?: string[]) 
   const deps = {
     create: vi.fn(async () => ({ ...record })), reference: vi.fn(async (input: Input) => new File(['garment'], input.image.split('/').pop()!, { type: 'image/png' })),
     prepare: vi.fn(async () => {}), readyLookup: vi.fn(async (file: File) => `https://reference.fixture/${file.name}`),
-    bind: vi.fn(async (_id, input) => { record = { ...record, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 }; return { ...record }; }),
     updateCondition: vi.fn(condition), conditionApplied: vi.fn(async () => ({})),
     connect: vi.fn(async (_source, _local, value) => { callbacks = value; return sdk; }),
     link: vi.fn(async (_id, providerSessionId) => { record = { ...record, providerSessionId }; return { ...record }; }),
     firstFrame: vi.fn(async () => ({ ...record })), stop: vi.fn(async () => ({ ...record, status: 'stopped' })),
     heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => clone), now: vi.fn(() => 1000),
-  } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
-  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
+  } satisfies ExhibitionLiveDeps & { readyLookup: (...args: any[]) => Promise<string> };
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), updateError: vi.fn() };
   const controller = new ExhibitionLiveConnection(first, events, deps); connections.push(controller);
   const next = (lookId: string, generationNumber = 2): Input => ({ ...first, lookId, generationNumber, image: `/assets/${lookId}.png` });
@@ -72,62 +69,53 @@ describe('same-session exhibition condition changes', () => {
     expect(await f.controller.update(f.next('second'))).toBe(true);
     expect(await f.controller.update(f.next('first', 3))).toBe(true);
     expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce(); expect(f.deps.clone).toHaveBeenCalledOnce();
-    expect(f.deps.readyLookup).toHaveBeenCalledTimes(3); expect(f.sdk.set).toHaveBeenCalledTimes(3);
+    expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.sdk.set).toHaveBeenCalledTimes(3);
     expect(f.deps.conditionApplied).toHaveBeenLastCalledWith('same-credential', expect.objectContaining({ lookId: 'first', generationNumber: 3, referenceVersion: 3 }), expect.any(AbortSignal));
     expect(f.events.stream).toHaveBeenCalledExactlyOnceWith(f.output); expect(f.events.stream).not.toHaveBeenCalledWith(null);
     expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.deps.stop).not.toHaveBeenCalled(); expect(f.sdk.disconnect).not.toHaveBeenCalled();
     expect(f.originalStop).not.toHaveBeenCalled(); expect(f.cloneStop).not.toHaveBeenCalled();
   });
 
-  it('does not preupload neighbours and acquires freshness again for a foreground choice', async () => {
+  it('does not preupload neighbours and resolves foreground choice once on the backend', async () => {
     const f = fixture('clothx', ['/assets/second.png']); await f.ready();
-    expect(f.deps.readyLookup).toHaveBeenCalledOnce();
+    expect(f.deps.readyLookup).not.toHaveBeenCalled();
     expect(await f.controller.update(f.next('second'))).toBe(true);
-    expect(f.deps.readyLookup).toHaveBeenCalledTimes(2); expect(f.deps.create).toHaveBeenCalledOnce();
+    expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.deps.create).toHaveBeenCalledOnce();
   });
   it('ignores neighbour batch changes while accepting the requested material', async () => {
     const f = fixture('clothx', ['/assets/obsolete.png']); await f.ready();
     expect(await f.controller.update({ ...f.next('third'), prefetchImages: ['/assets/fourth.png'] })).toBe(true);
-    expect(f.deps.readyLookup.mock.calls.map(([file]) => file.name)).toEqual(['first.png','third.png']);
+    expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.deps.updateCondition).toHaveBeenCalledExactlyOnceWith('same-credential', expect.objectContaining({ lookId: 'third' }), expect.any(AbortSignal));
   });
   it('keeps unavailable neighbours out of the active generation path', async () => {
     const f = fixture('clothx', ['/assets/unavailable.png']); await f.ready();
-    f.deps.readyLookup.mockRejectedValueOnce(new Error('not ready'));
+    f.deps.updateCondition.mockRejectedValueOnce(new Error('素材处理中'));
     expect(await f.controller.update(f.next('second'))).toBe(false);
     expect(f.controller.stopped).toBe(false); expect(f.deps.stop).not.toHaveBeenCalled();
     expect(await f.controller.update(f.next('third', 3))).toBe(true);
   });
   it('does not acquire queued neighbours after stop', async () => {
     const f = fixture('clothx', ['/assets/second.png']); await f.ready(); await f.controller.stop(); await flush();
-    expect(f.deps.readyLookup.mock.calls.map(([file]) => file.name)).toEqual(['first.png']);
+    expect(f.deps.readyLookup).not.toHaveBeenCalled();
   });
 
   it('explicitly clears the previous image when Free mode changes to a prompt-only material', async () => {
-    const f = fixture('free'); await f.ready(); const promptOnly = { ...f.next('second'), referenceKind: 'none' as const };
+    const f = fixture('free'); await f.ready(); const promptOnly = { ...f.next('prompt-only'), referenceKind: 'none' as const };
     expect(await f.controller.update(promptOnly)).toBe(true);
     expect(f.sdk.set).toHaveBeenLastCalledWith({ prompt: exhibitionPromptForLook({ mode: 'free' }), refImageUrl: null });
-    expect(f.deps.updateCondition.mock.calls[0][1]).not.toHaveProperty('refImageUrl'); expect(f.deps.readyLookup).toHaveBeenCalledOnce();
+    expect(f.deps.updateCondition.mock.calls[0][1]).not.toHaveProperty('refImageUrl'); expect(f.deps.readyLookup).not.toHaveBeenCalled();
   });
 
-  it('skips a superseded material whose upload resolves after a newer selection', async () => {
-    const f = fixture(); await f.ready(); const pending = deferred<string>(); f.deps.readyLookup.mockImplementationOnce(() => pending.promise);
-    const second = f.controller.update(f.next('second')); await flush();
-    const third = f.controller.update(f.next('third', 3)); pending.resolve('https://reference.fixture/second.png');
-    expect(await second).toBe(false); expect(await third).toBe(true);
-    expect(f.deps.updateCondition).toHaveBeenCalledOnce(); expect(f.deps.updateCondition.mock.calls[0][1].lookId).toBe('third');
-    expect(f.sdk.set).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenLastCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.fixture/third.png' }));
-  });
-
-  it('applies the latest choice without waiting for an obsolete upload', async () => {
-    const f = fixture(); await f.ready(); const obsolete = deferred<string>();
-    f.deps.readyLookup.mockImplementationOnce(() => obsolete.promise);
+  it('serializes backend resolutions and skips SDK submission for a superseded selection', async () => {
+    const f = fixture(); await f.ready(); const pending = deferred<void>();
+    f.deps.updateCondition.mockImplementationOnce(async (id, intent) => { const result = await f.condition(id, intent); await pending.promise; return result; });
     const second = f.controller.update(f.next('second')); await flush();
     const third = f.controller.update(f.next('third', 3)); await flush();
-    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
-    expect(f.deps.conditionApplied.mock.calls[0][1].lookId).toBe('third');
-    expect(await third).toBe(true); expect(await second).toBe(false);
-    obsolete.resolve('https://reference.fixture/second.png'); await flush();
-    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+    expect(f.deps.updateCondition).toHaveBeenCalledOnce(); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
+    pending.resolve(); expect(await second).toBe(false); expect(await third).toBe(true);
+    expect(f.deps.updateCondition).toHaveBeenCalledTimes(2);
+    expect(f.sdk.set).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenLastCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.fixture/third.png' }));
+    expect(f.deps.conditionApplied).toHaveBeenCalledExactlyOnceWith('same-credential', expect.objectContaining({ lookId: 'third', referenceVersion: 3 }), expect.any(AbortSignal));
   });
 
   it('records an accepted stale bind without applying it, then validates the next reference version', async () => {
@@ -150,9 +138,9 @@ describe('same-session exhibition condition changes', () => {
   });
 
   it('keeps the previous output after an upload failure and lets a newer selection succeed', async () => {
-    const f = fixture(); await f.ready(); f.deps.readyLookup.mockRejectedValueOnce(new Error('素材上传失败。'));
+    const f = fixture(); await f.ready(); f.deps.updateCondition.mockRejectedValueOnce(new Error('素材上传失败。'));
     expect(await f.controller.update(f.next('second'))).toBe(false);
-    expect(f.events.updateError).toHaveBeenLastCalledWith('这件暂不可用'); expect(f.events.status).toHaveBeenLastCalledWith('running');
+    expect(f.events.updateError).toHaveBeenLastCalledWith('素材上传失败。'); expect(f.events.status).toHaveBeenLastCalledWith('running');
     expect(f.controller.stopped).toBe(false); expect(f.events.stream).not.toHaveBeenCalledWith(null); expect(f.deps.reportError).not.toHaveBeenCalled();
     expect(await f.controller.update(f.next('third', 3))).toBe(true); expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.stop).not.toHaveBeenCalled();
   });
@@ -167,7 +155,7 @@ describe('same-session exhibition condition changes', () => {
     const f = fixture(); await f.ready(); f.sdk.set.mockRejectedValueOnce(new Error('切换请求失败。'));
     expect(await f.controller.update(f.next('second'))).toBe(false); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
     expect(await f.controller.retryUpdate()).toBe(false);
-    expect(f.deps.readyLookup).toHaveBeenCalledTimes(2); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
+    expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
     expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).toHaveBeenCalledOnce();
     expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ reason: 'command_unknown' }));
   });
@@ -189,10 +177,12 @@ describe('same-session exhibition condition changes', () => {
     expect(await f.controller.retryUpdate()).toBe(true); expect(f.deps.create).toHaveBeenCalledOnce();
   });
 
-  it('does not bind, generate, or resurrect output after stop while an upload is pending', async () => {
-    const f = fixture(); await f.ready(); const pending = deferred<string>(); f.deps.readyLookup.mockImplementationOnce(() => pending.promise);
-    const updating = f.controller.update(f.next('second')); await flush(); await f.controller.stop(); pending.resolve('https://reference.fixture/late.png');
-    expect(await updating).toBe(false); expect(f.deps.updateCondition).not.toHaveBeenCalled(); expect(f.sdk.set).toHaveBeenCalledOnce();
+  it('does not generate or resurrect output after stop while backend resolution is pending', async () => {
+    const f = fixture(); await f.ready(); const pending = deferred<Awaited<ReturnType<typeof f.condition>>>();
+    f.deps.updateCondition.mockImplementationOnce(() => pending.promise);
+    const updating = f.controller.update(f.next('second')); await flush(); await f.controller.stop();
+    pending.resolve(await f.condition('same-credential', f.next('second')));
+    expect(await updating).toBe(false); expect(f.sdk.set).toHaveBeenCalledOnce(); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
     expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).toHaveBeenCalledOnce(); expect(f.events.stream).toHaveBeenLastCalledWith(null);
   });
 
@@ -221,4 +211,13 @@ describe('same-session exhibition condition changes', () => {
     expect(f.events.updateError).toHaveBeenLastCalledWith('换装条件校验失败，请重新选择素材。');
     expect(f.sdk.set).toHaveBeenCalledOnce(); expect(f.controller.stopped).toBe(false); expect(f.events.stream).not.toHaveBeenCalledWith(null);
   });
+});
+
+it('rejects a condition response from another account scope without replacing the running output', async () => {
+  const f = fixture(); await f.ready();
+  f.deps.updateCondition.mockImplementationOnce(async (id, input) => ({ ...(await f.condition(id, input)), referenceScope: 'foreign-account' }));
+  expect(await f.controller.update(f.next('second'))).toBe(false);
+  expect(f.sdk.set).toHaveBeenCalledOnce(); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
+  expect(f.controller.stopped).toBe(false); expect(f.events.stream).not.toHaveBeenCalledWith(null);
+  expect(await f.controller.update(f.next('third', 3))).toBe(true);
 });

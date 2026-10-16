@@ -129,7 +129,7 @@ def main():
              SOURCE / 'UrlPolicy.java', TESTS / 'UrlPolicyTest.java'])
         run([java, '-cp', api_classes, 'ai.openbuy.exhibition.UrlPolicyTest'], timeout=60)
         run(compiler + ['-classpath', api_classpath, '-d', api_classes,
-                        SOURCE / 'ExhibitionApi.kt', TESTS / 'ExhibitionApiContractTest.kt'])
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeMaterialCatalog.kt', TESTS / 'ExhibitionApiContractTest.kt'])
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',
              '-cp', api_classpath, 'ai.openbuy.exhibition.ExhibitionApiContractTestKt'], timeout=60)
 

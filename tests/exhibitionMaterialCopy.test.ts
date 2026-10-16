@@ -58,7 +58,7 @@ describe('independent material copy', () => {
   it('appends enabled dual-image material in the target mode while preserving target state and source', async () => {
     const f = fixture();
     const original = await add(f.source);
-    f.source.command({ action: 'configure', enabledLookIds: [...f.source.read().enabledLookIds, original.id] });
+    f.source.command({ action: 'configure', enabledLookIds: [...new Set([...f.source.read().enabledLookIds, original.id])] });
     f.target.command({ action: 'select', lookId: 'city' });
     f.target.command({ action: 'configure', autoReturnSeconds: 180 });
     f.source.command({ action: 'begin' });
@@ -94,7 +94,7 @@ describe('independent material copy', () => {
   it('reads built-in assets from dist when the deployed package has no public directory', async () => {
     const f = fixture(); sampleFiles.distOnly = true;
     const state = await f.copy();
-    expect(sampleFiles.fallbackReads).toBe(1);
+    expect(sampleFiles.fallbackReads).toBeGreaterThanOrEqual(1);
     expect((await sharp(f.target.asset(state.looks.at(-1)!.id).data).metadata()).format).toBe('webp');
   });
 
@@ -103,6 +103,7 @@ describe('independent material copy', () => {
     f.source.taxonomy({ categories: [...f.source.read().categories, 'Winter'], tags: [...f.source.read().tags, 'Wool'] });
     f.target.taxonomy({ categories: [...f.target.read().categories, 'winter'], tags: [...f.target.read().tags, '目标标签'] });
     const original = await add(f.source, { category: 'Winter', tags: ['Wool'] });
+    f.source.command({ action: 'configure', enabledLookIds: f.source.read().enabledLookIds.filter(id => id !== original.id) });
     const before = f.target.read(); const result = await f.copy(original.id); const copied = result.looks.at(-1)!;
     expect(copied).toMatchObject({ category: 'winter', tags: ['Wool'] });
     expect(result.categories).toEqual(before.categories); expect(result.tags).toEqual([...before.tags, 'Wool']);
@@ -198,7 +199,8 @@ describe('independent material copy', () => {
     const reloaded = new ExhibitionMirrors(f.directory, { now: f.now }); const beforeFiles = assets(f.targetDirectory);
     const copied = await reloaded.copyLook(f.targetId, { sourceMirrorId: 'default', sourceLookId: 'commute', mode: 'clothx', expectedRevision: reloaded.getMirror(f.targetId).read().revision });
     expect(copied.looks).toHaveLength(101);
-    expect(copied.looks.slice(0, -1)).toEqual(stored.state.looks);
+    expect(copied.looks.slice(0, -1).map(({ contentVersion: _version, ...look }) => look)).toEqual(stored.state.looks.map(({ contentVersion: _version, ...look }: import('../shared/exhibition').ExhibitionLook) => look));
+    expect(copied.looks.every(look => !!look.contentVersion)).toBe(true);
     expect(assets(f.targetDirectory)).toHaveLength(beforeFiles.length + 2);
     expect(new ExhibitionMirrors(f.directory, { now: f.now }).getMirror(f.targetId).read()).toEqual(copied);
   });

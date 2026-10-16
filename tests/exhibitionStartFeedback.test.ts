@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionLiveStatus, ExhibitionState } from '../shared/exhibition';
@@ -16,10 +17,10 @@ function deferred<T>() {
   return { promise: new Promise<T>(yes => { resolve = yes; }), resolve };
 }
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
     looks: ['first', 'second'].map(id => ({ id, mode: 'clothx', name: id, description: '', image: '/test.png', source: 'sample', palette: '', category: '', tags: [] })),
     enabledLookIds: ['first', 'second'], categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
-    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides };
+    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides });
 }
 function liveStatus(overrides: Partial<ExhibitionLiveStatus> = {}): ExhibitionLiveStatus {
   return { configured: true, mode: 'xmax', model: 'x2.0', perSessionLimit: 30, totalLimit: 360, allocatedCredits: 0, remainingCredits: 360,

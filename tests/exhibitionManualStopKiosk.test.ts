@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, type ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Kiosk } from '../src/exhibition/ExhibitionApp';
@@ -16,13 +17,13 @@ function deferred<T>() {
 
 async function fixture(overrides: Partial<ComponentProps<typeof Kiosk>> = {}) {
   host = await createReactHost();
-  const state: ExhibitionState = {
+  const state: ExhibitionState = materialCatalogFixture({
     mirrorId: 'default', revision: 1, phase: 'idle', providerMode: 'xmax', experienceMode: 'clothx',
     selectedLookId: 'look', displayedLookId: null, enabledLookIds: ['look'], categories: [], tags: [],
     looks: [{ id: 'look', mode: 'clothx', name: '测试服装', image: '/test.png', source: 'sample', description: '', category: '', palette: '', tags: [] }],
     sessionNumber: 1, generationNumber: 1, updatedAt: 0, generationReadyAt: null, live: null, logs: [],
     settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } },
-  };
+  });
   const send = vi.fn(async () => true);
   const stopExperience = vi.fn(async () => true);
   const stopGeneration = vi.fn(async () => true);

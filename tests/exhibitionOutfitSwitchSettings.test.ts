@@ -101,9 +101,9 @@ describe('manual and automatic outfit switching controls', () => {
     await act(async () => { finish(true); });
   });
 
-  it('explains why rotation needs multiple enabled materials without starting one', async () => {
+  it('explains why rotation needs multiple available materials without starting one', async () => {
     const f = await fixture({ mode: 'auto', count: 1 });
-    expect(host!.find(node => node.textContent.includes('当前模式至少启用 2 份素材后才能自动换装。'))).toBeDefined();
+    expect(host!.find(node => node.textContent.includes('当前模式至少有 2 份可用素材后才能自动换装。'))).toBeDefined();
     expect(f.send).not.toHaveBeenCalled();
   });
 });

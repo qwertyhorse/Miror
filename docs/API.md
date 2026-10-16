@@ -6,10 +6,10 @@
 
 | 用途 | 地址 |
 | --- | --- |
-| 工作人员后台 | `http://xuminghong.local:10601/` |
-| HTTP API 前缀 | `http://xuminghong.local:10601/v1.1/api/exhibition` |
-| 消费者兼容入口 | `http://xuminghong.local:10200/v1.1/api/exhibition` |
-| 镜端与密钥安全表单 | `https://xuminghong.local:10202/v1.1/api/exhibition` |
+| 工作人员后台（当前 Ubuntu） | `http://xuxin.local:10101/` |
+| HTTP API 前缀（当前 Ubuntu） | `http://xuxin.local:10101/v1.1/api/exhibition` |
+| 原 Mac 消费者兼容入口 | `http://xuminghong.local:10200/v1.1/api/exhibition` |
+| 镜端与密钥安全表单（当前 Ubuntu） | `https://xuxin.local:10202/v1.1/api/exhibition` |
 
 下文 `M` 表示 `/v1.1/api/exhibition/mirrors/{mirrorId}`，例如 `mirrorId=default`。`S` 表示 `M/sessions/{sessionId}`。镜编号来自设备列表，不存在的编号返回 404，不回退到默认设备。
 
@@ -22,7 +22,7 @@
 
 ## 体验协议 2 与恢复
 
-API、Web 与 Android 须配套升级；当前 Android 版本为 0.5.0（versionCode 13），后台摄像头控制要求 0.3.2 或更新版本。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2` 和 `X-Miror-Material: binding-v1`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
+API、Web 与 Android 须配套升级；当前 Android 版本为 0.6.10（versionCode 25），后台摄像头控制要求 0.3.2 或更新版本。创建实时会话 `POST M/live/session` 必须携带 `X-Miror-Protocol: 2` 和 `X-Miror-Material: catalog-v2`；旧镜端返回 426 `EXHIBITION_CLIENT_UPGRADE_REQUIRED`，不签发临时凭证。
 
 `POST M/command` 支持 `commandId`（8–100 位字母、数字、下划线或连字符）。客户端同一次操作重试须沿用编号；同编号同内容返回当前权威快照，同编号不同内容返回 409 `EXHIBITION_COMMAND_CONFLICT`。服务端持久化去重；`expectedRevision` 不参与内容指纹。`end/idle/pause` 优先执行，不因旧 revision 阻止停止。`keepalive` 仅用于正在生成/展示的体验，取消空闲提醒并重新开始空闲计时。
 
@@ -38,7 +38,7 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.5.0（version
 
 ## 数据升级与运行
 
-连接服务挂接后，SQLite `mirror_states` 中 schemaVersion 4 为镜状态权威，`mirror_commands` 保存命令去重，`mirror_events` 保存有界事件。首次启动从已有 `exhibition.json` 校验并迁移，后续不双写活动状态；JSON 只作为迁移输入保留。会话凭证继续由原加密会话存储管理。无连接服务的独立演示仍使用原 JSON 路径。
+连接服务挂接后，SQLite `mirror_states` 中 schemaVersion 6 为镜状态权威，`mirror_commands` 保存命令去重，`mirror_events` 保存有界事件。首次启动从已有 `exhibition.json` 校验并迁移，后续不双写活动状态；JSON 只作为迁移输入保留。会话凭证继续由原加密会话存储管理。无连接服务的独立演示仍使用原 JSON 路径。
 
 升级须在维护窗口停止接待，确认所有旧段已停止，停止旧进程，完整备份数据目录（SQLite 及其 WAL/SHM、素材、设备注册、密钥加密配置），再配套升级 API、Web 和 APK。首次恢复会结束遗留顾客体验并隔离旧授权，禁止自动重播。无效或未来协议的持久化状态启动拒绝载入，不能用空状态覆盖。
 
@@ -131,13 +131,13 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.5.0（version
 
 状态为 `ready/scanning/preview/error/permission-required/busy/closed`；设备 `kind` 为 `external/back/front/unknown`，自动选择时 `selectedDeviceId` 为 null。服务端验证终端凭据、当前绑定标识及请求编号，返回 `cameraReportAccepted`；旧绑定或过期报告不会覆盖当前镜的数据。每镜状态由 `GET M/camera` 和设备列表的 `binding.camera` 返回，额外区分未绑定、离线、旧客户端、待打开和请求过期。
 
-`POST M/camera` 只接受当前绑定终端的 `open` 操作，可选 `bindingId` 必须匹配当前绑定版本。返回的请求也会经该终端下次连接传递，包含编号、镜/终端/绑定标识及 120 秒有效期。重复点击复用未完成请求；离线、旧客户端、体验中或云端清理未完成时拒绝。有效检测请求阻止开始/恢复体验与签发实时会话，关闭、失败、忙碌或到期后解除；客户端也在面板打开期间阻止生成。请求与检测快照不写入永久设备配置，重启或重新绑定后不重放，须重新检测。旧版 Android 需升级到 0.3.2 才支持此入口。
+`POST M/camera` 只接受当前绑定终端的 `open` 操作，可选 `bindingId` 必须匹配当前绑定版本。返回的请求也会经该终端下次连接传递，包含编号、镜/终端/绑定标识及 120 秒有效期。重复点击复用未完成请求；离线、旧客户端、体验中或云端清理未完成时拒绝。有效检测请求阻止开始/恢复体验与签发实时会话，关闭、失败、忙碌或到期后解除；客户端也在面板打开期间阻止生成。请求与检测快照不写入永久设备配置，重启或重新绑定后不重放，须重新检测。摄像头远程检测能力始于 Android 0.3.2；本次交付应升级到 0.6.10，以同时满足素材协议门禁。
 
 独立 `camera-check.html` 仍用于打开该页面的本机检测，不作为后台远程检测的替代入口。
 
 ## 独立浏览器测试
 
-后台的「浏览器测试」在同主机 HTTPS 10202 新开测试页，使用所选镜的素材、设置及 XMAX 区域与凭据快照。测试具有独立 `test-UUID` 状态和素材目录，不进入正式设备列表，也不修改真机绑定、体验状态或素材。页面准备电脑摄像头取景，点击「开始体验」后才签发临时凭证并生成。
+后台的「浏览器测试」在同主机 HTTPS 10202 新开测试页，使用所选镜的当前素材与供应商、账号、区域快照。测试具有独立 `test-UUID` 体验和会话所有权，直接跟随来源镜当前素材目录并读取来源文件，不复制或冻结整份素材。不进入正式设备列表，也不修改真机绑定、体验状态或素材。页面准备电脑摄像头取景，点击「开始体验」后才签发临时凭证并生成。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -145,7 +145,7 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.5.0（version
 | GET | `/mirrors/:testId/browser-test` | 恢复当前浏览器的测试页面 |
 | POST | `/mirrors/:testId/browser-test/close` | 结束测试，停止临时凭证；未确认停止时可重试 |
 
-创建和测试 API 仅经 HTTPS 使用。授权保存在限定测试路径的 `Secure; HttpOnly; SameSite=Strict` Cookie 中；测试页不读写正式镜端身份。素材预取、会话创建、连续续接和结束沿用现有协议，但所有资源和会话都限定当前测试编号。测试不能修改密钥、绑定、正式素材或设备配置。
+创建和测试 API 仅经 HTTPS 使用。授权保存在限定测试路径的 `Secure; HttpOnly; SameSite=Strict` Cookie 中；测试页不读写正式镜端身份。会话创建、连续续接和结束沿用现有协议，会话所有权限定当前测试编号；素材读取由服务端限定为其来源镜。测试创建时冻结当前供应商、账号及区域作用域；来源作用域变化时只结束该测试并要求重新打开，不停止物理镜、不把新账号引用混入旧连接。来源素材准备完成或编辑成功后，已打开的测试页也获得最新可用列表；正在使用的素材版本保持不变，下一次选择采用新版本。测试不能修改密钥、绑定、正式素材或设备配置。
 
 测试有效期 1 小时，同时最多保留 8 个未结束测试。关闭浏览器后的实时连接由现有心跳超时停止；连续 60 秒无有效 API 访问时回收测试，到期或主动结束同样撤销凭证。撤销未确认时保留记录并继续重试，服务重启不恢复测试体验。测试与真机共享来源 SK 的实际云端额度及供应商并发限制。
 
@@ -159,7 +159,10 @@ API、Web 与 Android 须配套升级；当前 Android 版本为 0.5.0（version
 | `phase` | `idle` / `select` / `positioning` / `generating` / `showcase` / `paused` |
 | `experienceMode` | `free` / `charx` / `clothx` / `vibex` / `dimx` / `mox` |
 | `providerMode` | `demo` / `xmax` |
-| `looks`, `enabledLookIds` | 全部素材与启用素材；播放仅使用当前模式启用项 |
+| `looks`, `enabledLookIds` | 可编辑素材与上架 ID；上下架独立于上传结果 |
+| `catalog` | 当前镜、当前模式与当前供应商账号投影：`revision`、`providerId`、`looks`、`availableLookIds`、可选 `emptyMessage`；可体验数直接取该列表长度 |
+| `materialVersions` | 服务端保留的当前及此前可用素材版本，客户端不自行重建可用性 |
+| `activeLook` | 本次已选输入的固定版本；不作为新增可选列表 |
 | `selectedLookId`, `displayedLookId` | 当前选择与实际已展示素材，可能为 null |
 | `categories`, `tags` | 平面分类和标签 |
 | `sessionNumber`, `generationNumber` | 体验轮次与生成代数 |
@@ -219,11 +222,11 @@ if (!response.ok) throw new Error(next.message);
 
 | 字段 | 合法值 |
 | --- | --- |
-| `enabledLookIds` | 全库已启用 ID 数组，不重复；可为空 |
+| `enabledLookIds` | 全库上架 ID 数组，不重复；可为空；下架移出新选择，不中断正在使用的版本 |
 | `experienceMode` | 六种模式之一，切换前应等待实时会话停止 |
 | `providerMode` | `demo` / `xmax`；启用 `xmax` 前必须配置凭证 |
 | `switchMode` | `manual` / `auto` |
-| `autoSwitchSeconds` | 5–600 整数秒；仅此字段和 `switchMode` 可在体验中调整 |
+| `autoSwitchSeconds` | 5–600 整数秒；此字段、`switchMode` 和 `enabledLookIds` 可在体验中调整 |
 | `autoReturnSeconds` | 0 关闭，或 15–600 整数秒 |
 | `uiSkinPreset` | `crystal` / `brand`，选择后替换自定义皮肤 |
 | `materialDrawerColumns` | `1` / `2`，镜端素材栏列数；默认 `2`，每镜独立保存，结束体验后可修改 |
@@ -307,7 +310,7 @@ if (!response.ok) throw new Error(next.message);
 }
 ```
 
-API 名称 1–40 字；后台不要求填写名称，上传时从展示图文件名生成，编辑时保留。描述最多 120 字，每份素材最多 8 个标签；分类和标签必须已登记。两张图只接受可完整解码的静态 PNG/JPEG/WebP，分别转为 WebP。每镜素材库不设固定数量上限，全服务同时处理最多 2 份上传。新上传素材插入列表最前，原有素材相对顺序保留，后续仍可手动排序。新增素材默认禁用，需通过 `configure.enabledLookIds` 启用。上传可在体验中进行，不使用全局版本锁；编辑、删除、分类调整和皮肤更换需先结束体验。
+API 名称 1–40 字；后台不要求填写名称，上传时从展示图文件名生成，编辑时保留。描述最多 120 字，每份素材最多 8 个标签；分类和标签必须已登记。两张图只接受可完整解码的静态 PNG/JPEG/WebP，分别转为 WebP。每镜素材库不设固定数量上限，全服务同时处理最多 2 份上传。新上传素材插入列表最前，原有素材相对顺序保留，后续仍可手动排序。新增素材默认上架，服务端自动准备已配置且支持其模式的供应商引用；当前供应商准备完成后自动进入 `catalog`。上传可在体验中进行，不使用全局版本锁；素材编辑和上下架也可在体验中进行，编辑使用版本校验。删除、分类调整和皮肤更换需先结束体验。
 
 `image` 为展示图，用于素材列表、选衣和待机；`referenceImage` 为模型输入，附有独立的 `referenceImageInfo`（宽高、字节数、MIME）。服务端准备、连续切换与 MoX 操作均使用参考图，实时客户端不再上传参考图。新素材两张图必填；PATCH 未提交的图片保持原样，换图生成新资源 URL，并按新参考图内容自动准备供应商引用。所有图片校验通过后才保存；处理或保存失败清理本次文件，保留原素材。
 
@@ -348,8 +351,8 @@ API 名称 1–40 字；后台不要求填写名称，上传时从展示图文�
 | --- | --- | --- | --- |
 | GET | `M/live/status` | — | 200 `ExhibitionLiveStatus` |
 | POST | `M/live/session` | 见下例 | 201 会话对象 + 临时 `token` + `model` |
-| POST | `M/live/session/{sessionId}/reference` | `{ "deviceId": "screen_device_001", "lookId": "commute", "bindingId": "服务端返回的绑定标识" }` | 200 会话对象 |
-| POST | `M/live/session/{sessionId}/condition` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、可选 `bindingId`（有参考图时必填） | 200 更新后的会话，包含 `referenceVersion` |
+| POST | `M/live/session/{sessionId}/reference` | 旧客户端绑定接口，不用于当前调用流程 | 创建已经绑定，重复绑定返回 `EXHIBITION_REFERENCE_LOCKED` |
+| POST | `M/live/session/{sessionId}/condition` | `deviceId`、`lookId`、`contentVersion`、`sessionNumber`、`generationNumber`；服务端解析参考图 | 200 更新后的会话，包含 `referenceVersion` |
 | POST | `M/live/session/{sessionId}/condition/applied` | 同上，加 `referenceVersion` | 200 镜状态，确认当前素材已应用 |
 | POST | `M/live/heartbeat` | `{ "deviceId": "screen_device_001", "sessionId": "会话 UUID" }` | 200 镜状态 |
 | POST | `M/live/error` | `deviceId`、`lookId`、`sessionNumber`、`generationNumber`、`message`、可选 `reason`；已有会话时加 `sessionId` | 200 镜状态；按 `lifecycle` 区分恢复中或需要人工处理 |
@@ -358,12 +361,13 @@ API 名称 1–40 字；后台不要求填写名称，上传时从展示图文�
 | POST | `S/first-frame` | `{ "firstFrameMs": 1234 }` | 200 会话对象 |
 | POST | `S/stop` | `{}` | 200 已停止会话；无法确认撤销时返回错误 |
 
-创建请求示例（`lookId`、`generationNumber`、`expectedRevision` 必须取刚读取的当前状态）：
+创建请求示例（`lookId` 与 `contentVersion` 取当前 `catalog.looks` 中选择的版本；其余代次与状态版本取刚读取的镜状态）：
 
 ```json
 {
   "deviceId": "screen_device_001",
   "lookId": "commute",
+  "contentVersion": "<当前素材内容版本>",
   "generationNumber": 1,
   "expectedRevision": 13
 }
@@ -382,7 +386,8 @@ API 名称 1–40 字；后台不要求填写名称，上传时从展示图文�
   "pointsLimit": 30,
   "expiresAt": "2026-10-12T02:02:00.000Z",
   "referenceAsset": "/assets/exhibition/commute-cutout.png",
-  "refImageUrl": "",
+  "refImageUrl": "<服务端已绑定的供应商引用>",
+  "referenceScope": "<供应商账号及区域作用域摘要>",
   "referenceVersion": 1,
   "consumedCredits": 0,
   "token": "<本次返回的临时凭证>",
@@ -393,11 +398,11 @@ API 名称 1–40 字；后台不要求填写名称，上传时从展示图文�
 正确调用顺序：
 
 1. 进入镜端仅准备本地取景，用户点击开始后提交 `command.begin`；确认镜状态为 `generating`。
-2. 从 `GET M/references/{lookId}` 获取当前发布素材的有效绑定；未就绪时保留取景/旧效果，不申请临时凭证。同一生成代数仅创建一次。MoX 仍需下载本地参考图用于其图片输入。
+2. 从共享 `catalog` 选择素材，提交 `lookId`、`contentVersion` 与现有设备/体验代次身份创建会话。不做 1.5 秒 ready 预查，不在创建后重复绑定，同一生成代数仅创建一次。MoX 仍需下载该固定版本的本地参考图用于其图片输入。
 3. `live/session` 在申请凭证前校验服务端准备记录，并在创建响应中返回已绑定的参考图和 `referenceVersion`。客户端直接用于 SDK；不得自行上传或指定 URL。重复 reference 请求返回 `EXHIBITION_REFERENCE_LOCKED`。Free 的 `referenceKind=none` 跳过参考图绑定。
 4. SDK 建立 RTC 后，调用 `S/link` 关联真实供应商会话；收到真实远端首帧后调用 `S/first-frame`。仅上报首帧才进入 `showcase`，`firstFrameMs` 范围 0–120000，从客户端开始准备本次体验计时，包含素材、凭证和 RTC 建连；不等于某次换装可见延迟。
 5. 每 3 秒提交本地 `live/heartbeat`，单请求 4 秒超时。服务端占用在最后一次有效心跳后 20 秒到期；终端按请求发出时的单调时钟计算截止并预留 2 秒。租约到期、凭证到期或达到单段上限时先停止当前段；后续恢复须由服务端核对旧凭证停止与恢复条件。
-6. 正在运行的兼容摄像头会话切换素材时，先提交 `command.switch`，读取目标已发布素材的 bindingId，在原会话调用 `condition`，用返回的参考图和提示词更新 SDK 条件；SDK 确认成功后提交 `condition/applied`。两次请求均带当前 `deviceId`、`lookId`、`sessionNumber`、`generationNumber`，确认请求再带 `referenceVersion`。旧素材的迟到请求返回 409，不替换最新选择；保持原 RTC、摄像头和临时凭证。MoX、模式改变或未连接会话继续走停止与重建流程。
+6. 正在运行的兼容摄像头会话切换素材时，先提交 `command.switch`，在原会话调用 `condition`，提交素材 ID、内容版本和体验身份，由服务端一次解析并返回已绑定的参考图和提示词；SDK 确认成功后提交 `condition/applied`。两次请求均带当前 `deviceId`、`lookId`、`contentVersion`、`sessionNumber`、`generationNumber`，确认请求再带 `referenceVersion`。旧素材的迟到请求返回 409，不替换最新选择；保持原 RTC、摄像头和临时凭证。MoX、模式改变或未连接会话继续走停止与重建流程。
 7. 停止或离开时立即提交 `command.end` 或 `command.idle`，同时释放 SDK 和摄像头、对已创建会话调用 `S/stop`，不等待 SDK 清理才通知后台；本地结束与云端停止确认分别处理。
 
 会话状态为 `reserved` / `active` / `stopping` / `stopped` / `issuance_unknown` / `error`。签发或停止状态未知时保留异常记录，不自动重复申请。`recover` 仅释放已结束的本地占用，不宣称未知云端凭证已撤销。
@@ -437,32 +442,37 @@ API 名称 1–40 字；后台不要求填写名称，上传时从展示图文�
 | 429 | 上传并发已满、配对尝试过多 | 等待后重试 |
 | 500 / 502 / 503 | 存储、供应商、服务或凭证不可用 | 保留当前输入，显示简短反馈；不要自动重复签发 |
 
+`MATERIAL_VERSION_CHANGED` 表示目录版本已变，应重新选择；`REFERENCE_NOT_READY` 表示素材仍在处理；网络不可达、供应商拒绝及配置缺失分别反馈。一次网络失败不把素材标为损坏，也不重复签发结果未知的凭证。
+
 HTTP/HTTPS 网关拒绝请求时可能返回纯文本。调用方应检查响应类型，避免把网关错误当成成功 JSON。
 
-## 提前准备参考素材
+## 自动准备参考素材
 
-- `GET M/references` 批量返回 `{ references: { [lookId]: { state, message?, retryAt?, updatedAt?, freshUntil?, stage? } } }`，供工作人员后台显示状态。`state` 为 `queued`、`preparing`、`ready`、`failed`、`unconfigured` 或 `not_required`；时间字段为 Unix 毫秒。此接口不返回云端 URL、账号摘要或凭据，也不会触发上传。
-- `POST M/references/{lookId}/retry`，JSON 请求体 `{}`，返回 HTTP 202 和 `{ status }`，异步准备该素材；已有任务复用，就绪引用不重传。工作人员显式发送 `{ "replace": true }` 可重新上传当前服务引用；替换成功前保留原引用，失败保留原引用并冷却，进行中的替换请求合并。失败后冷却期间仅返回当前状态，达到 `retryAt` 后可重试。原有同步准备接口保持兼容。
-- `GET M/references/{lookId}` 只读查询当前发布快照，返回 `{ reference: null }` 或 `{ reference: { bindingId, url, sha256, scope, freshUntil, providerExpiresAt? } }`。`scope` 为账号与区域的不可逆摘要；`freshUntil` 为兼容现有 Web/Android 客户端保留的数字字段：有供应商硬到期时为其 Unix 毫秒时间，否则为 `9007199254740991`，不代表本地缓存计时器。查询不会签发临时 key 或发起云端上传。
-- `POST M/references/{lookId}`，JSON 请求体 `{}`，准备指定素材并返回同一结构。仅使用该镜当前永久凭据向对应区域上传规范化后的参考图（旧单图素材回退展示图）并执行 SDK 同等的安全检查，不创建 RTC 或生成任务。图片仍保存在原素材目录。
-- 后台启动后自动串行准备运行中和空闲镜的已发布与草稿参考图，为所有已配置服务（XMAX、Decart）各保存一份引用，无需先申请切换；未配置服务跳过，后续配置后自动补传，展示图不传给模型，顺序为当前选中、已启用、其他素材；同优先级在镜子与素材间轮换，新上传或选择变化在下一轮调度生效。失败任务冷却后排在尚待准备的任务之后重试，避免连续超时阻塞正常素材。同内容、MIME、账号、区域的结果跨体验和服务重启复用；内容或账号变化自然失效。不设置本地一小时有效期，不做周期 DNS/HEAD 可用性检查。Decart 上传显式指定 `ttl_seconds=persistent`，以 `expires_at=null` 确认无到期；缺失或畸形到期信息不能当作永久成功。XMAX 引用无本地到期限制，官方未承诺文件永久保留。只有供应商实际硬到期临近或工作人员显式重新上传时替换；新引用成功落盘后才替换原引用与 bindingId。上传失败冷却 60 秒。旧 schema 2 XMAX 引用去掉人为一小时限制；旧 Decart 引用保留实际到期，缺少到期信息时保留旧窗口，随后上传为 persistent；不把旧 24 小时文件直接改成永久。schema 3 仅持久化供应商到期（如有），不持久化本地 freshUntil。
-- `referenceScope` 绑定当前供应商、账号及区域；使用绑定时同步核对内容哈希、MIME、当前发布版本、会话冻结账号与至少 30 秒剩余有效期。实时 bind/condition 不执行 DNS 或其他网络检查。来源验证放在后端上传和副本刷新阶段，外部资源下载仍保留原安全约束。缺绑定/过期/账号不符返回明确错误，不回退浏览器上传。
-- 同时最多 2 个准备任务（自动任务最多 1 个）；变更等待最多 128 个连接，超额返回 429。断开请求自动清理订阅。
+管理员只需上传、编辑、上下架。展示图用于列表和本地预览；模型参考图自动上传到两家已配置且支持该模式的服务，分别保存结果。Decart 仅支持 `clothx`；未配置或不支持不会伪装成上传失败，也不会持续自动重试。
+
+- `GET M/references` 批量返回 `{ references: { [lookId]: { state, message?, retryAt?, updatedAt?, freshUntil?, stage?, refreshState? } } }`，不返回远端引用或账号摘要，也不触发上传。内部 `state` 为 `queued/preparing/ready/failed/unconfigured/not_required`；产品只显示 处理中、可用、需处理。提示词素材不需要图片上传。新参考图仍在处理或失败而旧版本可用时，返回 `state=ready` 及 `refreshState=preparing/failed`，显示「可用 · 更新处理中/更新失败」。
+- `POST M/references/{lookId}/retry` 返回 202 `{ status }`，用于人工重试；相同任务合并，冷却中返回当前状态。`{ "replace": true }` 可显式重传已有引用，成功前保留原引用。人工重试重置该内容/账号身份的尝试计数；失败和尝试回执持久保存，进程重启不会重置次数。
+- 自动队列按当前选择、上架素材、其他素材排序，同优先级轮换镜与素材；两家结果独立，备用服务失败不影响当前服务。自动上传单并发，全服务准备任务最多 2 个。网络、超时等临时失败间隔 60 秒，单内容/账号身份最多尝试 3 次（含首次），之后等待人工重试。密钥拒绝、输入不安全等不可自动恢复错误直接等待修正或人工重试。重启将未完成任务恢复为待重试，但保留次数与账号/内容去重。
+- 永久引用按供应商、账号、区域、参考图 SHA-256 与 MIME 匹配，同身份跨体验和重启复用。哈希在写文件时计算并复用，不在每次列表统计读取全量原图。引用可能是 URL 或 `file_*`，由适配器解释，客户端不推断格式。
+- 不设人为一小时 TTL，不在开始或换装前做 DNS/HEAD 探活。Decart 使用 `ttl_seconds=persistent` 并校验 `expires_at=null`；真实供应商硬到期仍保留。旧 schema 2 XMAX 记录移除本地窗口，旧 Decart 记录保留实际或旧窗口到期，重新上传后才成为 persistent。引用 schema 3 只保存供应商实际到期，不保存本地 `freshUntil`；无到期时兼容字段返回 `9007199254740991`。
+- 创建与条件更新在服务端核对素材内容版本、哈希、MIME、供应商和冻结账号作用域。有参考图的创建回执须包含非空 `referenceScope`，后续条件回执必须属于原作用域。`GET/POST M/references/{lookId}` 仅供受控查询/人工兼容调用，不是当前镜端的前置步骤；不回退浏览器上传。
+
+素材更新成功才替换生效版本；展示图和参考图始终来自同一版本。仅编辑展示图复用原参考图引用。`activeLook` 固定当前选中输入，服务端另保留已绑定版本，直到条件应用确认或旧会话停止；文件回收排除物理镜和浏览器测试仍在使用的版本。后台可体验数、Web、Android 和浏览器测试均消费 `catalog`，搜索/模式筛选计数另行显示。
 
 ## 双供应商配置与 Decart 实时换装
 
 每镜的运行开关仍使用已有 `providerMode: demo | xmax`（`xmax` 在此为兼容现有终端的实时开关）；实际服务由独立配置的 `providerId: xmax | decart` 决定。`live/status` 返回实际供应商和固定模型。Decart 首期为 `lucy-vton-3.6`、标准速度、clothx 连续体验，每连接上限 120 秒；不解释或复用 XMAX 积分设置。其他模式须使用 XMAX。
 
 - `GET /api/exhibition/mirrors/:id/provider-settings`：返回 revision、active、desired、pending、applyAfterStop 和两家账号的 configured 布尔值。
-- `PUT .../provider-settings`：`{provider, expectedRevision, apiKey?}`。可选 key 仅用于配置 Decart；XMAX 沿用原 credentials 接口。先保存凭据和目标供应商；只有素材已就绪、当前模式兼容且没有未释放会话才允许生效，否则保留 pending，后台准备目标素材后可显式应用或下次 begin 应用。更换正在使用的 Decart key 需先结束体验。
+- `PUT .../provider-settings`：`{provider, expectedRevision, apiKey?}`。可选 key 仅用于配置 Decart；XMAX 沿用原 credentials 接口。先保存凭据和目标供应商；只有素材已就绪、当前模式兼容且没有未释放会话才允许生效，否则保留 pending，自动准备目标素材后可显式应用或下次 begin 应用。更换正在使用的 Decart key 需先结束体验。
 - `POST .../provider-settings/verify`：验证已保存的 Decart 账号鉴权；不创建 RTC 或生成，不返回原始余额/账号响应。
-- `POST .../provider-settings/apply`：`{expectedRevision}`。只有匹配的待生效配置且当前体验模式的目标发布素材已就绪、模式兼容才可执行；不满足时保留当前连接。通过后先结束体验，持久化释放后切换意图；清理完成前 active 不变，后台 sweep 在释放后自动应用。新配置保存会替代旧的切换意图。
+- `POST .../provider-settings/apply`：`{expectedRevision}`。只有匹配的待生效配置且当前体验模式至少一份目标上架素材可用、模式兼容才可执行；不满足时保留当前连接。通过后先结束体验，持久化释放后切换意图；清理完成前 active 不变，后台 sweep 在释放后自动应用。新配置保存会替代旧的切换意图。
 
 所有配置写入走现有 HTTPS 10202 表单；HTTP 网关禁止 credentials 和 provider-settings 写入。两个账号分别加密，复制镜子或素材不复制密钥。首次保存供应商配置后凭据文件升级为 schemaVersion 2，旧服务会拒绝读取；升级前备份完整运行目录，不能用旧服务或旧配置快照绕过未结束记录。只保存 XMAX 凭据时保留既有 schemaVersion 1。
 
 Decart 终端在创建实时会话时须声明 `X-Miror-Realtime: decart-v1`；缺少该能力声明返回 426，并且不签发任何 Decart token。现有 XMAX 客户端继续使用协议 2。
 
-Decart create 响应包含 `providerId`、固定 model、`releaseKey`，token 为空。后端用账号专属持久引用准备 `file_*` 素材，终端绑定参考图后，通过 `POST .../sessions/:id/dial {releaseKey}` 获取一次连接的短 token。此接口校验会话归属、当前业务状态和单次拨号门禁，限制模型、受信 Origin、30 秒准入 TTL 和 120 秒单次连接时长；未知或重复签发不自动重放。永久 key 始终留在后端；短 token 和 releaseKey 不写浏览器持久存储。
+Decart create 响应包含 `providerId`、固定 model、`releaseKey`，token 为空。后端用账号专属持久引用准备 `file_*` 素材，服务端返回已绑定参考图后，通过 `POST .../sessions/:id/dial {releaseKey}` 获取一次连接的短 token。此接口校验会话归属、当前业务状态和单次拨号门禁，限制模型、受信 Origin、30 秒准入 TTL 和 120 秒单次连接时长；未知或重复签发不自动重放。永久 key 始终留在后端；短 token 和 releaseKey 不写浏览器持久存储。
 
 SDK 0.2.11 的内部重连被此 Adapter 阻止，应用已有的有界恢复和续接负责新 segment。初始连接携带完整 prompt/reference；后续选择用同一连接的完整 `set()` 条件更新，保留 latest-intent 与旧回调隔离。SDK ack 不代表视觉效果确认。
 
@@ -470,24 +480,27 @@ SDK 0.2.11 的内部重连被此 Adapter 阻止，应用已有的有界恢复和
 
 Decart `usageStatus: unavailable` 表明没有结算读数，旧公共记录中的 consumedCredits/pointsLimit 兼容字段不可显示为 Decart 真实用量或余额。诊断须同时保留 providerId、model、releaseEvidence，不能把客户端关闭写成云端确认撤销。
 
-当前 Android 0.5.0 默认直接进入 WebView 镜端，XMAX 与 Decart 均使用最新网页流程，包含手势忙碌拦截和翻页笔行为；安装身份保持原生存储。以下 0.4.0 为历史入口行为。
-
-Android 0.4.0 保留原生 XMAX 引擎；选择 Decart 后先释放摄像头，再进入 App 内已有 WebView 镜端，共用 Web 的 Decart Adapter 与恢复机制。终端身份和绑定继续复用，WebView 负责摄像头及远程检测。该路径需要现有最低 WebView 版本、受信 HTTPS 和系统暴露的摄像头；只被原生驱动暴露的特殊 UVC 设备不保证可用于 WebRTC。旧 APK 不具备该路径，应升级后使用 Decart。切回 XMAX 可继续由 Web 引擎处理，重新启动 App 回到原生 XMAX。
+Android 0.6.10（versionCode 25）配套 `catalog-v2`。WebView 111 及以上使用最新 V1.1 网页；旧 WebView 自动进入原生 XMAX 兼容镜端。Decart 需要受支持的 WebView 路径，特殊 UVC 设备是否被 WebRTC 暴露须实机确认。安装身份和绑定保存在原生存储；旧 APK 不应与新 API 混用。原生摄像头、方向迁移和安装说明见 [Android 交付说明](../android/exhibition/README.md)。
 
 交付前执行全量测试、构建、runtime/package、Android JVM/build/lint，以及 `scripts/check-exhibition-providers.mjs` 和 `scripts/check-exhibition-session-limits.mjs` 的隔离浏览器回归。模拟不证明真实服装保真、长时 RTC、云端强制截止或 Android 摄像头实机效果；这些分别保留现场验收记录。
 
 
-## 草稿、批量导入与发布
-
-素材库是可编辑的草稿；`state.publication` 为不可变发布快照（revision、publishedAt、legacy、looks）。实时选衣、创建与同连接换装只读取发布快照。演示与后台编辑仍使用草稿。草稿编辑保留已发布图片文件；发布在体验结束且没有残留 live 时执行。部分发布须明确确认，未成功草稿仍保留。演示模式继续读取草稿。
+## 批量导入、就绪查询与迁移
 
 | 方法 | 路径 | 输入与行为 |
 | --- | --- | --- |
-| GET | `M/publication` | stateRevision、publication 的已发布/可用/草稿就绪集合，以及目标供应商在当前体验模式下的就绪集合 |
-| POST | `M/publication/prepare` | expectedRevision、可选 lookIds、provider；异步顺序准备发布与草稿，重复请求合并 |
-| POST | `M/publication/publish` | expectedRevision、可选 lookIds、allowPartial；默认全部就绪才原子发布 |
-| POST | `M/imports/validate` | items、files；校验精确 SKU 与两个文件角色，每批最多 100 件、200 文件，元数据体上限 128 KiB |
+| GET | `M/materials/readiness` | 返回 `stateRevision`、`catalog`、当前素材状态，以及 `targetProvider/targetLookIds/targetReadyLookIds/targetUnavailableLookIds`；只读，不创建任务 |
+| POST | `M/imports/validate` | `items`、`files`；校验精确 SKU 与双图角色，每批最多 100 件、200 文件，元数据体上限 128 KiB |
+| POST | `M/publication/prepare` 或 `M/publication/publish` | 旧工作流明确返回 409 `MATERIAL_WORKFLOW_UPGRADE_REQUIRED`，不修改素材或发布状态 |
 
-批量 CSV 使用 `sku,name,mode,category,display_file,reference_file`，Free 另需 prompt；文件路径精确匹配，不按顺序或相似文件名猜配。前端先检查整批配对、解码和尺寸，再串行调用现有双图上传接口保存草稿，逐项显示结果。上传、供应商准备、发布是三个不同操作。展示图用于列表和本地预览；模型参考图用于生成。
+批量 CSV 使用 `sku,name,mode,category,display_file,reference_file`，Free 另需 `prompt`；文件路径精确匹配，不按顺序或相似文件名猜配。前端先校验配对、解码和尺寸，再串行调用现有双图上传接口，每项保存后默认上架，自动进入供应商准备队列。已保存与供应商可用分别反馈，无准备或发布按钮。
 
-升级时保持历史素材及启用顺序，迁移为明确 legacy 发布快照；参考副本 schema 1 不再直接使用，由本地源重新准备。镜状态 schema 5 的损坏发布数据拒绝载入，不静默重建素材库。部署必须同时更新后端与网页；Android 0.5.0 的默认 WebView 使用新网页，旧原生上传客户端由 capability 门禁拒绝。升级前备份完整运行数据，重新准备并确认可体验数量后再开场。
+镜状态升级为 schema 6，删除活动 `state.publication`。迁移保留历史素材、文件、远端引用、上架顺序和必要旧版本：原已发布项继续上架，历史未发布项保持下架；新上传默认上架。升级前的状态保存在 `exhibition.json.before-material-workflow.json`，不能将其当作正在使用的权威状态。迁移和进程恢复在连接服务挂接前保留旧版本，取得当前账号的准备结果后才判断生效版本。损坏 schema 5/6 数据拒绝载入，不用空库覆盖。
+
+升级时配套更新 API、Web 和 Android；旧 `binding-v1` 镜端被 426 门禁拒绝，新版声明 `catalog-v2`。完整备份及回退规则见前文「数据升级与运行」，恢复后核对镜身份、服务、当前模式、素材上架及可体验数再恢复接待。
+
+## 原生摄像头安装方向
+
+原生镜端只保留一个摄像头安装方向（0/90/180/270°），预览与模型输入使用同一设置；预览镜像与模型像素方向分别处理。旧「摄像头方向」与「XMAX 输入方向」冲突时要求一次校准，不静默猜测，校准完成前禁止开始生成。旧的第二个方向旋钮已删除。
+
+校准预览使用已有预处理后帧，不能代替最终编码或接收像素验收。现场用四角标记的非正方形图核对四方向与镜像，以及编码/解码像素、rotation 和模型宽高；分辨率、编码尺寸与屏幕比例分别核对。浏览器没有同等旋转管线，其设置页显示使用摄像头原始方向；旋转安装设备使用原生路径。本地模拟不能宣称 Android/USB 摄像头现场方向或长时运行已通过。

@@ -58,14 +58,14 @@ it('skips pending and cooling-down work without blocking other materials, then r
   now = 61_001; await queue.runOnce(); expect(f.calls).toEqual(['unused', 'selected']);
 });
 
-it('refreshes references near expiry and detects newly uploaded materials', async () => {
+it('reuses ready references regardless of legacy local expiry windows and detects new materials', async () => {
   const f = fixture();
   for (const look of f.mirror.state.looks) f.statuses.set(look.id, { state: 'ready', freshUntil: 3_601_000 });
   f.statuses.set('selected', { state: 'ready', freshUntil: 301_000 });
   const queue = new ReferencePreparationQueue(() => [f.mirror], () => 1_000);
   await queue.runOnce();
   f.mirror.state.looks.push({ id: 'new-upload' } as ExhibitionLook);
-  await queue.runOnce(); expect(f.calls).toEqual(['selected', 'new-upload']);
+  await queue.runOnce(); expect(f.calls).toEqual(['new-upload']);
 });
 
 it('never overlaps background uploads and recovers after a failed attempt', async () => {
@@ -109,4 +109,14 @@ it('serves new enabled materials before retrying repeatedly failing selections a
   const queue = new ReferencePreparationQueue(() => mirrors.map(f => f.mirror), () => now);
   for (let i = 0; i < 5; i++) await queue.runOnce();
   expect(calls).toEqual(['a:selected', 'b:selected', 'c:selected', 'd:selected', 'a:enabled']);
+});
+
+it('never automatically retries permanent or exhausted failures without an explicit retry deadline', async () => {
+  const f = fixture();
+  for (const look of f.mirror.state.looks) f.statuses.set(look.id, { state: 'failed', message: '需修正配置或重试' });
+  const queue = new ReferencePreparationQueue(() => [f.mirror], () => 1_000_000);
+  for (let tick = 0; tick < 20; tick++) await queue.runOnce();
+  expect(f.calls).toEqual([]);
+  f.statuses.set('enabled', { state: 'failed', retryAt: 0 }); await queue.runOnce();
+  expect(f.calls).toEqual(['enabled']);
 });

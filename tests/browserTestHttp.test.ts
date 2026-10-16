@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import sharp from 'sharp';
 import { createApiServer } from '../server/http.ts';
+import { createMaterialPreparationQueue } from '../server/materialPreparation.ts';
 import { ExhibitionMirrors } from '../server/exhibitionMirrors.ts';
 import { TryOnService } from '../server/service.ts';
 import { MirrorCredentialStore } from '../server/mirrorCredentials.ts';
@@ -59,7 +60,7 @@ async function fixture() {
   const base = `http://127.0.0.1:${address(server)}`;
   const request = (path: string, input?: unknown, options: { cookie?: string; method?: string; origin?: string; signal?: AbortSignal } = {}) => fetch(base + path, {
     method: options.method ?? (input === undefined ? 'GET' : 'POST'), signal: options.signal,
-    headers: { Origin: options.origin ?? origin, 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', ...(options.cookie ? { Cookie: options.cookie } : {}) },
+    headers: { Origin: options.origin ?? origin, 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json', ...(options.cookie ? { Cookie: options.cookie } : {}) },
     ...(input === undefined ? {} : { body: JSON.stringify(input) }),
   });
   const source = mirrors.getMirror();
@@ -76,7 +77,7 @@ async function fixture() {
 }
 async function start(f: Awaited<ReturnType<typeof fixture>>, test: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['create']>>) {
   const context = f.mirrors.browserTests.resolve(test.mirror.id, test.token);
-  await context.exhibition.prepareReference(context.exhibition.read().selectedLookId!, undefined, true);
+  await context.exhibition.prepareReference(context.exhibition.read().selectedLookId ?? context.exhibition.read().looks.find(look => look.mode === context.exhibition.read().experienceMode)!.id);
   const begun = await f.request(test.path + '/command', { action: 'begin' }, test); expect(begun.status).toBe(200);
   const state = await begun.json() as ExhibitionState;
   const response = await f.request(test.path + '/live/session', { deviceId: 'isolated-browser', lookId: state.selectedLookId, generationNumber: state.generationNumber }, test);
@@ -84,10 +85,33 @@ async function start(f: Awaited<ReturnType<typeof fixture>>, test: Awaited<Retur
 }
 
 describe('isolated browser test HTTP context', () => {
-  it('creates a hidden snapshot behind a scoped secure cookie without changing the real mirror or registering a terminal', async () => {
+  it('automatically makes an upload available in an already-open test and wakes its change feed', async () => {
+    const f = await fixture(); const test = await f.create();
+    const queue = createMaterialPreparationQueue(f.mirrors, f.service, f.now);
+    const imageBase64 = (await sharp({ create: { width: 512, height: 512, channels: 3, background: 'red' } }).png().toBuffer()).toString('base64');
+    const uploadResponse = await f.request(rootPath() + '/looks', { name: 'Automatic upload', mode: 'clothx', imageBase64, referenceImageBase64: imageBase64 });
+    expect(uploadResponse.status, await uploadResponse.clone().text()).toBe(201);
+    const uploaded = await uploadResponse.json() as ExhibitionState; const look = uploaded.looks[0]!;
+    expect(uploaded.enabledLookIds).toContain(look.id);
+    const before = await (await f.request(test.path, undefined, test)).json() as ExhibitionState;
+    expect(before.catalog!.availableLookIds).not.toContain(look.id);
+    const changed = f.request(test.path + '/changes?after=' + before.revision, undefined, test);
+    for (let i = 0; i < uploaded.looks.length + 2; i++) await queue.runOnce();
+    const notified = await (await changed).json() as ExhibitionState;
+    expect(notified.revision).toBeGreaterThan(before.revision);
+    const latest = await (await f.request(test.path, undefined, test)).json() as ExhibitionState;
+    expect(latest.catalog!.availableLookIds).toContain(look.id);
+    const source = f.source.read();
+    expect(latest.catalog!.looks.find(row => row.id === look.id)).toEqual(source.catalog!.looks.find(row => row.id === look.id));
+    expect(f.issue).not.toHaveBeenCalled();
+    expect(f.upload).toHaveBeenCalled();
+  });
+
+  it('creates an independent experience behind a scoped secure cookie without changing the real mirror or registering a terminal', async () => {
     const f = await fixture();
     const device = { terminalId: `terminal-${randomUUID()}`, token: randomBytes(32).toString('hex'), label: '真实镜端', platform: 'android' };
     const connected = f.mirrors.connectDevice(device); f.mirrors.bindDevice('default', { code: connected.code });
+    await f.source.prepareReference('commute');
     const before = f.source.read(); const registry = f.mirrors.list();
     const test = await f.create();
     expect(test.mirror.id).toMatch(/^test-[a-f0-9-]{36}$/); expect(test.mirror.binding).toBeNull();
@@ -124,20 +148,20 @@ describe('isolated browser test HTTP context', () => {
     expect(await (await f.request(test.path, undefined, test)).json()).toEqual(before); expect(f.issue).not.toHaveBeenCalled();
   });
 
-  it('serves snapshot assets and prepared references only through the test scope', async () => {
+  it('reads source assets without copying while keeping test routes authenticated', async () => {
     const f = await fixture();
     const image = async (color: string) => (await sharp({ create: { width: 512, height: 512, channels: 3, background: color } }).png().toBuffer()).toString('base64');
     const uploaded = await f.source.upload({ name: '双图隔离', mode: 'clothx', imageBase64: await image('red'), referenceImageBase64: await image('blue') });
     const look = uploaded.looks[0]!;
-    await f.source.preparePublication({ lookIds: [look.id] }); await vi.waitFor(() => expect(f.source.readyReference(look.id)).not.toBeNull()); f.source.publishPublication({ lookIds: [look.id] });
+    await f.source.prepareReference(look.id);
     f.source.command({ action: 'configure', enabledLookIds: [look.id] });
     const test = await f.create(); const state = await (await f.request(test.path, undefined, test)).json() as ExhibitionState;
     const copied = state.looks.find(row => row.name === look.name)!;
-    expect(copied.image).toContain(test.path + '/assets/'); expect(copied.referenceImage).toContain(test.path + '/assets/');
+    expect(copied.image).toBe(look.image); expect(copied.referenceImage).toBe(look.referenceImage);
     const display = await f.request(copied.image, undefined, test); const reference = await f.request(copied.referenceImage!, undefined, test);
     expect(display.status).toBe(200); expect(reference.status).toBe(200);
     expect(Buffer.from(await display.arrayBuffer())).not.toEqual(Buffer.from(await reference.arrayBuffer()));
-    expect((await f.request(copied.referenceImage!)).status).toBe(401);
+    expect((await f.request(test.path + `/assets/${copied.id}/reference/${copied.referenceImage!.split('/').at(-1)}`)).status).toBe(401);
     expect((await f.request(copied.referenceImage!, undefined, { ...test, method: 'HEAD' })).status).toBe(200);
     const prepared = await f.request(test.path + `/references/${copied.id}`, {}, test); expect(prepared.status).toBe(200);
     expect((await prepared.json()).reference).toMatchObject({ scope: expect.any(String), sha256: expect.any(String) });
@@ -149,7 +173,7 @@ describe('isolated browser test HTTP context', () => {
 
   it('routes session reads, links, first frames and stopping through the isolated service and rejects foreign session IDs', async () => {
     const f = await fixture();
-    await f.source.prepareReference(f.source.read().selectedLookId!, undefined, true);
+    await f.source.prepareReference(f.source.read().selectedLookId ?? 'commute');
     const running = f.source.command({ action: 'begin' });
     const realSession = await f.source.createLiveSession({ deviceId: 'real-screen', lookId: running.selectedLookId, generationNumber: running.generationNumber });
     const realState = f.source.read();

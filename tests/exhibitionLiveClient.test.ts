@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import type { SdkSession } from '../src/liveTryOn';
@@ -25,9 +24,9 @@ function fixture() {
   const cloned = { getVideoTracks: () => [cloneTrack], getTracks: () => [cloneTrack] } as unknown as MediaStream;
   const created = {
     id: 'local-1', token: 'temporary-test-token', model: 'x2.0', status: 'active', sourceId: 'camera-device-a', sourceKind: 'camera' as const,
-    sourceName: '展会摄像头', targetItemId: 'exhibition-commute', lookId: 'commute', referenceAsset: '/assets/exhibition/commute-cutout.png',
+    sourceName: '展会摄像头', targetItemId: 'exhibition-commute', lookId: 'commute', referenceScope: 'account-scope', referenceAsset: '/assets/exhibition/commute-cutout.png',
     expiresAt: new Date(Date.now() + 120000).toISOString(), pointsLimit: 30, consumedCredits: 0,
-    refImageUrl: '', referenceVersion: 0, resultAvailable: false, verification: 'none' as const,
+    refImageUrl: 'https://reference.example/garment.png', referenceVersion: 1, resultAvailable: false, verification: 'none' as const,
     exhibition: { deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1 },
   };
   let callbacks!: Parameters<ExhibitionLiveDeps['connect']>[2];
@@ -39,13 +38,11 @@ function fixture() {
     create: vi.fn(async () => ({ ...created })),
     reference: vi.fn(async () => new File(['garment'], 'garment.png', { type: 'image/png' })),
     prepare: vi.fn(async () => {}), readyLookup: vi.fn(async () => 'https://reference.example/garment.png'),
-    bind: vi.fn(async (_id, input) => ({ ...created, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 })),
     connect: vi.fn(async (_stream, _local, value) => { callbacks = value; return sdk; }),
     link: vi.fn(async (_id, providerSessionId) => ({ ...created, providerSessionId, referenceVersion: 1 })),
     firstFrame: vi.fn(async () => ({ ...created })), stop: vi.fn(async () => ({ ...created, status: 'stopped' })),
     heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => cloned), now: vi.fn(() => 1000),
-  } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
-  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
+  } satisfies ExhibitionLiveDeps & { readyLookup: (...args: any[]) => Promise<string> };
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn() };
   const controller = new ExhibitionLiveConnection({ deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1, expectedRevision: 3, image: created.referenceAsset, stream }, events, deps);
   controllers.push(controller);
@@ -57,9 +54,7 @@ describe('exhibition live client lifecycle', () => {
     const input = { deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1,
       expectedRevision: 3, image: f.created.referenceAsset, stream: f.stream };
     const controller = new ExhibitionLiveConnection(input, f.events, { ...f.deps,
-      create: async () => ({ ...f.created, referenceScope: 'account-scope' }),
-      preparedReference: async () => readyReferenceFixture('https://reference.example/ready.webp', 'account-scope'),
-      bind: async () => ({ ...f.created, refImageUrl: 'https://reference.example/ready.webp', referenceVersion: 1 }),
+      create: async () => ({ ...f.created, referenceScope: 'account-scope', refImageUrl: 'https://reference.example/ready.webp' }),
     });
     controllers.push(controller);
     await controller.start();
@@ -67,13 +62,11 @@ describe('exhibition live client lifecycle', () => {
     expect(f.deps.readyLookup).not.toHaveBeenCalled();
     expect(f.sdk.set).toHaveBeenCalledWith(expect.objectContaining({ refImageUrl: 'https://reference.example/ready.webp' }));
   });
-  it.each(['different-account', 'expired'])('blocks generation without browser upload for %s preparation', async reason => {
+  it.each(['MATERIAL_NOT_READY', 'MATERIAL_VERSION_CHANGED'])('blocks generation when backend rejects %s without browser upload', async reason => {
     const f = fixture();
     const controller = new ExhibitionLiveConnection({ deviceId: 'screen-device-a', lookId: 'commute', sessionNumber: 1, generationNumber: 1,
       expectedRevision: 3, image: f.created.referenceAsset, stream: f.stream }, f.events, { ...f.deps,
-      create: async () => ({ ...f.created, referenceScope: 'current-account' }),
-      preparedReference: async () => ({ url: 'https://reference.example/stale.png', scope: reason === 'expired' ? 'current-account' : 'old-account',
-        freshUntil: Date.now() + (reason === 'expired' ? -1 : 60000) }),
+      create: async () => { throw Object.assign(new Error('素材不可用'), { code: reason }); },
     });
     controllers.push(controller); await controller.start();
     expect(f.deps.reference).not.toHaveBeenCalled(); expect(f.deps.readyLookup).not.toHaveBeenCalled();
@@ -81,16 +74,16 @@ describe('exhibition live client lifecycle', () => {
   });
   it('measures first-frame latency from preparation before credential allocation', async () => {
     const f = fixture(); let now = 1000; f.deps.now.mockImplementation(() => now);
-    f.deps.readyLookup.mockImplementationOnce(async () => { now += 700; return 'https://reference.example/garment.png'; });
+    f.deps.create.mockImplementationOnce(async () => { now += 700; return f.created; });
     await f.controller.start(); now += 300;
     f.controller.reportFirstFrame(); await flush();
     expect(f.deps.firstFrame).toHaveBeenCalledWith('local-1', 1000);
   });
-  it('preflights before allocating, binds/links before one generation, reports only a remote frame', async () => {
+  it('uses the bound create response, links before one generation, reports only a remote frame', async () => {
     const f = fixture();
     await f.controller.start();
-    expect(f.deps.readyLookup.mock.invocationCallOrder[0]).toBeLessThan(f.deps.create.mock.invocationCallOrder[0]);
-    expect(f.deps.bind.mock.invocationCallOrder[0]).toBeLessThan(f.deps.connect.mock.invocationCallOrder[0]);
+    expect(f.deps.readyLookup).not.toHaveBeenCalled();
+    expect(f.deps.create.mock.invocationCallOrder[0]).toBeLessThan(f.deps.connect.mock.invocationCallOrder[0]);
     expect(f.deps.link.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.sdk.set).mock.invocationCallOrder[0]);
     expect(f.sdk.set).toHaveBeenCalledTimes(1);
     expect(f.deps.firstFrame).not.toHaveBeenCalled();
@@ -105,24 +98,25 @@ describe('exhibition live client lifecycle', () => {
     expect(f.cloneStop).toHaveBeenCalledTimes(1);
     expect(f.deps.stop).toHaveBeenCalledWith('local-1');
   });
-  it('does not allocate a credential if local garment preflight fails', async () => {
+  it('does not connect when backend material resolution fails', async () => {
     const f = fixture();
-    f.deps.readyLookup.mockRejectedValueOnce(new Error('reference unavailable'));
+    f.deps.create.mockRejectedValueOnce(Object.assign(new Error('素材处理中'), { code: 'MATERIAL_NOT_READY' }));
     await f.controller.start();
-    expect(f.deps.create).not.toHaveBeenCalled();
-    expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ sessionNumber: 1, lookId: 'commute', message: expect.stringContaining('这件暂不可用') }));
+    expect(f.deps.create).toHaveBeenCalledOnce();
+    expect(f.deps.connect).not.toHaveBeenCalled();
+    expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ sessionNumber: 1, lookId: 'commute', message: expect.stringContaining('素材处理中') }));
   });
 
   it('identifies reference binding failures before connecting or generating', async () => {
     const f = fixture();
-    f.deps.bind.mockRejectedValueOnce(Object.assign(new Error('素材地址解析失败，请重试。'), { code: 'MEDIA_DNS_UNAVAILABLE' }));
+    f.deps.create.mockRejectedValueOnce(Object.assign(new Error('素材地址解析失败，请重试。'), { code: 'MEDIA_DNS_UNAVAILABLE' }));
     await f.controller.start();
     expect(f.events.status).toHaveBeenCalledWith('error', '素材地址解析失败，请重试。');
     expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('client_stage=bind_reference; code=MEDIA_DNS_UNAVAILABLE'),
+      message: expect.stringContaining('client_stage=create_session; code=MEDIA_DNS_UNAVAILABLE'),
     }));
     expect(f.deps.connect).not.toHaveBeenCalled(); expect(f.sdk.set).not.toHaveBeenCalled();
-    expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.deps.create).toHaveBeenCalledOnce();
+    expect(f.deps.stop).not.toHaveBeenCalled(); expect(f.deps.create).toHaveBeenCalledOnce();
     expect(f.originalStop).not.toHaveBeenCalled();
   });
   it('deactivates a late credential after a stop while create is pending', async () => {
@@ -132,7 +126,7 @@ describe('exhibition live client lifecycle', () => {
     const starting = f.controller.start(); await flush();
     await f.controller.stop(); pending.resolve(f.created); await starting;
     expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
-    expect(f.deps.readyLookup).toHaveBeenCalledOnce();
+    expect(f.deps.readyLookup).not.toHaveBeenCalled();
     expect(f.sdk.set).not.toHaveBeenCalled();
   });
   it('disconnects a late SDK connection without generating', async () => {
@@ -145,12 +139,12 @@ describe('exhibition live client lifecycle', () => {
     expect(f.sdk.set).not.toHaveBeenCalled();
     expect(f.cloneStop).toHaveBeenCalledTimes(1);
   });
-  it('does not allocate or heartbeat while readiness is unresolved and stop wins', async () => {
-    const f = fixture(); const pending = deferred<string>(); f.deps.readyLookup.mockImplementationOnce(() => pending.promise);
+  it('does not heartbeat or connect while allocation is unresolved and stops a late credential', async () => {
+    const f = fixture(); const pending = deferred<typeof f.created>(); f.deps.create.mockImplementationOnce(() => pending.promise);
     const starting = f.controller.start(); await flush();
-    expect(f.deps.create).not.toHaveBeenCalled(); expect(f.deps.heartbeat).not.toHaveBeenCalled();
-    await f.controller.stop(); pending.resolve('https://reference.example/late.png'); await starting;
-    expect(f.deps.create).not.toHaveBeenCalled(); expect(f.deps.connect).not.toHaveBeenCalled();
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.heartbeat).not.toHaveBeenCalled();
+    await f.controller.stop(); pending.resolve(f.created); await starting;
+    expect(f.deps.connect).not.toHaveBeenCalled(); expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
   });
   it('keeps healthy video through one transient heartbeat failure and resumes heartbeats', async () => {
     const f = fixture(); await f.controller.start();
@@ -305,4 +299,12 @@ describe('remote video element binding', () => {
     dispose(); Object.assign(f.video, { readyState: 2, videoWidth: 720, videoHeight: 1280 });
     f.frame(); f.decode(); expect(report).not.toHaveBeenCalled();
   });
+});
+
+it.each([undefined, '', '   '])('rejects an image receipt without a valid bound account scope: %j', async referenceScope => {
+  const f = fixture();
+  f.deps.create.mockResolvedValueOnce({ ...f.created, referenceScope });
+  await f.controller.start();
+  expect(f.deps.connect).not.toHaveBeenCalled(); expect(f.sdk.set).not.toHaveBeenCalled();
+  expect(f.deps.stop).toHaveBeenCalledWith(f.created.id);
 });

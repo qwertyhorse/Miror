@@ -46,10 +46,10 @@ fun main() = runBlocking {
             val running = startRound(fixture, NativeXmaxController(fixture.events))
             try {
                 withTimeout(5_000) { running.failure.await(); running.job.join() }
-                verify(fixture.allocations.get() == 0, "Legacy catalog allocated despite the binding-v1 contract")
+                verify(fixture.allocations.get() == 0, "Legacy catalog allocated despite the catalog-v2 contract")
                 verify(fixture.events.none { it in listOf("prepare-reference", "image", "upload", "connect", "generate") },
                     "Missing publication fell back to client material handling")
-                verify(running.errors.firstOrNull() == "请更新后台并发布素材后开始体验。", "Missing publication was not actionable")
+                verify(running.errors.firstOrNull() == "请更新后台以使用自动素材目录。", "Missing publication was not actionable")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
         }
@@ -79,7 +79,7 @@ fun main() = runBlocking {
                     verify((controller.connectedImage != null) == (mode == "mox"),
                         "Rotation selection changed the input source")
                     verify(fixture.events.none { it == "upload" } && fixture.imagePaths.isEmpty() == (mode != "mox"),
-                        "Rotation bypassed binding-v1 or downloaded a camera reference")
+                        "Rotation bypassed catalog-v2 or downloaded a camera reference")
                     if (mode == "mox") {
                         verify(controller.connectedImage!!.contentEquals(fixture.imageBytes),
                             "Camera rotation modified the MoX input image")
@@ -107,7 +107,7 @@ fun main() = runBlocking {
                 val running = startRound(fixture, controller)
                 try {
                     withTimeout(5_000) { running.firstFrame.await() }
-                    ordered(fixture.events, "create", "bind", "connect", "link", "report-first", "ui-first")
+                    ordered(fixture.events, "create", "connect", "link", "report-first", "ui-first")
                     verify(!running.failure.isCompleted && running.errors.isEmpty(), "Valid offset expiry failed")
                     verify(controller.connectedCameraRotationDegrees == 0, "Default camera correction must remain zero")
                 } finally { running.job.cancelAndJoin() }
@@ -145,7 +145,7 @@ fun main() = runBlocking {
                     verify(fixture.events.none { it == "upload" }, "Published material used a client upload")
                     verify(fixture.imagePaths.isEmpty() == (mode != "mox"), "Only MoX should download its photo input")
                     verify(controller.generatedReference == RoundFixture.REFERENCE_URL, "Published binding URL not used")
-                    verify(fixture.events.contains("bind") != prebound, "Server-bound material was bound twice")
+                    verify(fixture.events.none { it == "bind" || it == "prepare-reference" }, "Automatic binding made a redundant reference request")
                     if (mode != "mox") {
                         val next = fixture.snapshot().put("generationNumber", 4).put("revision", 5)
                         withTimeout(5_000) { while (!running.round.canReuse(next, fixture.look)) delay(5) }
@@ -178,40 +178,16 @@ fun main() = runBlocking {
             }
         }
 
-        // Scope changes and expiration after allocation must stop the owned reservation,
-        // including when the server already attached reference version 1.
-        for (prebound in listOf(false, true)) for (expired in listOf(false, true)) {
-            RoundFixture("clothx", ready = true, published = true, prebound = prebound,
-                preparedScope = if (expired) "fixture-scope" else "stale-scope",
-                referenceTtlMs = if (expired) 750 else 60_000, holdCreate = expired).use { fixture ->
-                val running = startRound(fixture, NativeXmaxController(fixture.events))
-                try {
-                    if (expired) {
-                        fixture.createEntered.awaitFixture()
-                        withTimeout(5_000) { while (System.currentTimeMillis() <= fixture.referenceFreshUntil) delay(5) }
-                        fixture.releaseCreate.countDown()
-                    }
-                    withTimeout(5_000) { running.failure.await(); running.job.join() }
-                    verify(fixture.allocations.get() == 1 && fixture.stoppedIds.toList() == listOf(RoundFixture.SESSION_ID),
-                        "Invalid published scope/freshness leaked or reallocated a reservation")
-                    verify(fixture.events.none { it in listOf("bind", "image", "upload", "connect", "generate") },
-                        "Invalid published scope/freshness reached binding or the supplier")
-                    verify(running.round.isBusy && running.round.cleanupConfirmed, "Invalid binding reopened gestures or failed safe stop")
-                    fixture.checkHandler()
-                } finally { fixture.releaseCreate.countDown(); running.job.cancelAndJoin() }
-            }
-        }
-        RoundFixture("clothx", ready = true, published = true, referenceTtlMs = -1).use { fixture ->
+        // Persistent references have no client TTL or independent prepared-reference gate.
+        RoundFixture("clothx", referenceTtlMs = -1).use { fixture ->
             val running = startRound(fixture, NativeXmaxController(fixture.events))
             try {
-                withTimeout(5_000) { running.failure.await(); running.job.join() }
-                verify(fixture.allocations.get() == 0 && fixture.stoppedIds.isEmpty(), "Already-expired binding allocated a credential")
-                verify(running.round.isBusy && fixture.events.none { it in listOf("upload", "connect", "generate") },
-                    "Already-expired binding reached generation or reopened gestures")
-                fixture.checkHandler()
+                withTimeout(5_000) { running.firstFrame.await() }
+                verify(fixture.events.none { it == "prepare-reference" || it == "bind" }, "Persistent reference was rechecked")
             } finally { running.job.cancelAndJoin() }
         }
         val invalidPrebound = listOf<Pair<String, (JSONObject) -> Unit>>(
+            "reference scope" to { it.put("referenceScope", ""); Unit },
             "reference URL" to { it.put("refImageUrl", "http://supplier-fixture.invalid/reference.png"); Unit },
             "reference asset" to { it.put("referenceAsset", "/assets/exhibition/another.png"); Unit },
             "owner metadata" to { it.getJSONObject("exhibition").put("deviceId", "another-device"); Unit },
@@ -269,7 +245,7 @@ fun main() = runBlocking {
                         verify(fixture.imagePaths.isEmpty(), "Free none fetched a material image")
                         verify(controller.generatedPrompt == "自定义提示词" && controller.generatedReference == null, "Free prompt-only payload")
                     } else {
-                        ordered(fixture.events, "prepare-reference", "create", "bind", "connect", "link", "generate", "remote-frame", "report-first", "ui-first")
+                        ordered(fixture.events, "create", "connect", "link", "generate", "remote-frame", "report-first", "ui-first")
                         verify(fixture.events.none { it == "upload" }, "Published generation uploaded from native SDK")
                         verify(controller.generatedReference == RoundFixture.REFERENCE_URL, "Generation used an unbound reference")
                         val expectedPhotos = if (mode == "mox") listOf("/v1.1" + if (separateReference) "/assets/exhibition/reference.png" else "/assets/exhibition/commute-cutout.png") else emptyList()
@@ -374,9 +350,10 @@ fun main() = runBlocking {
                 running.round.update(next, pendingLook)
                 fixture.referenceEntered.awaitFixture()
                 running.round.update(JSONObject(next.toString()).put("generationNumber", 5), fixture.look)
+                fixture.releaseReference.countDown()
                 withTimeout(5_000) { while (!fixture.events.contains("condition-applied")) delay(5) }
                 verify(fixture.events.count { it == "generate" } == 2, "Obsolete binding lookup generated an extra outfit")
-                verify(fixture.events.count { it == "condition" } == 1, "Obsolete binding reached condition update")
+                verify(fixture.events.count { it == "condition" } == 2, "Serialized latest choice did not resolve both server intents")
                 verify(fixture.stoppedIds.isEmpty() && running.errors.isEmpty(), "Superseded binding lookup stopped or failed experience")
                 fixture.checkHandler()
             } finally { running.job.cancelAndJoin() }
@@ -417,13 +394,14 @@ fun main() = runBlocking {
                 fixture.referenceEntered.awaitFixture()
                 verify(running.round.isBusy, "Binding lookup reopened gestures")
                 running.round.update(JSONObject(next.toString()).put("generationNumber", 5), fixture.look)
+                fixture.releaseReference.countDown()
                 fixture.conditionAppliedEntered.awaitFixture()
                 verify(running.round.isBusy && running.busyTransitions.toList() == listOf(true),
                     "Superseded preparation or completed SDK call reopened before the latest server acknowledgement")
                 fixture.releaseConditionApplied.countDown()
                 withTimeout(5_000) { while (running.round.isBusy) delay(5) }
                 verify(running.busyTransitions.toList() == listOf(true, false), "Latest acknowledgement did not reopen exactly once")
-                verify(fixture.events.count { it == "condition" } == 1 && fixture.events.count { it == "generate" } == 2,
+                verify(fixture.events.count { it == "condition" } == 2 && fixture.events.count { it == "generate" } == 2,
                     "Manual latest-wins regression")
             } finally {
                 fixture.releaseConditionApplied.countDown()
@@ -490,7 +468,7 @@ fun main() = runBlocking {
             try {
                 withTimeout(5_000) { running.failure.await() }
                 running.job.join()
-                ordered(fixture.events, "bind", "connect", "report-error")
+                ordered(fixture.events, "connect", "report-error")
                 verify(fixture.allocations.get() == 1, "Connection failure issued a second credential")
                 verify(fixture.events.none { it in listOf("link", "generate", "ui-first") }, "Connection failure continued generating")
                 verify(fixture.stoppedIds.toList() == listOf(RoundFixture.SESSION_ID) && fixture.events.contains("disconnect"), "Connection failure did not settle both resources")
@@ -722,14 +700,14 @@ private class RoundFixture(
     val errorReportEntered = CountDownLatch(1)
     val releaseErrorReport = CountDownLatch(1)
     val imageBytes = byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)
-    val look = JSONObject().put("id", "commute").put("mode", mode)
+    val look = JSONObject().put("contentVersion", "fixture-version").put("id", "commute").put("mode", mode)
         .put("referenceKind", if (noReference) "none" else "image")
         .put("image", "/assets/exhibition/commute-cutout.png").put("prompt", "  自定义提示词  ")
         .apply { if (separateReference) put("referenceImage", "/assets/exhibition/reference.png") }
     private val state = JSONObject().put("providerMode", "xmax").put("phase", "generating")
         .put("experienceMode", mode).put("selectedLookId", "commute").put("sessionNumber", 2)
         .put("generationNumber", 3).put("revision", 4).put("live", JSONObject.NULL)
-        .apply { if (published) put("publication", JSONObject().put("revision", 1)) }
+        .apply { if (published) put("catalog", JSONObject().put("revision", 1)) }
     private val record = JSONObject().put("id", SESSION_ID).put("status", "active")
         .put("sourceKind", if (mode == "mox") "photo" else "camera")
         .put("referenceAsset", if (noReference) "" else if (separateReference) "/assets/exhibition/reference.png" else look.getString("image"))
@@ -738,7 +716,7 @@ private class RoundFixture(
         .put("exhibition", JSONObject().put("mirrorId", "default").put("deviceId", "device-fixture")
             .put("lookId", "commute").put("mode", mode).put("prompt", NativeRoundMetadata.prompt(look))
             .put("sessionNumber", 2).put("generationNumber", 3).put("continuous", continuous))
-        .apply { if (published && prebound && !noReference) put("referenceVersion", 1).put("refImageUrl", REFERENCE_URL) }
+        .apply { if (published && !noReference) put("referenceVersion", 1).put("refImageUrl", REFERENCE_URL) }
     private val failure = AtomicReference<Throwable>()
     private val lock = Any()
     private val executor = Executors.newCachedThreadPool()
@@ -767,10 +745,15 @@ private class RoundFixture(
             }
             path == "$MIRROR/live/session" -> {
                 check(exchange.requestMethod == "POST")
-                if (published) check(exchange.requestHeaders.getFirst("X-Miror-Material") == "binding-v1")
+                if (published) check(exchange.requestHeaders.getFirst("X-Miror-Material") == "catalog-v2")
                 val body = exchange.body()
                 check(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute")
                 check(body.getLong("generationNumber") == 3L && body.getLong("expectedRevision") == 4L)
+                check(body.getString("contentVersion") == "fixture-version")
+                if ((!ready || !bindingAvailable) && look.optString("referenceKind") != "none") {
+                    exchange.json(JSONObject().put("code", "MATERIAL_NOT_READY").put("message", "素材处理中"), 409)
+                    return
+                }
                 allocations.incrementAndGet(); events.add("create")
                 synchronized(lock) {
                     state.put("live", JSONObject().put("deviceId", if (recoveryOtherOwner) "another-device" else "device-fixture")
@@ -800,9 +783,19 @@ private class RoundFixture(
             }
             path == "$MIRROR/live/session/$SESSION_ID/condition" -> {
                 val body = exchange.body()
+                if (holdReference) {
+                    holdReference = false
+                    referenceEntered.countDown()
+                    check(releaseReference.await(5, TimeUnit.SECONDS))
+                }
+                if (!ready) {
+                    exchange.json(JSONObject().put("code", "MATERIAL_NOT_READY").put("message", "素材处理中"), 409)
+                    return
+                }
+                check(body.getString("contentVersion") == "fixture-version")
                 check(body.getLong("generationNumber") in 4L..5L && body.optString("refImageUrl", REFERENCE_URL) == REFERENCE_URL)
                 val hasReference = synchronized(lock) { record.optString("referenceAsset").isNotBlank() }
-                check(!body.has("refImageUrl") && if (hasReference) body.optString("bindingId") == "binding-fixture" else !body.has("bindingId"))
+                check(!body.has("refImageUrl") && !body.has("bindingId"))
                 val bound = synchronized(lock) {
                     record.put("refImageUrl", if (hasReference) REFERENCE_URL else "")
                     record.getJSONObject("exhibition").put("generationNumber", body.getLong("generationNumber"))

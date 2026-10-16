@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, useExhibitionLive, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
@@ -13,7 +12,7 @@ vi.mock('../src/api', () => ({ api: apiMock, backend: {} }));
 type Input = Parameters<ExhibitionLiveDeps['create']>[0];
 const connections: ExhibitionLiveConnection[] = [];
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
-function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
+function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function flush() { for (let index = 0; index < 40; index++) await Promise.resolve(); }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
 afterEach(async () => {
@@ -30,7 +29,7 @@ function fixture(diagnostic?: (event: DiagnosticEventInput) => void, prefetchIma
   const first: Input = { mirrorId: 'default', deviceId: 'screen-a', sessionNumber: 1, generationNumber: 1,
     lookId: 'first', expectedRevision: 1, image: '/assets/first.png', stream, mode: 'clothx', prefetchImages };
   let record = { id: 'local-session', token: 'secret-fixture-token', model: 'x2.0', status: 'active', sourceKind: 'camera' as const,
-    referenceAsset: first.image, refImageUrl: '', referenceVersion: 0, providerSessionId: undefined as string | undefined,
+    referenceScope: 'account-scope', referenceAsset: first.image, refImageUrl: 'https://upload.fixture/first.png?credential=private-fixture', referenceVersion: 1, providerSessionId: undefined as string | undefined,
     expiresAt: new Date(Date.now() + 120_000).toISOString(), exhibition: { mirrorId: 'default', deviceId: first.deviceId,
       sessionNumber: 1, generationNumber: 1, lookId: 'first', mode: 'clothx' as const, prompt: exhibitionPromptForLook({ mode: 'clothx' }) } };
   let callbacks!: Parameters<ExhibitionLiveDeps['connect']>[2];
@@ -38,22 +37,20 @@ function fixture(diagnostic?: (event: DiagnosticEventInput) => void, prefetchIma
   const sdk = { getSessionUid: vi.fn(() => 'provider-fixture'), set: vi.fn(async (_context: { prompt: string; refImageUrl?: string | null }) => {}),
     disconnect: vi.fn(async () => {}), stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const condition = async (_id: string, intent: Parameters<NonNullable<ExhibitionLiveDeps['updateCondition']>>[1]) => {
-    if (record.exhibition.generationNumber !== intent.generationNumber) record = { ...record, referenceAsset: `/assets/${intent.lookId}.png`,
-      refImageUrl: resolvedBinding(intent.bindingId)!, referenceVersion: record.referenceVersion + 1,
+    if (record.exhibition.generationNumber !== intent.generationNumber) record = { ...record, referenceScope: 'account-scope', referenceAsset: `/assets/${intent.lookId}.png`,
+      refImageUrl: `https://upload.fixture/${intent.lookId}.png?credential=private-fixture`, referenceVersion: record.referenceVersion + 1,
       exhibition: { ...record.exhibition, lookId: intent.lookId, generationNumber: intent.generationNumber } };
     return { ...record, exhibition: { ...record.exhibition } };
   };
   const deps = {
     create: vi.fn(async () => ({ ...record })), reference: vi.fn(async (input: Input) => new File(['reference'], input.image.split('/').pop()!, { type: 'image/png' })),
     readyLookup: vi.fn(async (file: File) => `https://upload.fixture/${file.name}?credential=private-fixture`), prepare: vi.fn(async () => {}),
-    bind: vi.fn(async (_id, input) => { record = { ...record, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 }; return { ...record }; }),
     updateCondition: vi.fn(condition), conditionApplied: vi.fn(async () => ({})),
     connect: vi.fn(async (_source, _local, value) => { callbacks = value; return sdk; }),
     link: vi.fn(async (_id, providerSessionId) => { record = { ...record, providerSessionId }; return { ...record }; }),
     firstFrame: vi.fn(async () => ({ ...record })), stop: vi.fn(async () => ({ ...record, status: 'stopped' })),
     heartbeat: vi.fn(async () => ({})), reportError: vi.fn(async () => ({})), clone: vi.fn(() => clone), now: vi.fn(() => clock),
-  } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
-  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
+  } satisfies ExhibitionLiveDeps & { readyLookup: (...args: any[]) => Promise<string> };
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), updateError: vi.fn(), diagnostic };
   const controller = new ExhibitionLiveConnection(first, events, deps); connections.push(controller);
   const next = (lookId: string, generationNumber = 2): Input => ({ ...first, lookId, generationNumber, image: `/assets/${lookId}.png` });
@@ -69,8 +66,8 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     const trace: DiagnosticEventInput[] = [];
     const f = fixture(event => trace.push(event)); await f.ready();
     const initial = trace[0].operationId;
-    expect(trace.map(event => event.type)).toEqual(['experience_started', 'reference_started', 'reference_ready', 'credential_started', 'credential_ready',
-      'bind_started', 'bind_ready', 'rtc_started', 'rtc_ready', 'sdk_set_started', 'sdk_set_resolved', 'session_first_frame']);
+    expect(trace.map(event => event.type)).toEqual(['experience_started', 'reference_started', 'credential_started', 'credential_ready', 'reference_ready',
+      'bind_ready', 'rtc_started', 'rtc_ready', 'sdk_set_started', 'sdk_set_resolved', 'session_first_frame']);
     f.advance(700); expect(await f.controller.update(f.next('second'))).toBe(true);
     f.controller.reportRenderedFrame(f.output); f.callbacks().onRemoteVideoFirstFrame(); await flush();
     expect(trace.filter(event => event.type === 'session_first_frame')).toHaveLength(1);
@@ -128,16 +125,16 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     await f.controller.stop(); expect(store.getSnapshot().canMarkVisible).toBe(false);
   });
 
-  it.each(['upload', 'set'] as const)('invalidates diagnostics immediately on stop while %s is unresolved', async stage => {
+  it.each(['condition', 'set'] as const)('invalidates diagnostics immediately on stop while %s is unresolved', async stage => {
     const trace: DiagnosticEventInput[] = []; const f = fixture(event => trace.push(event)); await f.ready();
-    const upload = deferred<string>(); const set = deferred<void>();
-    if (stage === 'upload') f.deps.readyLookup.mockImplementationOnce(() => upload.promise);
+    const condition = deferred<Awaited<ReturnType<typeof f.deps.updateCondition>>>(); const set = deferred<void>();
+    if (stage === 'condition') f.deps.updateCondition.mockImplementationOnce(() => condition.promise);
     else f.sdk.set.mockImplementationOnce(() => set.promise);
     const updating = f.controller.update(f.next('second')); await flush();
     const stopping = f.controller.stop();
     expect(trace.at(-1)).toMatchObject({ type: 'stopped', reason: 'stopped', context: { lookId: 'second', generationNumber: 2 } });
     const lengthAtStop = trace.length;
-    upload.resolve('https://late.fixture/private'); set.resolve(); await stopping; expect(await updating).toBe(false);
+    if (stage === 'condition') condition.reject(new Error('condition cancelled')); set.resolve(); await stopping; expect(await updating).toBe(false);
     f.callbacks().onRemoteVideoFirstFrame(); f.controller.reportRenderedFrame(f.output); await f.controller.stop();
     expect(trace).toHaveLength(lengthAtStop);
     expect(f.deps.conditionApplied).not.toHaveBeenCalled();
@@ -146,11 +143,11 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
   it('does not attribute neighbour prewarming or its cached upload to a foreground update', async () => {
     const trace: DiagnosticEventInput[] = []; const f = fixture(event => trace.push(event), ['/assets/second.png']);
     await f.ready(); await flush();
-    expect(f.deps.readyLookup).toHaveBeenCalledTimes(1);
+    expect(f.deps.readyLookup).not.toHaveBeenCalled();
     expect(trace.filter(event => event.type === 'upload_started')).toHaveLength(0);
     const before = trace.length; expect(await f.controller.update(f.next('second'))).toBe(true);
-    expect(trace.slice(before).map(event => event.type)).toEqual(['reference_cache_hit', 'bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'condition_committed']);
-    expect(f.deps.readyLookup).toHaveBeenCalledTimes(2);
+    expect(trace.slice(before).map(event => event.type)).toEqual(['bind_started', 'bind_ready', 'sdk_set_started', 'sdk_set_resolved', 'condition_committed']);
+    expect(f.deps.readyLookup).not.toHaveBeenCalled();
   });
 
   it('records sanitized failure reasons and forbids repeating an uncertain operation', async () => {
@@ -168,7 +165,7 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
     for (const receive of [undefined, () => { throw new Error('diagnostic-only'); }]) {
       const f = fixture(receive); await f.ready(); expect(await f.controller.update(f.next('second'))).toBe(true);
       expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
-      expect(f.deps.readyLookup).toHaveBeenCalledTimes(2); expect(f.sdk.set).toHaveBeenCalledTimes(2);
+      expect(f.deps.readyLookup).not.toHaveBeenCalled(); expect(f.sdk.set).toHaveBeenCalledTimes(2);
       expect(f.deps.updateCondition).toHaveBeenCalledOnce(); expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
       expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.deps.reportError).not.toHaveBeenCalled();
       expect(await f.controller.stop()).toBe(true);
@@ -188,6 +185,7 @@ describe('exhibition live diagnostics preserve evidence boundaries', () => {
       looks: [{ id: 'first', name: 'first', image: '/assets/first.png', mode: 'clothx', source: 'sample', description: '', category: '', tags: [], palette: '' }],
       enabledLookIds: ['first'], categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
       providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } } };
+    state.catalog = { revision: 1, looks: state.looks, availableLookIds: ['first'] };
     const first = vi.fn(); const second = vi.fn(); let callback: ((event: DiagnosticEventInput) => void) | undefined = first;
     function Harness() { useExhibitionLive({ state, active: true, refresh: () => {}, onDiagnostic: callback }); return null; }
     await host.render(createElement(Harness)); await flushReact(); expect(start).toHaveBeenCalledOnce();

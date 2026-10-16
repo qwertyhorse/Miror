@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, type ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -10,9 +11,9 @@ import { createReactHost, flushReact } from './support/reactHost';
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.unstubAllGlobals(); });
 function state(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks), enabledLookIds: ['commute', 'city'], selectedLookId: 'commute', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks), enabledLookIds: ['commute', 'city'], selectedLookId: 'commute', displayedLookId: null,
     categories: [], tags: [], sessionNumber: 0, generationNumber: 0, updatedAt: 0, generationReadyAt: null, providerMode: 'demo', live: null, logs: [],
-    settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides };
+    settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides });
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;

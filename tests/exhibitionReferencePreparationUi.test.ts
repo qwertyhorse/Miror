@@ -65,13 +65,13 @@ describe('material reference status polling', () => {
     expect(f.current.references.a.state).toBe('failed');
   });
 
-  it.each(['http', 'invalid'] as const)('clears previous ready statuses on %s errors and allows refresh recovery', async failure => {
+  it.each(['http', 'invalid'] as const)('retains previous ready statuses on %s errors and allows refresh recovery', async failure => {
     const fetcher = vi.fn().mockResolvedValueOnce(response({ a: ready })).mockResolvedValueOnce(failure === 'http' ? new Response('', { status: 503 }) : response({ a: { state: 'not-a-status' } }))
       .mockImplementation(async () => response({ a: failed }));
     const f = await fixture(fetcher);
     expect(f.current.references.a.state).toBe('ready');
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-    expect(f.current.references).toEqual({});
+    expect(f.current.references).toEqual({ a: ready });
     expect(f.current.error).toBe('素材准备状态获取失败');
     await act(async () => f.current.refresh()); await flushReact();
     expect(f.current.error).toBe(''); expect(f.current.references.a.state).toBe('failed');
@@ -145,20 +145,20 @@ describe('material reference status labels', () => {
     host = await createReactHost(); const retry = vi.fn();
     const render = (now: number) => host!.render(createElement(ReferencePreparationBadge, { name: '盔甲', status: { ...failed, state: 'failed', retryAt: 103000 }, unavailable: false, retrying: false, now, onRetry: retry }));
     await render(100000);
-    const button = () => host!.find(node => node.getReactProps()['aria-label'] === '重新准备盔甲')!;
+    const button = () => host!.find(node => node.getReactProps()['aria-label'] === '重试盔甲')!;
     expect(button().getReactProps().disabled).toBe(true); expect(button().textContent).toBe('3秒后重试');
     expect(host.find(node => node.textContent === '图片检查失败')).toBeDefined();
     await render(104000); expect(button().getReactProps().disabled).toBe(false);
     await act(async () => button().getReactProps().onClick()); expect(retry).toHaveBeenCalledOnce();
   });
 
-  it('does not present expired or unavailable references as ready', async () => {
+  it('keeps permanent ready references available when their old freshness time passes or polling fails', async () => {
     host = await createReactHost();
     const props = { name: '盔甲', status: { state: 'ready' as const, freshUntil: 99999 }, unavailable: false, retrying: false, now: 100000, onRetry: vi.fn() };
     await host.render(createElement(ReferencePreparationBadge, props));
-    expect(host.find(node => node.getReactProps()['aria-label'] === '盔甲：待准备')).toBeDefined();
+    expect(host.find(node => node.getReactProps()['aria-label'] === '盔甲：可用')).toBeDefined();
     await host.render(createElement(ReferencePreparationBadge, { ...props, unavailable: true }));
-    expect(host.find(node => node.getReactProps()['aria-label'] === '盔甲：状态不可用')).toBeDefined();
+    expect(host.find(node => node.getReactProps()['aria-label'] === '盔甲：可用')).toBeDefined();
   });
 });
 

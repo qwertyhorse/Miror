@@ -40,6 +40,27 @@ fun main() = runBlocking {
         }
     }
     try {
+        val current = JSONObject().put("id", "commute").put("contentVersion", "new")
+        val pinned = JSONObject().put("id", "commute").put("contentVersion", "old")
+        val catalogState = JSONObject().put("selectedLookId", "commute")
+            .put("catalog", JSONObject().put("looks", org.json.JSONArray().put(current)))
+            .put("activeLook", pinned)
+            .put("looks", org.json.JSONArray().put(JSONObject().put("id", "wrong-draft")))
+        NativeMaterialCatalog.requireCurrent(catalogState)
+        verify(!NativeMaterialCatalog.hasAlternative(catalogState), "Only selected material must not enable next/gesture")
+        catalogState.put("selectedLookId", "off-shelf")
+        verify(NativeMaterialCatalog.hasAlternative(catalogState), "One available successor must enable next/gesture for off-shelf active material")
+        catalogState.put("selectedLookId", "commute")
+        verify(NativeMaterialCatalog.looks(catalogState).map { it.getString("id") } == listOf("commute"),
+            "Native list must use backend catalog only")
+        verify(NativeMaterialCatalog.selected(catalogState)?.optString("contentVersion") == "old", "Editing must retain the active input version")
+        catalogState.getJSONObject("catalog").put("looks", org.json.JSONArray())
+        verify(!NativeMaterialCatalog.hasAlternative(catalogState), "Empty catalog must not enable next/gesture")
+        verify(NativeMaterialCatalog.looks(catalogState).isEmpty() && NativeMaterialCatalog.selected(catalogState) === pinned,
+            "Off-shelf current input must remain active while disappearing from new choices")
+        catalogState.remove("activeLook")
+        verify(NativeMaterialCatalog.selected(catalogState) == null, "No active version must not resurrect a draft")
+        failure("MATERIAL_WORKFLOW_UPGRADE_REQUIRED") { NativeMaterialCatalog.requireCurrent(JSONObject().put("publication", JSONObject())) }
         verify(api.assetUrl("/assets/exhibition/commute-cutout.png") == "$origin/v1.1/assets/exhibition/commute-cutout.png", "Sample must use V1.1")
         verify(api.assetUrl("/api/exhibition/mirrors/default/assets/upload-a") == "$origin$mirrorPath/assets/upload-a", "Upload must use V1.1")
         verify(api.assetUrl("$origin/v1.1/assets/a.png") == "$origin/v1.1/assets/a.png", "Version must not be doubled")
@@ -100,22 +121,15 @@ fun main() = runBlocking {
         api.command("default", "end", 7)
         handler.set { exchange ->
             verify(exchange.requestURI.path == "$mirrorPath/live/session", "Create endpoint")
-            verify(exchange.requestHeaders.getFirst("X-Miror-Material") == "binding-v1", "Published material protocol")
+            verify(exchange.requestHeaders.getFirst("X-Miror-Material") == "catalog-v2", "Published material protocol")
             val body = exchange.jsonBody()
             verify(body.getString("terminalId") == terminal && body.getString("terminalToken") == token, "Allocation owner credentials")
             verify(body.getLong("generationNumber") == 9L && body.getLong("expectedRevision") == 7L, "Allocation generation")
             verify(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute", "Allocation identity")
+            verify(body.getString("contentVersion") == "fixture-version", "Allocation pins the selected material version")
             exchange.reply(JSONObject().put("id", session).put("token", "tk-fixture"), 201)
         }
-        verify(api.createSession("default", "device-fixture", "commute", 9, 7).getString("id") == session, "Allocation response")
-        handler.set { exchange ->
-            verify(exchange.requestURI.path == "$mirrorPath/live/session/$session/reference", "Reference endpoint")
-            val body = exchange.jsonBody()
-            verify(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute", "Reference owner")
-            verify(body.getString("bindingId") == "binding-fixture" && !body.has("refImageUrl"), "Published binding has no client URL")
-            exchange.reply(JSONObject().put("referenceVersion", 1))
-        }
-        api.bindReference("default", session, "device-fixture", "commute", "binding-fixture")
+        verify(api.createSession("default", "device-fixture", "commute", 9, 7, "fixture-version").getString("id") == session, "Allocation response")
         handler.set { exchange ->
             val body = exchange.jsonBody()
             when (exchange.requestURI.path) {
@@ -176,6 +190,13 @@ fun main() = runBlocking {
             verify(error.code == "EXHIBITION_STALE_REVISION" && error.status == 409, "Structured API error")
             verify(!error.message.orEmpty().contains(token) && !error.message.orEmpty().contains("tk-fixture"), "Error text redaction")
         }
+        for (code in listOf("REFERENCE_NOT_READY", "MATERIAL_VERSION_CHANGED", "PROVIDER_REJECTED", "MATERIAL_WORKFLOW_UPGRADE_REQUIRED")) {
+            handler.set { exchange -> exchange.reply(JSONObject().put("code", code).put("message", "问题：$code"), 409) }
+            try { api.condition("default", session, JSONObject()); error("Expected typed error") }
+            catch (error: ExhibitionApiException) {
+                verify(error.code == code && error.message == "问题：$code", "Material/provider errors must preserve their own reason")
+            }
+        }
         handler.set { exchange ->
             exchange.responseHeaders.set("Location", "https://outside.invalid/")
             exchange.sendResponseHeaders(302, -1)
@@ -186,7 +207,7 @@ fun main() = runBlocking {
             // A lost reply must not cause OkHttp to repeat a paid allocation POST.
             exchange.requestBody.use { it.readBytes() }
         }
-        failure("NETWORK_ERROR") { api.createSession("default", "device-fixture", "commute", 9, 7) }
+        failure("NETWORK_ERROR") { api.createSession("default", "device-fixture", "commute", 9, 7, "fixture-version") }
         verify(received.get() == requestsBeforeDisconnect + 1, "Lost allocation reply must not be retried")
         handler.set { exchange -> exchange.bytes(byteArrayOf(1, 2, 3), "image/webp") }
         verify(api.image("/assets/fixture.webp").contentEquals(byteArrayOf(1, 2, 3)), "Image bytes")

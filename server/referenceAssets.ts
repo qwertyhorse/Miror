@@ -22,10 +22,13 @@ export function safeReferenceUrl(value: string): boolean {
   } catch { return false; }
 }
 /** Recoverable distribution copies. Local source bytes remain authoritative. */
+export const MAX_REFERENCE_PREPARATION_ATTEMPTS = 3;
 export class ReferenceAssets {
   private readonly pending = new Map<string, Promise<ReadyReference>>();
   private readonly retryAfter = new Map<string, number>();
   private readonly progress = new Map<string, ReferencePreparationStatus>();
+  private readonly attempts = new Map<string, number>();
+  private readonly loadedFailures = new Set<string>();
   private readonly directory: string;
   private readonly now: () => number;
   constructor(directory: string, options: { now?: () => number } = {}) {
@@ -36,6 +39,38 @@ export class ReferenceAssets {
   private identity(input: ReferenceSource | ReferenceIdentity) {
     const sha256 = 'sha256' in input ? input.sha256 : hash(input.bytes);
     return { sha256, id: hash(JSON.stringify([input.scope, sha256, input.mime])) };
+  }
+  private failurePath(id: string) { return join(this.directory, `${id}.failure.json`); }
+  private saveFailure(id: string, attempts: number, status: ReferencePreparationStatus) {
+    const path = this.failurePath(id); const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, attempts, status }), { mode: 0o600, flag: 'wx' });
+      renameSync(temporary, path);
+    } finally { rmSync(temporary, { force: true }); }
+  }
+  private loadFailure(id: string) {
+    if (this.loadedFailures.has(id) || this.progress.has(id) || this.attempts.has(id)) return;
+    this.loadedFailures.add(id);
+    while (this.loadedFailures.size > 2_000) this.loadedFailures.delete(this.loadedFailures.values().next().value!);
+    try {
+      const saved = JSON.parse(readFileSync(this.failurePath(id), 'utf8'));
+      if (saved.schemaVersion !== 1 || !Number.isSafeInteger(saved.attempts) || saved.attempts < 1 || saved.attempts > MAX_REFERENCE_PREPARATION_ATTEMPTS
+        || !saved.status || !['failed', 'preparing'].includes(saved.status.state)) return;
+      this.attempts.set(id, saved.attempts);
+      const status: ReferencePreparationStatus = saved.status.state === 'preparing'
+        ? { state: 'failed', message: '上次上传未完成，请重试。', updatedAt: this.now(),
+          ...(saved.attempts < MAX_REFERENCE_PREPARATION_ATTEMPTS ? { retryAt: this.now() } : {}) }
+        : saved.status;
+      this.progress.set(id, status);
+      if (Number.isFinite(status.retryAt)) this.retryAfter.set(id, status.retryAt!);
+    } catch { /* No attempt receipt means a new content/account identity. */ }
+  }
+  private automaticallyRetryable(error: unknown): boolean {
+    if (error instanceof ReferencePreparationError) return ['network', 'timeout', 'status'].includes(error.failure);
+    const failure = error as { code?: string; status?: number } | undefined;
+    if (['INVALID_API_KEY', 'MISSING_API_KEY', 'UNSUPPORTED_PROVIDER_OPERATION', 'PROVIDER_MODE_UNSUPPORTED',
+      'PROVIDER_REQUEST_REJECTED', 'PROVIDER_INVALID_RESPONSE', 'INVALID_REQUEST'].includes(failure?.code ?? '')) return false;
+    return !(typeof failure?.status === 'number' && failure.status >= 400 && failure.status < 500 && failure.status !== 429);
   }
   private read(input: ReferenceSource | ReferenceIdentity): ReadyReference | null {
     const { id, sha256 } = this.identity(input);
@@ -65,20 +100,30 @@ export class ReferenceAssets {
   }
   status(input: ReferenceIdentity): ReferencePreparationStatus {
     const { id } = this.identity(input);
+    this.loadFailure(id);
     const progress = this.progress.get(id);
     const ready = this.ready(input);
     if (ready) return { state: 'ready', freshUntil: ready.freshUntil, ...(progress ? { refreshState: progress.state === 'failed' ? 'failed' as const : 'preparing' as const, retryAt: progress.retryAt, message: progress.message } : {}) };
     if (progress) return { ...progress };
     return { state: 'queued' };
   }
-  prepare(input: ReferenceSource, provider: ReferenceStorage, options: { replace?: boolean } = {}): Promise<ReadyReference> {
+  prepare(input: ReferenceSource, provider: ReferenceStorage, options: { replace?: boolean; manualRetry?: boolean } = {}): Promise<ReadyReference> {
     const ready = this.ready(input);
-    if (!options.replace && ready && ready.freshUntil > this.now() + 5 * 60_000) return Promise.resolve(ready);
+    if (!options.replace && ready) return Promise.resolve(ready);
     const { id, sha256 } = this.identity(input);
+    this.loadFailure(id);
     const existing = this.pending.get(id);
     if (existing) return existing;
     if (this.pending.size >= 2) return Promise.reject(new Error('Reference preparation busy'));
     if ((this.retryAfter.get(id) ?? 0) > this.now()) return Promise.reject(new Error('Reference preparation cooling down'));
+    if (options.manualRetry) { this.attempts.delete(id); this.progress.delete(id); rmSync(this.failurePath(id), { force: true }); }
+    const prior = this.progress.get(id);
+    if (prior?.state === 'failed' && prior.retryAt === undefined)
+      return Promise.reject(new Error('Reference preparation requires manual retry'));
+    const attempts = (this.attempts.get(id) ?? 0) + 1;
+    if (attempts > MAX_REFERENCE_PREPARATION_ATTEMPTS) return Promise.reject(new Error('Reference preparation requires manual retry'));
+    this.attempts.set(id, attempts);
+    this.saveFailure(id, attempts, { state: 'preparing', updatedAt: this.now() });
     const onStage = (stage: ReferencePreparationStage) => {
       this.progress.set(id, { state: 'preparing', stage, updatedAt: this.now() });
     };
@@ -107,16 +152,20 @@ export class ReferenceAssets {
       finally { rmSync(temporary, { force: true }); }
       this.retryAfter.delete(id);
       this.progress.delete(id);
+      this.attempts.delete(id); rmSync(this.failurePath(id), { force: true });
       return { bindingId, url, sha256, scope: input.scope, freshUntil: providerExpiresAt ?? Number.MAX_SAFE_INTEGER, ...(providerExpiresAt !== undefined ? { providerExpiresAt } : {}) };
     })().catch(error => {
-      const retryAt = this.now() + 60_000;
-      this.retryAfter.set(id, retryAt);
-      this.progress.set(id, { state: 'failed', message: preparationFailureMessage(error), retryAt, updatedAt: this.now(),
-        ...(error instanceof ReferencePreparationError ? { stage: error.stage } : {}) });
+      const automatic = attempts < MAX_REFERENCE_PREPARATION_ATTEMPTS && this.automaticallyRetryable(error);
+      const retryAt = automatic ? this.now() + 60_000 : undefined;
+      if (retryAt !== undefined) this.retryAfter.set(id, retryAt); else this.retryAfter.delete(id);
+      const failed: ReferencePreparationStatus = { state: 'failed', message: preparationFailureMessage(error),
+        ...(retryAt !== undefined ? { retryAt } : {}), updatedAt: this.now(),
+        ...(error instanceof ReferencePreparationError ? { stage: error.stage } : {}) };
+      this.progress.set(id, failed); this.saveFailure(id, attempts, failed);
       while (this.retryAfter.size > 2_000) this.retryAfter.delete(this.retryAfter.keys().next().value!);
       for (const [key, value] of this.progress) {
         if (this.progress.size <= 2_000) break;
-        if (value.state !== 'preparing') this.progress.delete(key);
+        if (value.state !== 'preparing') { this.progress.delete(key); this.attempts.delete(key); this.loadedFailures.delete(key); }
       }
       throw error;
     }).finally(() => this.pending.delete(id));

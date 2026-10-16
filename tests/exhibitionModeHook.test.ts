@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { act, createElement, useState } from 'react';
 import { flushSync } from 'react-dom';
@@ -15,10 +16,10 @@ vi.mock('../src/exhibition/MoXDragSurface', () => ({ MoXDragSurface: () => null 
 vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: () => null, LiveCameraPanel: () => null }));
 
 function state(mode: ExhibitionState['experienceMode'] = 'mox'): ExhibitionState {
-  return { mirrorId: 'default', revision: 4, phase: 'generating', experienceMode: mode, selectedLookId: 'look', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'default', revision: 4, phase: 'generating', experienceMode: mode, selectedLookId: 'look', displayedLookId: null,
     looks: [{ id: 'look', mode, name: '测试素材', description: '', image: '/test.png', source: 'upload', palette: '', category: '', tags: [] }], enabledLookIds: ['look'],
     categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1000, generationReadyAt: null, providerMode: 'xmax', live: null, logs: [],
-    settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } } };
+    settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } } });
 }
 function deferred<T>() { let resolve!: (value: T) => void; return { promise: new Promise<T>(yes => { resolve = yes; }), resolve: (value: T) => resolve(value) }; }
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
@@ -26,6 +27,7 @@ beforeEach(() => { vi.clearAllMocks(); });
 afterEach(async () => { await host?.close(); host = undefined; await flushReact(); vi.unstubAllGlobals(); });
 
 async function fixture(initial = state(), renderKiosk = false, initialSelectionPending = false) {
+  initial = materialCatalogFixture({ ...initial, catalog: undefined });
   host = await createReactHost();
   const media = { getUserMedia: vi.fn(), enumerateDevices: vi.fn(async () => []) };
   vi.stubGlobal('navigator', { mediaDevices: media });
@@ -43,7 +45,7 @@ async function fixture(initial = state(), renderKiosk = false, initialSelectionP
   let session: any;
   let count = 0;
   const create = vi.fn((input: any) => {
-    session = { id: `session-${++count}`, token: 'test-only', model: 'x2.0', sourceKind: snapshot.experienceMode === 'mox' ? 'photo' : 'camera', referenceAsset: snapshot.looks[0].referenceKind === 'none' ? '' : snapshot.looks[0].referenceImage ?? snapshot.looks[0].image, refImageUrl: '', referenceVersion: 0, expiresAt: new Date(Date.now() + 120000).toISOString(),
+    session = { id: `session-${++count}`, token: 'test-only', model: 'x2.0', sourceKind: snapshot.experienceMode === 'mox' ? 'photo' : 'camera', referenceScope: 'account-scope', referenceAsset: snapshot.looks[0].referenceKind === 'none' ? '' : snapshot.looks[0].referenceImage ?? snapshot.looks[0].image, refImageUrl: snapshot.looks[0].referenceKind === 'none' ? '' : 'https://reference.fixture/garment.png', referenceVersion: snapshot.looks[0].referenceKind === 'none' ? 0 : 1, expiresAt: new Date(Date.now() + 120000).toISOString(),
       exhibition: { mirrorId: 'default', deviceId: input.deviceId, lookId: 'look', sessionNumber: snapshot.sessionNumber, generationNumber: snapshot.generationNumber, mode: snapshot.experienceMode, prompt: exhibitionPromptForLook(snapshot.looks[0]) } };
     return session;
   });

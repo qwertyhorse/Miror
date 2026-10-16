@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement, type ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionState } from '../shared/exhibition';
@@ -34,10 +35,10 @@ let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.useRealTimers(); capture.options = null; capture.status = 'ready'; capture.error = ''; capture.confirmationState = undefined; capture.palmHoldMs = 0;
   capture.handDetected = true; capture.handRaised = false; capture.operatorStatus = 'locked'; capture.controlSource = 'body'; capture.ambiguityReason = null; capture.armed = true; capture.needsRelease = false; capture.captureStatus = 'active'; capture.retry.mockClear(); materialDrawer.onBusyChange = null; });
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks),
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'idle', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks),
     enabledLookIds: ['commute', 'city', 'evening'], selectedLookId: 'commute', displayedLookId: null,
     categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
-    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 }, gestureRecognition: { ...resolveExhibitionGestureSettings(), gestures: ['open_palm', 'wave'] } }, ...overrides };
+    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 }, gestureRecognition: { ...resolveExhibitionGestureSettings(), gestures: ['open_palm', 'wave'] } }, ...overrides });
 }
 async function fixture(overrides: Partial<ExhibitionState> = {}, props: Partial<ComponentProps<typeof Kiosk>> = {}) {
   host = await createReactHost();

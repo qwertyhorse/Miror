@@ -64,18 +64,18 @@ describe('independent exhibition display and XMAX images', () => {
   });
 
   it('replaces either image independently with fresh URLs while keeping the material id and the other bytes', async () => {
-    const f = fixture(); const original = await add(f.service); const reference = bytes(f.service, original.referenceImage!);
+    const f = fixture(); const original = await add(f.service); const displayBytes = bytes(f.service, original.image); const reference = bytes(f.service, original.referenceImage!);
     let state = await f.service.updateLook(original.id, { imageBase64: await picture('#00cc00'), expectedRevision: f.service.get().revision });
     const displayChanged = state.looks[0]!;
     expect(displayChanged.id).toBe(original.id); expect(displayChanged.image).not.toBe(original.image);
     expect(displayChanged.referenceImage).toBe(original.referenceImage); expect(bytes(f.service, displayChanged.referenceImage!)).toEqual(reference);
-    expect(() => bytes(f.service, original.image)).toThrow();
+    expect(bytes(f.service, original.image)).toEqual(displayBytes);
     state = await f.service.updateLook(original.id, { referenceImageBase64: await picture('#cccc00', 640, 640), expectedRevision: state.revision });
     const referenceChanged = state.looks[0]!;
     expect(referenceChanged.image).toBe(displayChanged.image); expect(referenceChanged.referenceImage).not.toBe(original.referenceImage);
     expect(referenceChanged.referenceImageInfo).toMatchObject({ width: 640, height: 640 });
-    expect(() => bytes(f.service, original.referenceImage!)).toThrow();
-    expect(readdirSync(join(f.directory, 'exhibition-assets')).sort()).toEqual(resources(referenceChanged).map(file).sort());
+    expect(bytes(f.service, original.referenceImage!)).toEqual(reference);
+    expect(readdirSync(join(f.directory, 'exhibition-assets')).sort()).toEqual([...new Set([...resources(original), ...resources(displayChanged), ...resources(referenceChanged)].map(file))].sort());
   });
 
   it('pins a legacy single image as the reference when only its display is changed', async () => {
@@ -116,7 +116,8 @@ describe('independent exhibition display and XMAX images', () => {
     const pending = f.service.updateLook(look.id, { imageBase64: replacement });
     f.service.updateLook(look.id, { name: '并发改名' });
     await expect(pending).rejects.toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
-    expect(f.service.get().looks[0]).toEqual({ ...look, name: '并发改名' });
+    expect(f.service.get().looks[0]).toEqual({ ...look, name: '并发改名', contentVersion: expect.any(String) });
+    expect(f.service.get().looks[0]!.contentVersion).not.toBe(look.contentVersion);
     const entering = f.service.updateLook(look.id, { referenceImageBase64: replacement });
     f.service.command({ action: 'begin' });
     await expect(entering).rejects.toMatchObject({ code: 'EXHIBITION_STALE_REVISION' });
@@ -144,7 +145,7 @@ describe('independent exhibition display and XMAX images', () => {
 
   it('invalidates reference digests after a replacement and keeps display changes out of XMAX preparation', async () => {
     const f = fixture(); const look = await add(f.service); const hashes: string[] = [];
-    f.service.attachLiveService({ status: () => ({ configured: true }), referencePreparationStatus: (_mirror: string, hash: string) => { hashes.push(hash); return { state: 'pending' }; } } as never);
+    f.service.attachLiveService({ status: () => ({ configured: true }), providerDescriptor: () => ({ configured: true }), materialProviderConfigured: () => true, referencePreparationStatus: (_mirror: string, hash: string) => { hashes.push(hash); return { state: 'pending' }; } } as never);
     f.service.referencePreparationStatus(look.id); const originalHash = hashes.at(-1);
     await f.service.updateLook(look.id, { imageBase64: await picture('#00cc00') });
     f.service.referencePreparationStatus(look.id); expect(hashes.at(-1)).toBe(originalHash);

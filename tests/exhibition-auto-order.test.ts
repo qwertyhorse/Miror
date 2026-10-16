@@ -85,16 +85,18 @@ describe('automatic material switching', () => {
     expect(service.get()).toMatchObject({ phase: 'idle', autoSwitchAt: null, generationNumber: 2 });
   });
 
-  it('can change only rotation settings while active and disabling automation clears the timer immediately', () => {
+  it('can update automation and availability while active and disabling automation clears the timer immediately', () => {
     const { service, advance, now } = fixture(); showcase(service, advance);
     expect(automatic(service)).toMatchObject({ phase: 'showcase', autoSwitchAt: now() + 5_000 });
     advance(1_000); expect(service.command({ action: 'configure', autoSwitchSeconds: 10 }).autoSwitchAt).toBe(now() + 10_000);
     const state = service.get();
-    for (const command of [{ action: 'configure', autoReturnSeconds: 0, switchMode: 'manual' }, { action: 'configure', enabledLookIds: ['city'] }, { action: 'configure', experienceMode: 'free' }]) {
+    for (const command of [{ action: 'configure', autoReturnSeconds: 0, switchMode: 'manual' }, { action: 'configure', experienceMode: 'free' }]) {
       expect(() => service.command(command)).toThrow(errorCode('EXHIBITION_INVALID_PHASE')); expect(service.get()).toEqual(state);
     }
+    expect(service.command({ action: 'configure', enabledLookIds: ['city'] })).toMatchObject({ selectedLookId: 'commute', activeLook: { id: 'commute' } });
     expect(service.command({ action: 'configure', switchMode: 'manual' }).autoSwitchAt).toBeNull();
     advance(10_000); expect(service.get().selectedLookId).toBe('commute');
+    service.command({ action: 'configure', enabledLookIds: ['commute', 'city', 'evening'] });
     service.command({ action: 'pause' }); automatic(service); expect(service.get().autoSwitchAt).toBeNull();
     service.command({ action: 'resume' }); service.command({ action: 'next' });
     expect(service.command({ action: 'configure', switchMode: 'manual' })).toMatchObject({ phase: 'generating', autoSwitchAt: null });

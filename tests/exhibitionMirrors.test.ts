@@ -75,7 +75,7 @@ describe('durable exhibition mirror registry', () => {
     stored.state.live = { deviceId: 'screen-owner', sessionId: 'old-session', generationNumber: 1, lookId: 'commute', status: 'running', updatedAt: now(), heartbeatAt: now() };
     writeFileSync(file, JSON.stringify(stored));
     const migrated = new ExhibitionMirrors(directory, { now }).getMirror().get();
-    expect(migrated).toMatchObject({ phase: 'select', providerMode: 'xmax', live: { sessionId: 'old-session', deviceId: 'screen-owner' } });
+    expect(migrated).toMatchObject({ phase: 'idle', providerMode: 'xmax', live: { sessionId: 'old-session', deviceId: 'screen-owner' } });
   });
 
   it('preserves registry and directories if registration fails, and refuses to reset damaged registered data', () => {

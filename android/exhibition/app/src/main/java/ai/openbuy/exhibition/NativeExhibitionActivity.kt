@@ -65,7 +65,7 @@ class NativeExhibitionActivity : Activity() {
     private var position = CameraPosition.BACK
     private var cameraDeviceId: String? = null
     private var cameraRotationDegrees = 0
-    private var xmaxRotationDegrees: Int? = null
+    private var cameraCalibrationRequired = false
     private var cameraCaptureSelection = NativeCameraCaptureSelection.Automatic
     private var activeCameraDeviceId: String? = null
     private var cameraSettingsOpen = false
@@ -130,7 +130,11 @@ class NativeExhibitionActivity : Activity() {
         position = if (prefs.getString("native-camera", "back") == "front") CameraPosition.FRONT else CameraPosition.BACK
         cameraDeviceId = prefs.getString("native-camera-id", null)?.takeIf { it.isNotEmpty() }
         cameraRotationDegrees = prefs.getInt("native-camera-rotation", 0).takeIf { it in listOf(0, 90, 180, 270) } ?: 0
-        xmaxRotationDegrees = prefs.getInt("native-xmax-input-rotation", -1).takeIf { it in listOf(0, 90, 180, 270) }
+        val legacyInputRotation = prefs.getInt("native-xmax-input-rotation", -1)
+        cameraCalibrationRequired = prefs.getBoolean("native-camera-calibration-required", false) ||
+            NativeCameraCalibration.needsCalibration(cameraRotationDegrees, legacyInputRotation)
+        check(prefs.edit().remove("native-xmax-input-rotation")
+            .putBoolean("native-camera-calibration-required", cameraCalibrationRequired).commit())
         cameraCaptureSelection = NativeCameraCaptureSelection.fromStored(prefs.getString("native-camera-capture-size", null))
         remoteCamera = NativeCameraRemote(prefs.getStringSet("native-camera-handled-requests", emptySet()).orEmpty())
         gestureMode = prefs.getString("native-gesture-mode", "linux").takeIf { it == "local" } ?: "linux"
@@ -324,11 +328,16 @@ class NativeExhibitionActivity : Activity() {
         var currentPosition = position
         var currentDeviceId = cameraDeviceId
         var currentRotationDegrees = cameraRotationDegrees
-        var currentXmaxRotationDegrees = xmaxRotationDegrees
         var currentCaptureSelection = cameraCaptureSelection
         try {
             while (isActive) {
                 if (attempted.size > 128) attempted.remove(attempted.first())
+                if (cameraCalibrationRequired) {
+                    error = "旧方向设置冲突，请打开设置校准安装方向并保存"
+                    render()
+                    delay(200)
+                    continue
+                }
                 val latest = state
                 val id = mirrorId
                 val activeKey = if (id != null && latest != null) generationKey(id, latest) else null
@@ -336,7 +345,7 @@ class NativeExhibitionActivity : Activity() {
                 val reusable = latest != null && currentSelection != null && round?.canReuse(latest, currentSelection) == true
                 val valid = latest?.string("providerMode") == "xmax" &&
                     latest.string("phase") in listOf("generating", "showcase") &&
-                    runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position && currentDeviceId == cameraDeviceId && currentRotationDegrees == cameraRotationDegrees && currentXmaxRotationDegrees == xmaxRotationDegrees && currentCaptureSelection == cameraCaptureSelection
+                    runningApi === api && runningMirror == id && (round?.key == activeKey || reusable) && currentPosition == position && currentDeviceId == cameraDeviceId && currentRotationDegrees == cameraRotationDegrees && currentCaptureSelection == cameraCaptureSelection
                 if (roundJob != null && (!valid || roundJob?.isCompleted == true)) {
                     roundJob?.cancelAndJoin()
                     if (round?.cleanupConfirmed == false) { previewFailed = true; error = "停止状态未确认，请重试停止。" }
@@ -402,7 +411,6 @@ class NativeExhibitionActivity : Activity() {
                     currentPosition = position
                     currentDeviceId = cameraDeviceId
                     currentRotationDegrees = cameraRotationDegrees
-                    currentXmaxRotationDegrees = xmaxRotationDegrees
                     currentCaptureSelection = cameraCaptureSelection
                     val instance = NativeGenerationRound(owner, id, deviceId, JSONObject(current.toString()),
                         JSONObject(currentLook.toString()), controller,
@@ -411,7 +419,6 @@ class NativeExhibitionActivity : Activity() {
                         onFirstFrame = { runOnUiThread { generationStatus = "实时生成"; error = ""; render() } },
                         cameraPosition = position, cameraDeviceId = activeCameraDeviceId,
                         cameraRotationDegrees = cameraRotationDegrees,
-                        xmaxRotationDegrees = xmaxRotationDegrees,
                         cameraCaptureSelection = cameraCaptureSelection,
                         onBusyChanged = { render() })
                     round = instance
@@ -549,7 +556,7 @@ class NativeExhibitionActivity : Activity() {
     private fun step(direction: Int) {
         val snapshot = state ?: return
         val all = enabledLooks(snapshot)
-        if (all.size < 2) return
+        if (!NativeMaterialCatalog.hasAlternative(snapshot)) return
         val index = all.indexOfFirst { it.string("id") == snapshot.string("selectedLookId") }
         command(if (snapshot.string("phase") in listOf("generating", "showcase")) "switch" else "select",
             all[Math.floorMod(index + direction, all.size)].string("id"))
@@ -637,6 +644,7 @@ class NativeExhibitionActivity : Activity() {
         val customSkin = settings?.optJSONObject("uiSkin")?.string("image").orEmpty()
         kiosk.applySkin(settings?.string("uiSkinPreset").orEmpty().ifBlank { "crystal" }, customSkin.isNotBlank())
         if (customSkin.isNotBlank()) bindImage(skin, customSkin, 1920)
+        kiosk.empty.text = snapshot?.optJSONObject("catalog")?.string("emptyMessage").orEmpty().ifBlank { "暂无可用素材" }
         kiosk.empty.visibility = if (bound && selected == null) View.VISIBLE else View.GONE
         val missingCameraPermission = realtime && mode != "mox" && !hasCameraPermission()
         val missingCredential = realtime && provider?.optBoolean("configured") == false
@@ -649,7 +657,7 @@ class NativeExhibitionActivity : Activity() {
         kiosk.stopButton.visibility = if (bound && presentation.showFooterStop) View.VISIBLE else View.GONE
         kiosk.stopButton.contentDescription = presentation.primaryText
         kiosk.setPrimaryIcon(presentation.stopIcon, presentation.recoverIcon)
-        val canStart = !cameraSettingsOpen && !controller.hasReleaseFailure && healthy && selected != null && (!realtime || mode == "mox" || cameraReady) &&
+        val canStart = !cameraCalibrationRequired && !cameraSettingsOpen && !controller.hasReleaseFailure && healthy && selected != null && (!realtime || mode == "mox" || cameraReady) &&
             (!realtime || provider?.optBoolean("configured") == true)
         primary.isEnabled = !stopBusy && bound && snapshot != null && (actionBusy || busy || blocked || phase == "paused" || canStart)
         kiosk.stopButton.isEnabled = primary.isEnabled
@@ -766,7 +774,7 @@ class NativeExhibitionActivity : Activity() {
         (!cameraReady && round == null) || previewFailed || controller.hasReleaseFailure ||
         actionBusy || stopBusy || round?.isBusy == true || error.isNotEmpty() || gestureError.isNotEmpty() ||
         state?.string("phase") !in listOf("idle", "select", "showcase") ||
-        state?.optJSONObject("live")?.optBoolean("localEnded") == true || enabledLooks(state).size < 2
+        state?.optJSONObject("live")?.optBoolean("localEnded") == true || !NativeMaterialCatalog.hasAlternative(state)
 
     private fun syncGestures() {
         val settings = JSONObject((state?.optJSONObject("settings")?.optJSONObject("gestureRecognition") ?: JSONObject()).toString())
@@ -779,10 +787,10 @@ class NativeExhibitionActivity : Activity() {
             NativeGestureSampling.linux(settings.optInt("maxFps", 15), settings.optInt("inputLongEdge", 720))
             else NativeGestureSampling.LOCAL)
         gestureCaptureEnabled = gestureAvailable() && gesturesOn && enabled && (gestureMode == "linux" || gestureError.isEmpty())
-        val publicationRevision = if (state?.string("providerMode") == "xmax")
-            state?.optJSONObject("publication")?.optLong("revision", 0) else null
+        val catalogRevision = if (state?.string("providerMode") == "xmax")
+            state?.optJSONObject("catalog")?.optLong("revision", 0) else null
         val scope = "${mirrorId}:${state?.optLong("sessionNumber")}:${state?.string("experienceMode")}:" +
-            "${state?.string("phase") == "paused"}:$stopBusy:$previewFailed:$cameraSettingsOpen:$publicationRevision"
+            "${state?.string("phase") == "paused"}:$stopBusy:$previewFailed:$cameraSettingsOpen:$catalogRevision"
         if (scope != gestureScope) {
             gestureScope = scope
             handTracker?.invalidate()
@@ -907,7 +915,6 @@ class NativeExhibitionActivity : Activity() {
             this, controller, NativeCameraSelection(cameraDeviceId), prefs.getString("native-camera", null),
             migrateLegacy = !prefs.contains("native-camera-id"),
             initialRotationDegrees = cameraRotationDegrees,
-            initialXmaxRotationDegrees = xmaxRotationDegrees,
             initialCaptureSelection = cameraCaptureSelection,
             awaitExclusive = { cameraReleased?.join() },
             requestPermission = {
@@ -968,7 +975,7 @@ class NativeExhibitionActivity : Activity() {
                     cameraPanel.selection.cameraId != cameraDeviceId ||
                         cameraPanel.rotationDegrees != cameraRotationDegrees ||
                         cameraPanel.captureSelection != cameraCaptureSelection)
-                if (cameraChanged && cameraPanel?.hasVerifiedPreview != true) {
+                if ((cameraChanged || cameraCalibrationRequired) && cameraPanel?.hasVerifiedPreview != true) {
                     Toast.makeText(this, "摄像头预览正常后再保存", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
@@ -990,7 +997,7 @@ class NativeExhibitionActivity : Activity() {
                     if (cameraPanel != null) {
                         preferences.putString("native-camera-id", cameraPanel.selection.storedValue)
                         preferences.putInt("native-camera-rotation", cameraPanel.rotationDegrees)
-                        preferences.putInt("native-xmax-input-rotation", cameraPanel.xmaxRotationDegrees ?: -1)
+                        preferences.putBoolean("native-camera-calibration-required", false)
                         preferences.putString("native-camera-capture-size", cameraPanel.captureSelection.storedValue)
                     }
                     check(preferences.commit()) { "无法保存摄像头设置" }
@@ -1000,7 +1007,8 @@ class NativeExhibitionActivity : Activity() {
                     if (cameraPanel != null) {
                         cameraDeviceId = cameraPanel.selection.cameraId
                         cameraRotationDegrees = cameraPanel.rotationDegrees
-                        xmaxRotationDegrees = cameraPanel.xmaxRotationDegrees
+                        cameraCalibrationRequired = false
+                        if (error.startsWith("旧方向设置冲突")) error = ""
                         cameraCaptureSelection = cameraPanel.captureSelection
                     }
                     saved = true
@@ -1064,20 +1072,11 @@ class NativeExhibitionActivity : Activity() {
 
     private fun hasCameraPermission() = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     private fun adoptState(incoming: JSONObject) {
+        NativeMaterialCatalog.requireCurrent(incoming)
         if (incoming.optLong("revision", -1) >= (state?.optLong("revision", -1) ?: -1)) state = incoming
     }
-    private fun selectedLook(value: JSONObject?): JSONObject? = enabledLooks(value).firstOrNull { it.string("id") == value?.string("selectedLookId") }
-    private fun enabledLooks(value: JSONObject?): List<JSONObject> {
-        if (value == null) return emptyList()
-        val publication = if (value.string("providerMode") == "xmax") value.optJSONObject("publication") else null
-        val all = (publication ?: value).optJSONArray("looks") ?: return emptyList()
-        val enabled = if (publication != null) JSONArray().apply {
-            for (at in 0 until all.length()) all.optJSONObject(at)?.let { put(it.string("id")) }
-        } else value.optJSONArray("enabledLookIds") ?: return emptyList()
-        val index = (0 until all.length()).mapNotNull { all.optJSONObject(it) }.associateBy { it.string("id") }
-        return (0 until enabled.length()).mapNotNull { index[enabled.optString(it)] }
-            .filter { it.string("mode").ifBlank { "clothx" } == value.string("experienceMode").ifBlank { "clothx" } }
-    }
+    private fun selectedLook(value: JSONObject?): JSONObject? = NativeMaterialCatalog.selected(value)
+    private fun enabledLooks(value: JSONObject?): List<JSONObject> = NativeMaterialCatalog.looks(value)
     private fun generationKey(id: String, value: JSONObject) = "$id:${value.optLong("sessionNumber")}:${value.optLong("generationNumber")}:${value.string("selectedLookId")}:${value.string("experienceMode").ifBlank { "clothx" }}"
     private fun JSONObject.string(key: String) = if (isNull(key)) "" else optString(key, "")
     private fun userError(cause: Exception, fallback: String) = if (cause is ExhibitionApiException) cause.message ?: fallback else fallback

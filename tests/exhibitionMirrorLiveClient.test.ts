@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import type { CreatedSession } from '../src/api';
@@ -11,8 +10,8 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 async function flush() { for (let index = 0; index < 30; index++) await Promise.resolve(); }
 function local(mirrorId: string): LocalSession {
   return { id: sessionId, token: 'temporary-fixture-token', model: 'x2.0', status: 'active', sourceId: 'camera-fixture', sourceKind: 'camera',
-    sourceName: '展会摄像头', targetItemId: 'exhibition-commute', referenceAsset: '/assets/exhibition/commute-cutout.png',
-    expiresAt: new Date(Date.now() + 120000).toISOString(), pointsLimit: 30, consumedCredits: 0, refImageUrl: '', referenceVersion: 0,
+    sourceName: '展会摄像头', targetItemId: 'exhibition-commute', referenceScope: 'account-scope', referenceAsset: '/assets/exhibition/commute-cutout.png',
+    expiresAt: new Date(Date.now() + 120000).toISOString(), pointsLimit: 30, consumedCredits: 0, refImageUrl: 'https://reference.example/garment.png', referenceVersion: 1,
     resultAvailable: false, verification: 'none', exhibition: { mirrorId, deviceId: 'screen-fixture', lookId: 'commute', sessionNumber: 1, generationNumber: 1 } };
 }
 function fixture(mirrorId = 'default', terminal?: { terminalId: string; token: string }) {
@@ -22,8 +21,7 @@ function fixture(mirrorId = 'default', terminal?: { terminalId: string; token: s
     stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const deps = { reference: vi.fn(async () => new File(['garment'], 'garment.png', { type: 'image/png' })),
     prepare: vi.fn(async () => {}), readyLookup: vi.fn(async () => 'https://reference.example/garment.png'),
-    connect: vi.fn(async () => sdk), clone: vi.fn(() => stream), now: () => 1000 } satisfies Partial<Omit<ExhibitionLiveDeps, 'upload'>> & { readyLookup: (...args: any[]) => Promise<string> };
-  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
+    connect: vi.fn(async () => sdk), clone: vi.fn(() => stream), now: () => 1000 } satisfies Partial<ExhibitionLiveDeps> & { readyLookup: (...args: any[]) => Promise<string> };
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn() };
   const connection = new ExhibitionLiveConnection({ mirrorId, terminalId: terminal?.terminalId, terminalToken: terminal?.token, deviceId: 'screen-fixture', lookId: 'commute', sessionNumber: 1,
     generationNumber: 1, expectedRevision: 3, image: local(mirrorId).referenceAsset!, stream }, events, deps);
@@ -34,7 +32,7 @@ function respond(url: string, init?: RequestInit) {
   const mirrorId = /\/mirrors\/([^/]+)/.exec(url)?.[1] ?? 'unexpected';
   const created = local(mirrorId);
   const input = init?.body ? JSON.parse(init.body as string) : {};
-  if (url.endsWith('/reference')) return Response.json({ ...created, refImageUrl: resolvedBinding(input.bindingId), referenceVersion: 1 });
+  if (url.endsWith('/reference')) throw new Error('Redundant reference binding is forbidden');
   if (url.endsWith('/link')) return Response.json({ ...created, providerSessionId: input.providerSessionId, referenceVersion: 1 });
   if (url.endsWith('/stop')) return Response.json({ ...created, status: 'stopped' });
   return Response.json(created);
@@ -76,7 +74,7 @@ describe('mirror-bound live connection transport', () => {
     await vi.advanceTimersByTimeAsync(5000);
     const paths = fetcher.mock.calls.map(([url]) => url);
     for (const mirror of ['east', 'west']) {
-      for (const suffix of ['live/session', `live/session/${sessionId}/reference`, `sessions/${sessionId}/link`, `sessions/${sessionId}/first-frame`, 'live/heartbeat']) {
+      for (const suffix of ['live/session', `sessions/${sessionId}/link`, `sessions/${sessionId}/first-frame`, 'live/heartbeat']) {
         expect(paths.some(path => path.endsWith(`/exhibition/mirrors/${mirror}/${suffix}`))).toBe(true);
       }
     }
@@ -102,7 +100,7 @@ describe('mirror-bound live connection transport', () => {
     const fetcher = vi.fn(async (url: string, init?: RequestInit) => url.endsWith('/live/session') ? Response.json(local('west')) : respond(url, init));
     vi.stubGlobal('fetch', fetcher);
     const east = fixture('east'); await east.connection.start();
-    expect(east.deps.readyLookup).toHaveBeenCalledOnce(); expect(east.deps.connect).not.toHaveBeenCalled();
+    expect(east.deps.readyLookup).not.toHaveBeenCalled(); expect(east.deps.connect).not.toHaveBeenCalled();
     expect(east.events.status).toHaveBeenCalledWith('error', expect.stringContaining('不匹配'));
     expect(fetcher.mock.calls.some(([url]) => url.endsWith('/mirrors/east/live/error'))).toBe(true);
     expect(fetcher.mock.calls.every(([url]) => url.includes('/mirrors/east/'))).toBe(true);

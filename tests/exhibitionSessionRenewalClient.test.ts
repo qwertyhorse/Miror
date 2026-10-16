@@ -1,4 +1,3 @@
-import { readyReferenceFixture, resolvedBinding } from './readyReferenceFixture';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import { exhibitionPromptForLook } from '../shared/exhibition';
@@ -29,7 +28,7 @@ function fixture(continuous: boolean | 'legacy' = true) {
   const input: Input = { mirrorId: 'default', deviceId: 'screen-a', sessionNumber: 1, generationNumber: 1, lookId: 'first',
     expectedRevision: 1, image: '/assets/first.png', stream, mode: 'clothx' };
   let record: Session = { id: 'old-credential', token: 'temporary-test-token', model: 'x2.0', status: 'active', sourceKind: 'camera',
-    referenceAsset: input.image, refImageUrl: '', referenceVersion: 0, expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    referenceScope: 'account-scope', referenceAsset: input.image, refImageUrl: 'https://reference.fixture/first.png', referenceVersion: 1, expiresAt: new Date(Date.now() + 120_000).toISOString(),
     exhibition: { mirrorId: 'default', deviceId: input.deviceId, sessionNumber: 1, generationNumber: 1, lookId: input.lookId,
       mode: 'clothx', prompt: exhibitionPromptForLook({ mode: 'clothx' }), ...(continuous === 'legacy' ? {} : { continuous }) } };
   let callbacks!: Parameters<ExhibitionLiveDeps['connect']>[2];
@@ -39,9 +38,8 @@ function fixture(continuous: boolean | 'legacy' = true) {
   const deps = {
     create: vi.fn(async () => ({ ...record })), reference: vi.fn(async (value: Input) => new File(['garment'], value.image.split('/').pop()!, { type: 'image/png' })),
     prepare: vi.fn(async () => {}), readyLookup: vi.fn(async (file: File) => `https://reference.fixture/${file.name}`),
-    bind: vi.fn(async (_id, value) => { record = { ...record, refImageUrl: resolvedBinding(value.bindingId), referenceVersion: 1 }; return { ...record }; }),
     updateCondition: vi.fn(async (_id, value) => {
-      record = { ...record, referenceAsset: `/assets/${value.lookId}.png`, refImageUrl: resolvedBinding(value.bindingId) ?? '', referenceVersion: record.referenceVersion + 1,
+      record = { ...record, referenceScope: 'account-scope', referenceAsset: `/assets/${value.lookId}.png`, refImageUrl: `https://reference.fixture/${value.lookId}.png`, referenceVersion: record.referenceVersion + 1,
         exhibition: { ...record.exhibition, lookId: value.lookId, generationNumber: value.generationNumber } };
       return { ...record };
     }), conditionApplied: vi.fn(async () => ({})),
@@ -52,8 +50,7 @@ function fixture(continuous: boolean | 'legacy' = true) {
     prepareRenewal: vi.fn(async (_id: string, _value: { deviceId: string; sessionNumber: number; generationNumber: number }, _signal: AbortSignal) => ({ renewalId: 'planned-renewal' })),
     commitRenewal: vi.fn(async (_id: string, _value: { deviceId: string; renewalId: string }, _signal: AbortSignal) => ({})),
     clone: vi.fn(() => clone), now: vi.fn(() => performance.now()),
-  } satisfies Omit<ExhibitionLiveDeps, 'upload'> & { readyLookup: (...args: any[]) => Promise<string> };
-  Object.assign(deps, { upload: vi.fn(async () => { throw new Error('Browser upload forbidden'); }), preparedReference: async (input: Parameters<ExhibitionLiveDeps['create']>[0]) => readyReferenceFixture(await deps.readyLookup(new File(['backend-fixture'], input.image.split('/').pop()!, { type: 'image/png' }), '', new AbortController().signal)) });
+  } satisfies ExhibitionLiveDeps & { readyLookup: (...args: any[]) => Promise<string> };
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), updateError: vi.fn() };
   const controller = new ExhibitionLiveConnection(input, events, deps); connections.push(controller);
   const showFirstFrame = () => { callbacks.onRemoteStream(output); controller.reportRenderedFrame(output); };

@@ -16,6 +16,27 @@ fun main() {
     verify(convert(90).argb.toList() == listOf(base.argb[2], base.argb[0], base.argb[3], base.argb[1]), "90 degree input rotation")
     verify(convert(180).argb.toList() == base.argb.reversed(), "180 degree input rotation")
     verify(convert(270).argb.toList() == listOf(base.argb[1], base.argb[3], base.argb[0], base.argb[2]), "270 degree input rotation")
+    // Non-square marked input catches swapped geometry and accidental double rotation.
+    val markedY = gray(16, 32, 48, 64, 80, 96, 112, 128)
+    val markedChroma = gray(128, 128)
+    fun marked(rotation: Int, mirrored: Boolean = false) = NativeCameraPixels.convert(4, 2, rotation,
+        markedY, markedChroma, markedChroma, 4, 2, 2, 640, unmirror = mirrored)
+    val marks = marked(0).argb
+    val expected = mapOf(
+        0 to listOf(0, 1, 2, 3, 4, 5, 6, 7),
+        90 to listOf(4, 0, 5, 1, 6, 2, 7, 3),
+        180 to listOf(7, 6, 5, 4, 3, 2, 1, 0),
+        270 to listOf(3, 7, 2, 6, 1, 5, 0, 4),
+    )
+    for ((rotation, indices) in expected) {
+        val output = marked(rotation)
+        val swaps = rotation == 90 || rotation == 270
+        verify(output.width == (if (swaps) 2 else 4) && output.height == (if (swaps) 4 else 2),
+            "Non-square model sample geometry at $rotation")
+        verify(output.argb.toList() == indices.map { marks[it] }, "All marked pixels rotate exactly once at $rotation")
+        verify(marked(rotation, true).argb.toList() == indices.map { marks[it] }.chunked(output.width).flatMap { it.reversed() },
+            "Mirror occurs horizontally after installation rotation at $rotation")
+    }
     val padded = gray(99, 16, 64, 99, 128, 235, 99).apply { position(1) }
     val chroma = gray(99, 128).apply { position(1) }
     val paddedResult = NativeCameraPixels.convert(2, 2, 0, padded, chroma, chroma, 3, 1, 1, 640)

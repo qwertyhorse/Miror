@@ -211,7 +211,7 @@ describe('per-mirror session limits', () => {
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors/default`;
     const post = (path: string, value: unknown, headers: Record<string, string> = {}) => fetch(base + path, {
-      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
+      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(value),
     });
     try {
       expect(await (await fetch(base)).json()).toMatchObject({ settings: { sessionLimits: { credits: null, expireSeconds: 200 } } });
@@ -329,7 +329,7 @@ describe('continuous experience renewal', () => {
     const server = createApiServer(service, [origin], undefined, mirrors); server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/exhibition/mirrors`;
     const post = (mirrorId: string, path: string, input: unknown, requestOrigin = origin) => fetch(`${base}/${mirrorId}${path}`, {
-      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: requestOrigin }, body: JSON.stringify(input),
+      method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json', Origin: requestOrigin }, body: JSON.stringify(input),
     });
     try {
       const state = exhibition.get(); const path = `/live/session/${session.id}/renewal`;

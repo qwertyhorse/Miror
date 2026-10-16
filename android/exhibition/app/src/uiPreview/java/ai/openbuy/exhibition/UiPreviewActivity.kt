@@ -154,7 +154,6 @@ class UiPreviewActivity : Activity() {
             else -> listOf(NativeCameraCaptureSelection.Automatic.label, capture4k.label, capture1080p.label)
         }, unavailablePosition = if (unavailable) 1 else null)
         cameraView.captureSpinner.setSelection(if (unavailable || selected4k) 1 else 0)
-        cameraView.xmaxRotationSpinner.setSelection(if (scenario == "camera-remote") 2 else 0)
         cameraView.showMessage(when {
             unavailable -> "未检测到摄像头，请连接后重新检测"
             scanning -> "检测中…"
@@ -225,12 +224,6 @@ class UiPreviewActivity : Activity() {
                         for (index in 0 until spinner.count) put(JSONObject()
                             .put("label", spinner.getItemAtPosition(index))
                             .put("enabled", (spinner.adapter as? android.widget.ListAdapter)?.isEnabled(index) ?: true))
-                    }))
-                .put("xmaxInputDirection", bounds(camera!!.xmaxRotationSpinner)
-                    .put("selected", camera!!.xmaxRotationSpinner.selectedItem)
-                    .put("options", JSONArray().apply {
-                        val spinner = camera!!.xmaxRotationSpinner
-                        for (index in 0 until spinner.count) put(spinner.getItemAtPosition(index))
                     }))
                 .put("cameraFeedback", camera!!.feedback.text)
         }

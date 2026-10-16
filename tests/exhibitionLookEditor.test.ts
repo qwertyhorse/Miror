@@ -400,7 +400,7 @@ describe('dual-image material editor', () => {
     expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/references'))).toHaveLength(1);
     f.state.looks = [{ ...f.state.looks[0], referenceImage: '/new-outfit.webp' }]; await render(); await flushReact();
     expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/references'))).toHaveLength(2);
-    expect(host!.find(node => node.getReactProps()['aria-label'] === '测试套装：待准备')).toBeDefined();
+    expect(host!.find(node => node.getReactProps()['aria-label'] === '测试套装：处理中')).toBeDefined();
     expect(host!.find(node => node.nodeName === 'img' && node.getReactProps().src === appUrl('/new-cover.webp'))).toBeDefined();
   });
 

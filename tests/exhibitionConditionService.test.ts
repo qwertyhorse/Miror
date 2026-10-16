@@ -98,9 +98,15 @@ describe('camera exhibition condition updates', () => {
     expect(resolveHost).not.toHaveBeenCalled(); expect(issueKey).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled();
   });
 
+  it('resolves absent binding on the backend against the exact prepared identity', async () => {
+    const { service, session, input } = await fixture();
+    const updated = await service.updateExhibitionCondition(session.id, { ...input, bindingId: undefined }, () => true);
+    expect(updated.referenceVersion).toBeGreaterThan(session.referenceVersion!);
+    expect(updated.refImageUrl).toContain('fixture-123');
+  });
+
   it.each([
     ['unknown binding', { bindingId: 'unknown' }, 'REFERENCE_NOT_READY'],
-    ['missing binding', { bindingId: undefined }, 'REFERENCE_BINDING_INVALID'],
     ['foreign upload', { referenceAsset: '/api/exhibition/mirrors/other/assets/upload-12345678-1234-1234-1234-123456789012' }, 'EXHIBITION_INVALID_REFERENCE'],
     ['no image outside Free', { referenceKind: 'none', referenceAsset: '', refImageUrl: '' }, 'EXHIBITION_INVALID_REFERENCE'],
   ] as const)('rejects %s without replacing accepted condition', async (_name, patch, code) => {

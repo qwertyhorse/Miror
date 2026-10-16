@@ -72,10 +72,7 @@ async function image(color: string) { return (await sharp({ create: { width: 512
 async function upload(source: ReturnType<typeof fixture>['source']) {
   const state = await source.upload({ name: '双图素材', category: '通勤', tags: [], imageBase64: await image('#dd1111'), referenceImageBase64: await image('#1133ee'), mode: 'clothx' });
   const look = state.looks[0]!;
-  source.command({ action: 'configure', enabledLookIds: [...state.enabledLookIds, look.id] });
-  await source.preparePublication({ lookIds: [...state.enabledLookIds, look.id] });
-  await vi.waitFor(() => expect([...state.enabledLookIds, look.id].every(id => !!source.readyReference(id))).toBe(true));
-  source.publishPublication({ lookIds: [...state.enabledLookIds, look.id] });
+  await source.prepareReference(look.id);
   source.command({ action: 'select', lookId: look.id });
   return look;
 }
@@ -84,7 +81,7 @@ function testPath(f: ReturnType<typeof fixture>, id: string) {
   return readdirSync(root).map(run => join(root, run, id)).find(path => existsSync(path));
 }
 async function start(context: ReturnType<BrowserTests['resolve']>) {
-  await context.exhibition.prepareReference(context.exhibition.read().selectedLookId!, undefined, true);
+  await context.exhibition.prepareReference(context.exhibition.read().selectedLookId ?? context.exhibition.read().looks.find(look => look.mode === context.exhibition.read().experienceMode)!.id);
   context.exhibition.command({ action: 'configure', autoReturnSeconds: 0 });
   const state = context.exhibition.command({ action: 'begin' });
   return context.exhibition.createLiveSession({ deviceId: 'browser-test-camera', lookId: state.selectedLookId, generationNumber: state.generationNumber });
@@ -95,7 +92,7 @@ describe('independent complete browser tests', () => {
     const f = fixture(); const terminal = { terminalId: `terminal-${randomUUID()}`, token: 'a'.repeat(64), label: '真实镜', platform: 'android' };
     f.mirrors.bindDevice('default', { code: f.mirrors.connectDevice(terminal).code });
     f.source.updateLook('city', { mode: 'charx' }); f.source.updateLook('evening', { mode: 'charx' });
-    await f.source.preparePublication({ lookIds: ['city', 'evening'] }); await vi.waitFor(() => expect(['city', 'evening'].every(id => !!f.source.readyReference(id))).toBe(true)); f.source.publishPublication({ lookIds: ['city', 'evening'] });
+    await f.source.prepareReference('city'); await f.source.prepareReference('evening');
     f.source.command({ action: 'configure', experienceMode: 'charx', materialDrawerColumns: 1 });
     f.source.command({ action: 'select', lookId: 'evening' }); f.source.command({ action: 'begin' });
     f.advance(3_000); // Calling source.get() would finish this demo and mutate its revision.
@@ -111,25 +108,26 @@ describe('independent complete browser tests', () => {
     expect(JSON.stringify(created)).not.toContain(keySource);
   });
 
-  it('copies both uploaded images with new owned URLs and isolates later source edits', async () => {
+  it('shares source image identity and follows completed material edits without copying files', async () => {
     const f = fixture(); const sourceLook = await upload(f.source);
     const created = f.manager.create(f.source); const { exhibition } = f.manager.resolve(created.mirror.id, created.token);
     const copied = exhibition.read().looks[0]!;
-    expect(copied.id).not.toBe(sourceLook.id); expect(exhibition.read().selectedLookId).toBe(copied.id);
-    expect(copied.image).toContain(`/mirrors/${created.mirror.id}/assets/${copied.id}/display/`);
-    expect(copied.referenceImage).toContain(`/mirrors/${created.mirror.id}/assets/${copied.id}/reference/`);
+    expect(copied.id).toBe(sourceLook.id); expect(exhibition.read().selectedLookId).toBe(copied.id);
+    expect(copied.image).toContain(`/mirrors/default/assets/${copied.id}/display/`);
+    expect(copied.referenceImage).toContain(`/mirrors/default/assets/${copied.id}/reference/`);
     const display = exhibition.assetResource(copied.id, 'display', copied.image.split('/').at(-1)!).data;
     const reference = exhibition.assetResource(copied.id, 'reference', copied.referenceImage!.split('/').at(-1)!).data;
     expect(display).not.toEqual(reference); expect(display).toEqual(f.source.asset(sourceLook.id).data);
     await f.source.updateLook(sourceLook.id, { imageBase64: await image('#111111'), referenceImageBase64: await image('#ffffff') });
-    expect(exhibition.asset(copied.id).data).toEqual(display);
-    expect(exhibition.assetResource(copied.id, 'reference', copied.referenceImage!.split('/').at(-1)!).data).toEqual(reference);
-    expect(() => exhibition.asset(sourceLook.id)).toThrow(code('EXHIBITION_ASSET_NOT_FOUND'));
+    await f.source.prepareReference(sourceLook.id);
+    const updated = f.manager.resolve(created.mirror.id, created.token).exhibition.read().catalog!.looks.find(look => look.id === sourceLook.id)!;
+    expect(updated.referenceImage).not.toBe(copied.referenceImage);
+    expect(exhibition.asset(sourceLook.id).data).toEqual(f.source.asset(sourceLook.id).data);
+    expect(readdirSync(testPath(f, created.mirror.id)!, { recursive: true }).some(file => String(file).endsWith('.webp'))).toBe(false);
   });
 
   it('preserves legacy prompt-only Free semantics and supports full generation without a reference', async () => {
     const f = fixture(); f.source.updateLook('commute', { mode: 'free', prompt: '水彩人物', referenceKind: 'none' });
-    f.source.publishPublication({ lookIds: ['commute'] });
     f.source.command({ action: 'configure', experienceMode: 'free' });
     const created = f.manager.create(f.source); const context = f.manager.resolve(created.mirror.id, created.token);
     const session = await start(context);
@@ -139,30 +137,16 @@ describe('independent complete browser tests', () => {
     await f.manager.close(created.mirror.id, created.token); expect(f.store.get(session.id).status).toBe('stopped');
   });
 
-  it('freezes source key and region for reference upload, generation, renewal and revocation', async () => {
+  it('fences a test after source credentials change and revokes with the frozen old credentials', async () => {
     const f = fixture(); await upload(f.source);
     const created = f.manager.create(f.source); const context = f.manager.resolve(created.mirror.id, created.token);
-    f.service.saveMirrorCredentials('default', { apiKey: keyChanged, region: 'global', expectedRevision: 1 }); f.provider.setApiKey('');
-    const selected = context.exhibition.read().selectedLookId!;
-    const prepared = await context.exhibition.prepareReference(selected);
-    expect(f.uploads.length).toBeGreaterThan(0); expect(f.uploads.every(row => row.key === keySource && row.region === 'cn')).toBe(true); expect(prepared).not.toBeNull();
     const session = await start(context);
-    expect(f.secrets.decrypt(f.store.get(session.id).providerKeyCipher!)).toBe(keySource);
-    expect(session).toMatchObject({ pointsLimit: 3000, providerRegion: 'cn', exhibition: { mirrorId: created.mirror.id, continuous: true } });
-    expect(session.refImageUrl).toBe(prepared!.url);
-    await expect(context.exhibition.bindLiveReference(session.id, { deviceId: 'browser-test-camera', lookId: selected, bindingId: prepared!.bindingId })).rejects.toMatchObject({ code: 'EXHIBITION_REFERENCE_LOCKED' });
-    await context.service.link(session.id, 'ums-browser-continuous'); await context.service.firstFrame(session.id, 100); context.exhibition.liveFirstFrame(session.id, 100);
-    for (let n = 0; n < 7; n++) { f.advance(15_000); context.exhibition.heartbeat({ deviceId: 'browser-test-camera', sessionId: session.id }); }
-    const state = context.exhibition.read();
-    const { renewalId } = await context.exhibition.prepareLiveRenewal(session.id, { deviceId: 'browser-test-camera', sessionNumber: state.sessionNumber, generationNumber: state.generationNumber });
-    await context.service.stop(session.id); await context.exhibition.sweepLive();
-    const renewed = await context.exhibition.commitLiveRenewal(session.id, { deviceId: 'browser-test-camera', renewalId });
-    await context.exhibition.createLiveSession({ deviceId: 'browser-test-camera', lookId: renewed.selectedLookId, generationNumber: renewed.generationNumber });
+    f.service.saveMirrorCredentials('default', { apiKey: keyChanged, region: 'global', expectedRevision: 1 });
+    expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_SOURCE_CHANGED'));
     await f.manager.close(created.mirror.id, created.token);
-    const keyCalls = f.requests.filter(request => request.path.includes('/temporary-api-key'));
-    expect(keyCalls.filter(request => request.path.endsWith('/temporary-api-key'))).toHaveLength(2);
-    expect(keyCalls.every(request => request.key === keySource && request.host === 'api.xmaxai.com')).toBe(true);
-    expect(f.store.list().every(record => record.exhibition?.mirrorId === created.mirror.id && record.status === 'stopped')).toBe(true);
+    expect(f.store.get(session.id).status).toBe('stopped');
+    expect(f.requests.filter(request => request.path.includes('/temporary-api-key')).every(request => request.key === keySource && request.host === 'api.xmaxai.com')).toBe(true);
+    expect(f.source.read().live).toBeNull();
   });
 
   it('rejects a missing source key before installing any context or allocating credentials', () => {
@@ -173,14 +157,11 @@ describe('independent complete browser tests', () => {
     expect(f.requests).toEqual([]); expect(f.store.list()).toEqual([]);
   });
 
-  it('also freezes a default provider before its mutable key is replaced', async () => {
+  it('invalidates tests after the mutable default provider key changes without issuing a new key', async () => {
     const f = fixture(); const source = f.mirrors.getMirror(f.mirrors.create({ name: '默认密钥镜' }).id);
     const created = f.manager.create(source); f.provider.setApiKey(keyChanged);
-    const session = await start(f.manager.resolve(created.mirror.id, created.token));
-    expect(f.secrets.decrypt(f.store.get(session.id).providerKeyCipher!)).toBe(keyDefault);
-    expect(f.requests[0]).toMatchObject({ key: keyDefault, host: 'api.xmax.ai' });
-    await f.manager.close(created.mirror.id, created.token);
-    expect(f.requests.every(request => request.key === keyDefault)).toBe(true);
+    expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_SOURCE_CHANGED'));
+    await f.manager.close(created.mirror.id, created.token); expect(f.requests).toEqual([]);
   });
 
   it('rejects other or invalid test tokens without touching either experience', async () => {
@@ -208,7 +189,7 @@ describe('independent complete browser tests', () => {
 
   it('expires after one fixed hour despite reads and stops only its own active session', async () => {
     const f = fixture(); const created = f.manager.create(f.source); const context = f.manager.resolve(created.mirror.id, created.token); const session = await start(context);
-    await f.source.prepareReference(f.source.read().selectedLookId!, undefined, true); f.source.command({ action: 'configure', providerMode: 'xmax' }); const state = f.source.command({ action: 'begin' });
+    await f.source.prepareReference(f.source.read().selectedLookId ?? 'commute'); f.source.command({ action: 'configure', providerMode: 'xmax' }); const state = f.source.command({ action: 'begin' });
     const physical = await f.source.createLiveSession({ deviceId: 'physical', lookId: state.selectedLookId, generationNumber: state.generationNumber });
     const before = f.source.read();
     f.advance(BROWSER_TEST_TTL_MS - 1); expect(f.manager.resolve(created.mirror.id, created.token).expiresAt).toBe(created.expiresAt);
@@ -302,15 +283,13 @@ describe('independent complete browser tests', () => {
     f.failStop(false); await f.manager.sweep(); expect(f.manager.create(f.source).mirror.id).not.toBe(entries[0].mirror.id);
   });
 
-  it('cleans partially copied files when creation fails and keeps the original catalog unchanged', async () => {
+  it('does not copy source files and reports missing bytes through asset reads', async () => {
     const f = fixture(); const look = await upload(f.source);
     const path = join(f.directory, 'exhibition-mirrors/default/exhibition-assets', `${look.id}.reference.${look.referenceImage!.split('/').at(-1)}.webp`);
-    const bytes = readFileSync(path); rmSync(path); const before = f.source.read();
-    const tree = readdirSync(join(f.directory, 'browser-tests'), { recursive: true });
-    expect(() => f.manager.create(f.source)).toThrow();
-    expect(readdirSync(join(f.directory, 'browser-tests'), { recursive: true })).toEqual(tree);
-    expect(f.source.read()).toEqual(before); expect(f.requests).toEqual([]);
-    writeFileSync(path, bytes); expect(f.manager.create(f.source).mirror.providerMode).toBe('xmax');
+    const bytes = readFileSync(path); rmSync(path);
+    const created = f.manager.create(f.source); const test = f.manager.resolve(created.mirror.id, created.token).exhibition;
+    expect(() => test.assetResource(look.id, 'reference', look.referenceImage!.split('/').at(-1)!)).toThrow(code('EXHIBITION_ASSET_NOT_FOUND'));
+    expect(f.requests).toEqual([]); writeFileSync(path, bytes);
   });
 
   it('never restores old browser tokens after restart while the shared store can revoke old sessions', async () => {

@@ -123,7 +123,7 @@ class NativeGestureInstrumentation : Instrumentation() {
                 main { field<Boolean>(activity, "cameraReady") && field<JSONObject?>(activity, "gestureState") != null }
             }
             checks.add("$mode: legacy launcher opens actual Activity; camera ready boundary is simulated")
-            verifyPublishedCatalog(activity)
+            verifyMaterialCatalog(activity)
             var lastFeed = 0L
             fun feed(hand: JSONArray = hands()) {
                 val wait = 110 - (SystemClock.elapsedRealtime() - lastFeed)
@@ -214,27 +214,27 @@ class NativeGestureInstrumentation : Instrumentation() {
         }
     }
 
-    private fun verifyPublishedCatalog(activity: NativeExhibitionActivity) = main {
+    private fun verifyMaterialCatalog(activity: NativeExhibitionActivity) = main {
         val method = activity.javaClass.getDeclaredMethod("enabledLooks", JSONObject::class.java).apply { isAccessible = true }
         fun looks(value: JSONObject): List<JSONObject> = method.invoke(activity, value) as List<JSONObject>
         val snapshot = JSONObject().put("providerMode", "xmax").put("experienceMode", "free")
             .put("looks", JSONArray().put(JSONObject().put("id", "draft").put("mode", "free")))
             .put("enabledLookIds", JSONArray().put("draft"))
-            .put("publication", JSONObject().put("revision", 1).put("looks", JSONArray()
-                .put(JSONObject().put("id", "published").put("name", "Published").put("mode", "free"))))
-        check(looks(snapshot).single().getString("id") == "published")
+            .put("catalog", JSONObject().put("revision", 1).put("looks", JSONArray()
+                .put(JSONObject().put("id", "available").put("name", "Available").put("mode", "free"))))
+        check(looks(snapshot).single().getString("id") == "available")
         snapshot.put("looks", JSONArray()).put("enabledLookIds", JSONArray())
-        check(looks(snapshot).single().getString("name") == "Published") { "Draft edits replaced the published catalog" }
+        check(looks(snapshot).single().getString("name") == "Available") { "Editable draft replaced the authoritative catalog" }
         val previous = field<JSONObject>(activity, "state")
-        val current = JSONObject(previous.toString()).put("publication", JSONObject().put("revision", 1)
+        val current = JSONObject(previous.toString()).put("catalog", JSONObject().put("revision", 1)
             .put("looks", JSONArray(previous.getJSONArray("looks").toString())))
         val render = activity.javaClass.getDeclaredMethod("render").apply { isAccessible = true }
         setField(activity, "state", current); render.invoke(activity)
         val firstScope = field<String>(activity, "gestureScope")
-        current.getJSONObject("publication").put("revision", 2); render.invoke(activity)
-        check(field<String>(activity, "gestureScope") != firstScope) { "Publication revision did not invalidate gesture scope" }
+        current.getJSONObject("catalog").put("revision", 2); render.invoke(activity)
+        check(field<String>(activity, "gestureScope") != firstScope) { "Catalog revision did not invalidate gesture scope" }
         setField(activity, "state", previous); render.invoke(activity)
-        checks.add("Published catalog ignores draft edits; publication revision invalidates gesture scope")
+        checks.add("Backend catalog drives available choices; catalog revision invalidates gesture scope")
     }
 
     private fun hands(two: Boolean = false): JSONArray {

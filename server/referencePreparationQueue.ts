@@ -39,9 +39,10 @@ export class ReferencePreparationQueue {
           for (const look of orderedLooks) {
             const status = mirror.status(look.id);
             if (status.refreshState === 'preparing' || (status.retryAt ?? 0) > this.now() || status.state === 'preparing' || status.state === 'unconfigured' || status.state === 'not_required'
-              || (status.state === 'ready' && (status.freshUntil ?? 0) > this.now() + 5 * 60_000)
+              || status.state === 'ready'
               || (status.state === 'failed' && (status.retryAt ?? 0) > this.now())) continue;
             if (status.state === 'failed') {
+              if (!Number.isFinite(status.retryAt)) continue; // Permanent failure or exhausted automatic attempts.
               retry ??= { mirror, lookId: look.id, cursorKey };
               continue;
             }

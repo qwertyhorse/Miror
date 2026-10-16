@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionState } from '../shared/exhibition';
@@ -16,10 +17,10 @@ vi.mock('../src/exhibition/MoXDragSurface', () => ({ MoXDragSurface: () => null 
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; view.stream = null; view.label = ''; view.onFirstFrame = undefined; });
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'paused', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks),
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'paused', experienceMode: 'clothx', looks: structuredClone(exhibitionLooks),
     enabledLookIds: ['commute', 'city'], selectedLookId: 'commute', displayedLookId: 'commute',
     categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
-    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides };
+    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides });
 }
 async function fixture({ ended = false, passive = false, remote = false, serverError = false } = {}) {
   host = await createReactHost();

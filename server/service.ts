@@ -116,6 +116,12 @@ export class TryOnService {
     const scope = createHash('sha256').update(`${context.provider.kind === 'decart' ? 'decart:' : ''}${context.region}:${context.scope}`).digest('hex');
     return { ...context, scope };
   }
+  materialProviderConfigured(mirrorId: string, target?: 'xmax' | 'decart'): boolean { return this.referenceContext(mirrorId, target).provider.configured; }
+  materialScope(mirrorId: string): string { return this.referenceContext(mirrorId).scope; }
+  readyReferenceIdentity(mirrorId: string, expected: ReferenceDeliveryIdentity, target?: 'xmax' | 'decart') {
+    const context = this.referenceContext(mirrorId, target);
+    return context.provider.configured ? this.options.referenceAssets?.ready({ ...expected, scope: context.scope }) ?? null : null;
+  }
   readyReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart') {
     const context = this.referenceContext(mirrorId, target);
     return context.provider.configured ? this.options.referenceAssets?.ready({ scope: context.scope, bytes, mime }) ?? null : null;
@@ -139,7 +145,7 @@ export class TryOnService {
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return { state: 'unconfigured' };
     return this.options.referenceAssets.status({ scope: context.scope, sha256, mime });
   }
-  async prepareReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart', replace = false) {
+  async prepareReference(mirrorId: string, bytes: Buffer, mime: string, target?: 'xmax' | 'decart', replace = false, manualRetry = false) {
     const context = this.referenceContext(mirrorId, target);
     if (!context.key || !context.provider.configured || !this.options.referenceAssets) return null;
     let provider = this.referenceProviders.get(context.scope);
@@ -148,7 +154,7 @@ export class TryOnService {
       this.referenceProviders.set(context.scope, provider);
       while (this.referenceProviders.size > 16) this.referenceProviders.delete(this.referenceProviders.keys().next().value!);
     }
-    const prepared = await this.options.referenceAssets.prepare({ scope: context.scope, bytes, mime }, provider, { replace });
+    const prepared = await this.options.referenceAssets.prepare({ scope: context.scope, bytes, mime }, provider, { replace, manualRetry });
     return this.referenceContext(mirrorId, target).scope === prepared.scope ? prepared : null;
   }
   private sessionProvider(record: SessionRecord): Provider {
@@ -217,10 +223,13 @@ export class TryOnService {
       }
     }));
   }
-  status(mirrorId?: string) {
+  /** Current provider configuration only; does not scan or deserialize session history. */
+  providerDescriptor(mirrorId?: string) {
     const context = this.credentialContext(mirrorId);
-    return { configured: context.provider.configured, model: context.provider.kind === 'decart' ? DECART_MODEL : 'x2.0', providerId: context.provider.kind ?? 'xmax', providerRegion: context.region,
-      perSessionLimit: this.perSessionLimit,
+    return { configured: context.provider.configured, model: context.provider.kind === 'decart' ? DECART_MODEL : 'x2.0', providerId: context.provider.kind ?? 'xmax', providerRegion: context.region, perSessionLimit: this.perSessionLimit };
+  }
+  status(mirrorId?: string) {
+    return { ...this.providerDescriptor(mirrorId),
       activeSessions: this.options.store.list().filter(s => ['reserved', 'active', 'stopping', 'issuance_unknown'].includes(s.status) && (mirrorId === undefined || (s.exhibition && (s.exhibition.mirrorId ?? 'default') === mirrorId))).map(s => this.public(s)),
     };
   }
@@ -246,7 +255,7 @@ export class TryOnService {
     return this.mirrorCredentialsStatus(mirrorId);
   }
   /** Mirror-only session issuance; supplier quota is authoritative. */
-  async createExhibition(input: { mirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number; sessionLimits?: ExhibitionSessionLimits }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
+  async createExhibition(input: { mirrorId?: string; referenceMirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number; sessionLimits?: ExhibitionSessionLimits }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
     const lookId = boundedText(input.lookId, '展会服装 ID');
     const deviceId = boundedText(input.deviceId, '设备 ID');
     const mirrorId = input.mirrorId ?? 'default';
@@ -259,7 +268,7 @@ export class TryOnService {
     if (typeof mirrorId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(mirrorId)) throw new ApiError('EXHIBITION_INVALID_MIRROR', '试衣镜编号无效。');
     const sample = ['commute', 'city', 'evening'].includes(lookId) && input.referenceAsset === `/assets/exhibition/${lookId}-cutout.png`;
     const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/((?:upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})|commute|city|evening)(?:\/(display|reference)\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?$/.exec(input.referenceAsset);
-    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
+    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== (input.referenceMirrorId ?? mirrorId) || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
     if (!Number.isSafeInteger(input.sessionNumber) || input.sessionNumber < 1 || !Number.isSafeInteger(input.generationNumber) || input.generationNumber < 1) throw new ApiError('EXHIBITION_INVALID_SESSION', '请先开始一轮展会体验。');
     return this.reserveSession({ targetItemId: lookId, sourceId: `exhibition:${deviceId}`, sourceKind: mode === 'mox' ? 'photo' : 'camera', sourceName: boundedText(input.name, '展会服装名称') }, '', input.referenceAsset, hooks,
       { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber, ...(input.sessionLimits?.credits === null ? { continuous: true } : {}) } }, input.sessionLimits);
@@ -447,7 +456,7 @@ export class TryOnService {
     return !!record.exhibition && (record.exhibition.mirrorId ?? 'default') === mirrorId && record.status === 'active' && !!record.providerSessionId && record.sourceKind === 'camera' && record.exhibition.mode !== 'mox';
   }
   /** Change conditions within an existing camera lease; credential and RTC ownership stay fixed. */
-  async updateExhibitionCondition(id: string, input: { mirrorId?: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; bindingId?: string; refImageUrl?: string }, isCurrent: () => boolean, expectedReference?: ReferenceDeliveryIdentity) {
+  async updateExhibitionCondition(id: string, input: { mirrorId?: string; referenceMirrorId?: string; deviceId: string; lookId: string; sessionNumber: number; generationNumber: number; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; bindingId?: string; refImageUrl?: string }, isCurrent: () => boolean, expectedReference?: ReferenceDeliveryIdentity) {
     const mirrorId = input.mirrorId ?? 'default';
     if (typeof mirrorId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(mirrorId)) throw new ApiError('EXHIBITION_INVALID_MIRROR', '试衣镜编号无效。');
     this.assertSessionMirror(id, mirrorId, true);
@@ -467,8 +476,9 @@ export class TryOnService {
     const prompt = exhibitionPromptForLook({ mode, prompt: input.prompt });
     const sample = ['commute', 'city', 'evening'].includes(lookId) && input.referenceAsset === `/assets/exhibition/${lookId}-cutout.png`;
     const uploaded = /^\/api\/exhibition\/(?:mirrors\/([a-z0-9-]+)\/)?assets\/((?:upload-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})|commute|city|evening)(?:\/(display|reference)\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?$/.exec(input.referenceAsset);
-    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== mirrorId || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
-    const refImageUrl = noReference ? '' : this.assertReferenceBinding(mirrorId, input.bindingId, expectedReference, id).url;
+    if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== (input.referenceMirrorId ?? mirrorId) || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
+    const bindingId = input.bindingId ?? (expectedReference ? this.readyReferenceIdentity(mirrorId, expectedReference)?.bindingId : undefined);
+    const refImageUrl = noReference ? '' : this.assertReferenceBinding(mirrorId, bindingId, expectedReference, id).url;
     const sameCondition = (current: SessionRecord) => current.sourceKind === 'camera' && current.providerSessionId === record.providerSessionId && current.exhibition?.deviceId === deviceId && current.exhibition.sessionNumber === input.sessionNumber && (current.exhibition.mirrorId ?? 'default') === mirrorId && (current.exhibition.mode ?? 'clothx') === mode && current.exhibition.lookId === lookId && current.exhibition.generationNumber === input.generationNumber && current.exhibition.prompt === prompt && current.referenceAsset === input.referenceAsset && current.refImageUrl === refImageUrl;
     const stale = () => new ApiError('EXHIBITION_STALE_GENERATION', '素材选择已更新，请使用当前素材。', 409);
     if (!isCurrent() || input.generationNumber < record.exhibition.generationNumber || (input.generationNumber === record.exhibition.generationNumber && !sameCondition(record))) throw stale();

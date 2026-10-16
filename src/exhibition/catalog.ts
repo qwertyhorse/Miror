@@ -6,12 +6,16 @@ export const exhibitionLooks: ExhibitionLook[] = [
   { id: 'evening', name: '优雅礼服', description: '气场加持，重要时刻', image: '/assets/exhibition/evening-cutout.png', palette: '经典黑 · 象牙白', category: '礼服', tags: ['优雅'], mode: 'clothx', source: 'sample' },
 ];
 export const looksFor = (state: ExhibitionState) => state.looks ?? exhibitionLooks;
-export const runtimeLooksFor = (state: ExhibitionState) => state.providerMode === 'xmax' && state.publication ? state.publication.looks : looksFor(state);
-export const lookById = (state: ExhibitionState, id: string | null) => runtimeLooksFor(state).find(look => look.id === id);
-export const enabledLooksForMode = (state: ExhibitionState) => (state.providerMode === 'xmax' && state.publication ? state.publication.looks.map(look => look.id) : state.enabledLookIds).flatMap(id => {
-  const look = runtimeLooksFor(state).find(item => item.id === id);
-  return look && (look.mode ?? 'clothx') === (state.experienceMode ?? 'clothx') ? [look] : [];
-});
+/** The server projects the current mirror, mode and provider once for every surface. */
+export const runtimeLooksFor = (state: ExhibitionState) => state.providerMode === 'xmax' ? state.catalog?.looks ?? [] : looksFor(state);
+export const lookById = (state: ExhibitionState, id: string | null) => {
+  const look = state.activeLook?.id === id ? state.activeLook : runtimeLooksFor(state).find(look => look.id === id);
+  return look && (look.mode ?? 'clothx') === (state.experienceMode ?? 'clothx') ? look : undefined;
+};
+export const enabledLooksForMode = (state: ExhibitionState) => {
+  const enabled = new Set(state.providerMode === 'xmax' ? state.catalog?.availableLookIds ?? [] : state.enabledLookIds);
+  return runtimeLooksFor(state).filter(look => enabled.has(look.id) && (look.mode ?? 'clothx') === (state.experienceMode ?? 'clothx'));
+};
 export const phaseLabel: Record<ExhibitionPhase, string> = {
   idle: '待机展示', select: '正在选素材', positioning: '正在准备画面', generating: '正在准备画面', showcase: '正在展示', paused: '体验已暂停',
 };

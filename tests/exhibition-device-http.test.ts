@@ -49,7 +49,7 @@ async function fixture() {
   const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const headers = { Origin: 'http://xuminghong.local:10200', 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json' };
+  const headers = { Origin: 'http://xuminghong.local:10200', 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json' };
   const request = (path: string, input?: unknown, method = input === undefined ? 'GET' : 'POST', origin = headers.Origin) => fetch(base + path, {
     method, headers: { ...headers, Origin: origin }, ...(input === undefined ? {} : { body: JSON.stringify(input) }),
   });

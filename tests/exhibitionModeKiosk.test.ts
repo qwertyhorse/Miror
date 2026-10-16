@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
@@ -6,9 +7,9 @@ import { enabledLooksForMode, exhibitionLooks, lookById } from '../src/exhibitio
 import type { ExhibitionState } from '../shared/exhibition';
 import type { ExhibitionLiveController } from '../src/exhibition/useExhibitionLive';
 function fixture(): ExhibitionState {
-  return { mirrorId: 'default', revision: 1, phase: 'idle', selectedLookId: 'commute', displayedLookId: null, enabledLookIds: ['city', 'commute'], looks: structuredClone(exhibitionLooks),
+  return materialCatalogFixture({ mirrorId: 'default', revision: 1, phase: 'idle', selectedLookId: 'commute', displayedLookId: null, enabledLookIds: ['city', 'commute'], looks: structuredClone(exhibitionLooks),
     experienceMode: 'clothx', categories: ['通勤', '休闲', '礼服'], tags: ['简约', '日常', '优雅'], sessionNumber: 0, generationNumber: 0, updatedAt: 0, generationReadyAt: null,
-    settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 512, maxWidth: 4096, minHeight: 512, maxHeight: 4096 } }, providerMode: 'demo', live: null, logs: [] };
+    settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 512, maxWidth: 4096, minHeight: 512, maxHeight: 4096 } }, providerMode: 'demo', live: null, logs: [] });
 }
 describe('mode-scoped mirror screen', () => {
   it('uses the current skin for terminal, preview and empty states', () => {
@@ -68,7 +69,7 @@ describe('mirror video state labels', () => {
       stopCamera: () => {}, retry: async () => true, reportFirstFrame: () => {}, secure: true, liveStatus: null, refreshStatus: async () => {}, ...overrides };
   }
   function screen(phase: ExhibitionState['phase'], controller = live(), passive = false, overrides: Partial<ExhibitionState> = {}) {
-    const state = { ...fixture(), providerMode: 'xmax' as const, phase, ...overrides };
+    const state = materialCatalogFixture({ ...fixture(), catalog: undefined, providerMode: 'xmax' as const, phase, ...overrides });
     return renderToStaticMarkup(createElement(Kiosk, { state, live: controller, passive }));
   }
   function badgeText(html: string) {
@@ -83,11 +84,11 @@ describe('mirror video state labels', () => {
     expect(screen('positioning')).toContain('aria-label="本地取景"');
   });
 
-  it.each(['clothx', 'charx', 'free'] as const)('keeps local capture visible before publishing %s materials without enabling generation', experienceMode => {
+  it.each(['clothx', 'charx', 'free'] as const)('keeps local capture visible while %s materials are unavailable', experienceMode => {
     const controller = live({ cameraStream: { getVideoTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream });
     for (const phase of ['idle', 'select'] as const) {
       const html = screen(phase, controller, false, { experienceMode, selectedLookId: null,
-        publication: { revision: 1, publishedAt: 1, legacy: false, looks: [] } });
+        catalog: { revision: 1, looks: [], availableLookIds: [] } });
       expect(html).toContain('aria-label="本地取景"');
       expect(html).toContain('暂无可用素材');
       expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*?开始体验<\/button>/);
@@ -107,7 +108,7 @@ describe('mirror video state labels', () => {
   it.each(['passive', 'remote', 'mox', 'foreign'] as const)('does not show local capture in an empty %s screen', scenario => {
     const state: ExhibitionState = { ...fixture(), providerMode: 'xmax', selectedLookId: null,
       experienceMode: scenario === 'mox' ? 'mox' : 'clothx',
-      publication: { revision: 1, publishedAt: 1, legacy: false, looks: [] },
+      catalog: { revision: 1, looks: [], availableLookIds: [] },
       live: scenario === 'foreign' ? { deviceId: 'another-screen' } as ExhibitionState['live'] : null };
     const controller = live({ cameraStream: { getVideoTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream });
     const html = renderToStaticMarkup(createElement(Kiosk, { state, live: controller,

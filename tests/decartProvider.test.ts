@@ -146,3 +146,10 @@ it('requests persistent Decart storage and requires explicit persistence metadat
   const missing = new DecartProvider('dct_fixture', vi.fn(async () => Response.json({ id: 'file_missing' })));
   await expect(missing.references().upload(Buffer.from('image'), 'hash', 'image/png')).rejects.toMatchObject({ code: 'PROVIDER_INVALID_RESPONSE' });
 });
+
+it.each([[400, 'PROVIDER_REQUEST_REJECTED'], [401, 'PROVIDER_REQUEST_REJECTED'], [429, 'PROVIDER_CAPACITY'], [503, 'PROVIDER_UNAVAILABLE']] as const)('distinguishes permanent Decart HTTP %s rejection from transient retries', async (status, code) => {
+  const call = vi.fn<typeof fetch>(async () => new Response(null, { status }));
+  const provider = new DecartProvider('dct_fixture', call);
+  await expect(provider.references().upload(Buffer.from('image'), 'fixture-hash', 'image/png')).rejects.toMatchObject({ code });
+  expect(call).toHaveBeenCalledOnce();
+});

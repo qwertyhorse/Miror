@@ -60,15 +60,13 @@ function fixture(expireSeconds = 120, decart = false) {
   const sdks: Array<{ disconnect: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> }> = [];
   const statesAfterStopRoute: ExhibitionState[] = [];
   const deps = {
-    preparedReference: vi.fn(async (input: Input) => exhibition.readyReference(input.lookId, true)),
     create: vi.fn(async (input: Input) => {
       const created = await exhibition.createLiveSession(input);
       if (!created.exhibition) throw new Error('Missing exhibition ownership');
       return { ...clientData(created), exhibition: created.exhibition };
     }),
     reference: vi.fn(async () => new File(['garment'], 'garment.png', { type: 'image/png' })),
-    prepare: vi.fn(async () => {}), upload: vi.fn(async () => decart ? 'file_fixture' : 'https://uploads.example/garment.webp'),
-    bind: vi.fn(async (id, input) => clientData(await exhibition.bindLiveReference(id, input))),
+    prepare: vi.fn(async () => {}),
     link: vi.fn(async (id, providerSessionId) => clientData(await service.link(id, providerSessionId))),
     firstFrame: vi.fn(async (id, firstFrameMs) => {
       const record = await service.firstFrame(id, firstFrameMs); exhibition.liveFirstFrame(id, record.firstFrameMs!);
@@ -203,6 +201,5 @@ it.each([false, true])('simulates four hours of continuous bounded segments (Dec
   expect(f.store.list()).toHaveLength(segments);
   expect(f.store.list().every(record => record.status === 'stopped')).toBe(true);
   expect(dns).not.toHaveBeenCalled();
-  expect(f.deps.upload).not.toHaveBeenCalled();
   expect(f.deps.reportError).not.toHaveBeenCalled(); expect(f.originalStop).not.toHaveBeenCalled();
 }, 30_000);

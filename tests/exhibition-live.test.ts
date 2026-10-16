@@ -56,7 +56,7 @@ describe('explicit exhibition XMAX path', () => {
     try {
       for (const sourceKind of ['photo', 'camera']) {
         const response = await fetch(base + '/api/sessions', {
-          method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+          method: 'POST', headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
           body: JSON.stringify({ targetItemId: 'real-inner', sourceId: 'test', sourceKind, sourceName: 'test' }),
         });
         expect(response.status).toBe(404);
@@ -103,10 +103,10 @@ describe('explicit exhibition XMAX path', () => {
     const latest = exhibition.get(); const activeRecord = store.get(session.id);
     expect(latest).toMatchObject({ phase: 'showcase', live: { status: 'running', sessionId: session.id, firstFrameMs: 750 } });
     const uploaded = await pending;
-    const { looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, ...visitor } = uploaded;
-    const { looks: _previousLooks, revision: _previousRevision, updatedAt: _previousUpdatedAt, logs: _previousLogs, ...expectedVisitor } = latest;
+    const { catalog: _catalog, materialVersions: _versions, enabledLookIds: _enabled, looks: _looks, revision: _revision, updatedAt: _updatedAt, logs: _logs, ...visitor } = uploaded;
+    const { catalog: _oldCatalog, materialVersions: _oldVersions, enabledLookIds: _oldEnabled, looks: _previousLooks, revision: _previousRevision, updatedAt: _previousUpdatedAt, logs: _previousLogs, ...expectedVisitor } = latest;
     expect(visitor).toEqual(expectedVisitor); expect(uploaded.looks).toHaveLength(4);
-    expect(uploaded.enabledLookIds).not.toContain(uploaded.looks[0].id);
+    expect(uploaded.enabledLookIds).toContain(uploaded.looks[0].id);
     expect(store.get(session.id)).toEqual(activeRecord); expect(store.list()).toHaveLength(1);
     expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled(); expect(store.allocated()).toBe(CONTINUOUS_SEGMENT_CREDITS);
     advance(14000); const another = await exhibition.upload({ ...input, name: '继续上传' });
@@ -384,7 +384,7 @@ describe('live HTTP integration uses mock provider only', () => {
     const exhibition = mirrors.getMirror('default');
     const server = createApiServer(service, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-    const headers = { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
+    const headers = { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' };
     const mirrorPath = '/api/exhibition/mirrors/default';
     const post = async (path: string, input: unknown) => {
       const response = await fetch(base + path, { method: 'POST', headers, body: JSON.stringify(input) });

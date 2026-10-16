@@ -82,5 +82,11 @@ fun main() {
     verify(picked.unavailableMessage(permission) == permission.error, "Discovery permission failure is not mislabeled as unplugging")
     verify(picked.unavailableMessage(NativeCameraSnapshot(all).mergeRtcDevices(all)).isEmpty(), "Available explicit camera has no failure")
 
+    for (installation in listOf(0, 90, 180, 270)) {
+        verify(!NativeCameraCalibration.needsCalibration(installation, -1), "Follow-camera migration needs no calibration")
+        for (legacyModel in listOf(0, 90, 180, 270))
+            verify(NativeCameraCalibration.needsCalibration(installation, legacyModel) == (installation != legacyModel),
+                "Conflicting old directions must never silently pick an angle")
+    }
     println("Native camera selection passed: $assertions assertions; no camera or USB device opened.")
 }

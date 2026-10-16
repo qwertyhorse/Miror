@@ -25,7 +25,9 @@ it('serves private configuration, guards old clients, applies an explicit switch
   const saved = await request('/provider-settings', { provider: 'decart', apiKey: 'dct_fixture', expectedRevision: 0 }, 'PUT'); expect(saved.status).toBe(200);
   const savedText = await saved.text(); expect(savedText).not.toContain('dct_fixture'); expect(JSON.parse(savedText)).toMatchObject({ active: 'xmax', desired: 'decart', pending: true });
   const initialApply = await request('/provider-settings/apply', { expectedRevision: 1 }); expect(await initialApply.json()).toMatchObject({ active: 'decart', pending: false });
-  const denied = await request('/live/session', {}, 'POST', { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1' }); expect(denied.status).toBe(426);
+  const denied = await request('/live/session', {}, 'POST', { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2' }); expect(denied.status).toBe(426);
+  const legacyMaterial = await request('/live/session', {}, 'POST', { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1' });
+  expect(legacyMaterial.status).toBe(426);
   expect(providerFetch).not.toHaveBeenCalled();
   const verified = await request('/provider-settings/verify', {}); expect(await verified.json()).toMatchObject({ authenticated: true, generationStarted: false }); expect(providerFetch).toHaveBeenCalledOnce();
   const cross = await request('/provider-settings', { provider: 'xmax', expectedRevision: 1 }, 'PUT', { Origin: 'https://attacker.invalid' }); expect(cross.status).toBe(403);

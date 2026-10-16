@@ -1,3 +1,4 @@
+import { materialCatalogFixture } from './support/materialCatalogFixture';
 import { act, createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExhibitionState } from '../shared/exhibition';
@@ -17,10 +18,10 @@ afterEach(async () => {
 });
 
 function snapshot(overrides: Partial<ExhibitionState> = {}): ExhibitionState {
-  return { mirrorId: 'preview-test', revision: 1, phase: 'idle', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
+  return materialCatalogFixture({ mirrorId: 'preview-test', revision: 1, phase: 'idle', experienceMode: 'clothx', selectedLookId: 'first', displayedLookId: null,
     looks: ['first', 'second'].map(id => ({ id, mode: 'clothx', name: id, description: '', image: `/${id}.png`, source: 'sample', palette: '', category: '', tags: [] })),
     enabledLookIds: ['first', 'second'], categories: [], tags: [], sessionNumber: 1, generationNumber: 1, updatedAt: 1, generationReadyAt: null,
-    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides };
+    providerMode: 'xmax', live: null, logs: [], settings: { autoReturnSeconds: 90, uploadLimits: { maxFileSizeMB: 10, minWidth: 64, minHeight: 64, maxWidth: 4096, maxHeight: 4096 } }, ...overrides });
 }
 
 function childText(children: unknown): string {

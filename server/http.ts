@@ -118,14 +118,16 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           if (request.method === 'GET') return json(response, 200, currentService.providerSettings(mirrorId));
           if (request.method === 'PUT') {
             const input = await readBody(2048); let ready = false;
-            if (!input.apiKey && (input.provider === 'xmax' || input.provider === 'decart')) { try { current.assertProviderPublicationReady(input.provider); ready = true; } catch { /* Save target configuration before preparation. */ } }
-            return json(response, 200, currentService.saveProviderSettings(mirrorId, input, current.credentialsEditable(), ready));
+            if (!input.apiKey && (input.provider === 'xmax' || input.provider === 'decart')) { try { current.assertProviderMaterialsReady(input.provider); ready = true; } catch { /* Save target configuration before preparation. */ } }
+            const saved = currentService.saveProviderSettings(mirrorId, input, current.credentialsEditable(), ready);
+            current.refreshMaterials();
+            return json(response, 200, saved);
           }
         }
         if (mirrorRoute && path === '/provider-settings/apply' && !browserTest && request.method === 'POST') {
           const input = await readBody(2048);
           const target = currentService.providerSettings(mirrorId)?.desired;
-          if (target) current.assertProviderPublicationReady(target);
+          if (target) current.assertProviderMaterialsReady(target);
           currentService.requestProviderSwitch(mirrorId, input.expectedRevision);
           current.command({ action: 'end' }); await current.reconcileLive();
           return json(response, 200, currentService.providerSettings(mirrorId));
@@ -137,7 +139,9 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           if (request.method === 'GET') return json(response, 200, { ...currentService.mirrorCredentialsStatus(mirrorId, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
           if (request.method === 'PUT') {
             const input = await readBody(2_048);
-            return json(response, 200, { ...currentService.saveMirrorCredentials(mirrorId, input, current.credentialsEditable()), perSessionLimit: current.credentialLimits().credits });
+            const saved = currentService.saveMirrorCredentials(mirrorId, input, current.credentialsEditable());
+            current.refreshMaterials();
+            return json(response, 200, { ...saved, perSessionLimit: current.credentialLimits().credits });
           }
           throw new ApiError('NOT_FOUND', '未找到镜端密钥接口。', 404);
         }
@@ -175,9 +179,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         }
         if (request.method === 'GET' && path === '/diagnostics') return json(response, 200, { mirrorId, state: current.read().lifecycle, policy: { sessionLimits: current.sessionLimits(), autoReturnSeconds: current.read().settings.autoReturnSeconds, leaseTtlMs: 20000 }, events: current.diagnosticTimeline() });
         if (request.method === 'POST' && path === '/imports/validate') return json(response, 200, validateMaterialImport(await readBody(131072)));
-        if (request.method === 'GET' && path === '/publication') return json(response, 200, current.publicationStatus());
-        if (request.method === 'POST' && path === '/publication/prepare') return json(response, 202, await current.preparePublication(await readBody()));
-        if (request.method === 'POST' && path === '/publication/publish') return json(response, 200, current.publishPublication(await readBody()));
+        if (request.method === 'GET' && path === '/materials/readiness') return json(response, 200, current.materialReadinessStatus());
+        if (request.method === 'POST' && ['/publication/prepare', '/publication/publish'].includes(path)) throw new ApiError('MATERIAL_WORKFLOW_UPGRADE_REQUIRED', '素材已自动生效，请刷新后台。', 409);
         if (request.method === 'GET' && path === '/references') return json(response, 200, { references: current.referencePreparationStatuses() });
         const retryReference = /^\/references\/([^/]+)\/retry$/.exec(path);
         if (request.method === 'POST' && retryReference) {
@@ -203,7 +206,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (request.method === 'POST' && path === '/live/error') return json(response, 200, await current.reportLiveError(await readBody()));
         if (request.method === 'POST' && path === '/live/heartbeat') return json(response, 200, current.heartbeat(await readBody()));
         if (request.method === 'POST' && path === '/live/session') {
-          if (request.headers['x-miror-material'] !== 'binding-v1') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
+          if (request.headers['x-miror-material'] !== 'catalog-v2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           if (current.liveStatus().providerId === 'decart' && request.headers['x-miror-realtime'] !== 'decart-v1') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请升级镜端以使用 Decart。', 426);
           const input = await readBody(); let localId: string | undefined;

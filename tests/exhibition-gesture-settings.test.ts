@@ -145,7 +145,7 @@ describe('per-mirror gesture settings', () => {
     stored.state.settings.gestureRecognition = kind === 'invalid' ? { ...configured, gestures: ['unknown'] } : undefined;
     writeFileSync(file, JSON.stringify(stored));
     const migrated = new ExhibitionService(directory, { now, strictStorage: true }); const state = migrated.get();
-    expect(state).toMatchObject({ looks: stored.state.looks, selectedLookId: uploadId, enabledLookIds: stored.state.enabledLookIds,
+    expect(state).toMatchObject({ looks: stored.state.looks.map(({ contentVersion: _version, ...look }: { contentVersion?: string }) => look), selectedLookId: uploadId, enabledLookIds: stored.state.enabledLookIds,
       settings: { autoReturnSeconds: 180, switchMode: 'auto', autoSwitchSeconds: 45, gestureRecognition: DEFAULT_EXHIBITION_GESTURE_SETTINGS } });
     expect(state.revision).toBe(stored.state.revision + 1);
     expect(new ExhibitionService(directory, { now, strictStorage: true }).get()).toEqual(state);
@@ -219,7 +219,8 @@ describe('gesture settings HTTP boundary', () => {
   it('round-trips per mirror, rejects invalid/stale saves, and never contacts XMAX', async () => {
     const mirrors = new ExhibitionMirrors(directory());
     const providerAccess = vi.fn(() => { throw new Error('Gesture settings must not contact XMAX.'); });
-    const unrelated = new Proxy({} as TryOnService, { get: (_target, property) => property === 'reconcileMirrorSessions' ? async () => {} : providerAccess() });
+    const unrelated = withLifecycleReferenceDelivery({ status: () => ({ configured: true, providerId: 'xmax' }), reconcileMirrorSessions: async () => {},
+      createExhibition: providerAccess, get: providerAccess, stop: providerAccess, link: providerAccess } as unknown as TryOnService);
     const server = createApiServer(unrelated, ['http://xuminghong.local:10200'], undefined, mirrors);
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     try {

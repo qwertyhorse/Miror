@@ -10,14 +10,10 @@ export function createMaterialPreparationQueue(exhibition: ExhibitionMirrors, se
     const targets: ('xmax' | 'decart' | undefined)[] = settings
       ? (['xmax', 'decart'] as const).filter(provider => settings.accounts[provider].configured)
       : [undefined];
-    return targets.flatMap(target => [true, false].map(published => {
-      const looks = published ? state.publication?.looks ?? [] : state.looks;
-      const publishedIds = state.publication?.looks.map(look => look.id) ?? [];
-      return { id: `${mirror.id}:${published ? 'published' : 'draft'}:${target ?? 'active'}`,
-        state: { looks, selectedLookId: state.selectedLookId, enabledLookIds: published ? publishedIds : state.enabledLookIds, live: state.live },
-        configured: target !== undefined || service.status(mirror.id).configured,
-        status: (lookId: string) => current.referencePreparationStatus(lookId, published, target),
-        prepare: (lookId: string) => current.prepareReference(lookId, target, published) };
-    }));
+    return targets.map(target => ({ id: `${mirror.id}:${target ?? 'active'}`,
+      state: { looks: state.looks.filter(look => target !== 'decart' || look.mode === 'clothx'), selectedLookId: state.selectedLookId, enabledLookIds: state.enabledLookIds, live: state.live },
+      configured: target !== undefined || service.providerDescriptor(mirror.id).configured,
+      status: (lookId: string) => current.referencePreparationStatus(lookId, false, target),
+      prepare: (lookId: string) => current.prepareReference(lookId, target) }));
   }), now);
 }

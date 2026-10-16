@@ -62,12 +62,11 @@ async function fixture(factory?: () => Promise<GestureInference>) {
     const device = { terminalId: `terminal-${randomUUID()}`, token: randomBytes(32).toString('hex'), label: '隔离手势镜端', platform: 'android' as const };
     const paired = mirrors.connectDevice(device); mirrors.bindDevice(mirrorId, { code: paired.code });
     const mirror = mirrors.getMirror(mirrorId);
-    // Real publication contract, with Free presets that need no image upload or supplier request.
+    // Automatic catalog contract, with Free presets that need no image upload or supplier request.
     for (const look of mirror.get().looks) mirror.updateLook(look.id, {
       mode: 'free', referenceKind: 'none', prompt: 'Isolated gesture HTTP test. No provider session.',
     });
     mirror.command({ action: 'configure', providerMode: 'xmax', experienceMode: 'free', autoReturnSeconds: 0 });
-    mirror.publishPublication({});
     const credentials = { terminalId: device.terminalId, terminalToken: device.token };
     return { device, mirrorId, credentials };
   };
@@ -244,7 +243,7 @@ describe('remote gesture authenticated HTTP boundary', () => {
     expect((await a.frame(1010)).status).toBe(403);
   });
 
-  it.each(['selection', 'provider', 'settings', 'publication', 'publication_revision', 'begin'] as const)('invalidates pending events when backend %s changes', async change => {
+  it.each(['selection', 'provider', 'settings', 'availability', 'material_version', 'begin'] as const)('invalidates pending events when backend %s changes', async change => {
     const f = await fixture(); const a = await f.open(f.bind()); await a.release();
     f.workers[0].hands = [hand]; await a.frame(600);
     const pending = deferred<GestureInferenceResult>(); f.workers[0].pending = pending.promise;
@@ -253,23 +252,21 @@ describe('remote gesture authenticated HTTP boundary', () => {
     if (change === 'selection') mirror.command({ action: 'select', lookId: 'city' });
     if (change === 'provider') mirror.command({ action: 'configure', providerMode: 'demo' });
     if (change === 'settings') mirror.command({ action: 'configure', gestureRecognition: { ...mirror.get().settings.gestureRecognition, gestures: [] } });
-    if (change === 'publication') mirror.publishPublication({ lookIds: ['commute', 'city'] });
-    if (change === 'publication_revision') mirror.publishPublication({});
+    if (change === 'availability') mirror.command({ action: 'configure', enabledLookIds: ['commute', 'city'] });
+    if (change === 'material_version') mirror.updateLook('city', { name: '自动生效的新名称' });
     if (change === 'begin') mirror.command({ action: 'begin' });
     pending.resolve(result([hand])); const rejected = await old;
     expect(rejected.status).toBe(409); expect(await rejected.json()).toMatchObject({ code: 'GESTURE_STALE' });
   });
 
-  it.each(['UI settings', 'draft enabled looks', 'draft material edits'] as const)('ignores %s during inference when the running publication is unchanged', async change => {
+  it('ignores UI settings during inference when the material catalog is unchanged', async () => {
     const f = await fixture(); const a = await f.open(f.bind()); await a.release();
     f.workers[0].hands = [hand]; await a.frame(600);
     const pending = deferred<GestureInferenceResult>(); f.workers[0].pending = pending.promise;
     const old = a.frame(910); await vi.waitFor(() => expect(f.workers[0].infer).toHaveBeenCalledTimes(8));
-    const mirror = f.mirrors.getMirror(); const publication = mirror.get().publication;
-    if (change === 'UI settings') mirror.command({ action: 'configure', materialDrawerColumns: 1 });
-    if (change === 'draft enabled looks') mirror.command({ action: 'configure', enabledLookIds: ['commute'] });
-    if (change === 'draft material edits') mirror.updateLook('city', { name: '未发布的草稿名称' });
-    expect(mirror.get().publication).toEqual(publication);
+    const mirror = f.mirrors.getMirror(); const catalog = mirror.get().catalog;
+    mirror.command({ action: 'configure', materialDrawerColumns: 1 });
+    expect(mirror.get().catalog).toEqual(catalog);
     pending.resolve(result([hand]));
     expect(await (await old).json()).toMatchObject({ event: 'open_palm' });
   });
@@ -281,12 +278,25 @@ describe('remote gesture authenticated HTTP boundary', () => {
     for (const time of [600, 910, 1010]) expect(await (await a.frame(time)).json()).toMatchObject({ event: null, blocked: true });
   });
 
-  it('uses published eligible look count instead of the larger draft catalog to allow gestures', async () => {
+  it('uses canonical eligible look count instead of the larger editable catalog to allow gestures', async () => {
     const f = await fixture(); const a = await f.open(f.bind()); await a.release();
-    const mirror = f.mirrors.getMirror(); mirror.publishPublication({ lookIds: ['commute'] });
-    expect(mirror.get().enabledLookIds).toHaveLength(3);
+    const mirror = f.mirrors.getMirror(); mirror.command({ action: 'configure', enabledLookIds: ['commute'] });
+    expect(mirror.get().looks).toHaveLength(3); expect(mirror.get().catalog?.availableLookIds).toEqual(['commute']);
     f.workers[0].hands = [hand];
     for (const time of [600, 910, 1010]) expect(await (await a.frame(time)).json()).toMatchObject({ event: null, blocked: true });
+  });
+
+  it('allows a gesture to the sole available successor after the active material is off shelf', async () => {
+    const f = await fixture(); const bound = f.bind(); const mirror = f.mirrors.getMirror();
+    const state = mirror.get(); const activeLook = state.catalog!.looks.find(look => look.id === 'commute')!;
+    const successor = state.catalog!.looks.find(look => look.id === 'city')!;
+    // Model the authoritative in-flight pin: current input retained, only successor selectable.
+    vi.spyOn(mirror, 'get').mockImplementation(() => ({ ...state, phase: 'showcase', activeLook,
+      selectedLookId: activeLook.id, enabledLookIds: [successor.id],
+      catalog: { ...state.catalog!, looks: [successor], availableLookIds: [successor.id] } }));
+    const a = await f.open(bound); await a.release(); f.workers[0].hands = [hand];
+    await a.frame(600); expect(await (await a.frame(910)).json()).toMatchObject({ event: 'open_palm', blocked: false });
+    expect(f.issue).not.toHaveBeenCalled();
   });
 
   it('closes a warmed model if the open request disconnected before initialization completed', async () => {

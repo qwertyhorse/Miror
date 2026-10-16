@@ -221,7 +221,10 @@ describe('per-mirror credential routing and persistent session history', () => {
     expect(exhibition.credentialsEditable()).toBe(true);
     expect(f.service.mirrorCredentialsStatus('east', exhibition.credentialsEditable())).toMatchObject({ editable: true, hasUnconfirmedSession: true, region: 'global' });
     expect(f.service.saveMirrorCredentials('east', { apiKey: keyB, region: 'cn', expectedRevision: 1 }, exhibition.credentialsEditable())).toMatchObject({ revision: 2, editable: true, hasUnconfirmedSession: true, region: 'cn' });
-    expect(exhibition.get()).toEqual(paused); expect(f.store.get(record.id)).toEqual(record);
+    const { catalog: oldCatalog, ...previous } = paused;
+    const { catalog: newCatalog, ...current } = exhibition.get();
+    expect(current).toEqual(previous); expect(newCatalog!.availableLookIds).toEqual([]);
+    expect(f.store.get(record.id)).toEqual(record);
     expect(() => exhibition.command({ action: 'resume' })).toThrowError(expect.objectContaining({ code: 'EXHIBITION_LIVE_STOP_PENDING' }));
     await expect(createLive()).rejects.toMatchObject({ code: 'EXHIBITION_RECOVERY_REQUIRED' });
     expect(f.store.allocated(apiKeyBudgetScope(keyA))).toBe(CONTINUOUS_SEGMENT_CREDITS); expect(f.store.allocated(apiKeyBudgetScope(keyB))).toBe(0);

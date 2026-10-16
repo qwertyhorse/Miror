@@ -27,7 +27,7 @@ export function ProviderSettingsForm({ mirrorId, onSaved }: { mirrorId: string; 
         if (!alive.current || current !== epoch.current) return;
         if (revision.current !== undefined && revision.current !== value.revision && dirty.current) { setKey(''); dirty.current = false; setError('配置已变化，请重新选择。'); }
         revision.current = value.revision; setStatus(value);
-        const readiness = await api<{ targetReadyLookIds: string[]; targetUnavailableLookIds: string[] }>(exhibitionApiPath('publication', mirrorId), 'GET', undefined, request.signal);
+        const readiness = await api<{ targetReadyLookIds: string[]; targetUnavailableLookIds: string[] }>(exhibitionApiPath('materials/readiness', mirrorId), 'GET', undefined, request.signal);
         if (!alive.current || current !== epoch.current) return;
         setTarget({ ready: readiness.targetReadyLookIds.length, unavailable: readiness.targetUnavailableLookIds.length });
         if (!dirty.current) setProvider(value.desired);
@@ -36,18 +36,12 @@ export function ProviderSettingsForm({ mirrorId, onSaved }: { mirrorId: string; 
     void refresh(); const timer = setInterval(() => void refresh(), 3000);
     return () => { alive.current = false; ++epoch.current; request.abort(); clearInterval(timer); };
   }, [path]);
-  async function run(action: 'save' | 'verify' | 'apply' | 'prepare' = 'save') {
+  async function run(action: 'save' | 'verify' | 'apply' = 'save') {
     if (!status || working.current) return;
     working.current = true; ++epoch.current; setBusy(true); setError(''); setMessage('');
     const request = new AbortController(); const timeout = setTimeout(() => request.abort(), 20_000);
     try {
-      if (action === 'prepare') {
-        const publicationPath = exhibitionApiPath('publication', mirrorId);
-        const publication = await api<{ stateRevision: number }>(publicationPath, 'GET', undefined, request.signal);
-        await api(`${publicationPath}/prepare`, 'POST', { expectedRevision: publication.stateRevision, provider: status.desired }, request.signal);
-        if (alive.current) setMessage('目标服务素材准备中');
-      }
-      else if (action === 'verify') { await api(`${path}/verify`, 'POST', {}, request.signal); if (alive.current) setMessage('鉴权通过'); }
+      if (action === 'verify') { await api(`${path}/verify`, 'POST', {}, request.signal); if (alive.current) setMessage('鉴权通过'); }
       else if (action === 'apply') {
         const value = settings(await api<ProviderSettings>(`${path}/apply`, 'POST', { expectedRevision: status.revision }, request.signal));
         if (!alive.current) return;
@@ -73,7 +67,7 @@ export function ProviderSettingsForm({ mirrorId, onSaved }: { mirrorId: string; 
       <div className="ex-provider-actions"><button type="submit" className="ex-button" disabled={busy || !status || (!status.accounts[provider].configured && !key.trim())}>{busy ? '处理中…' : '保存服务'}</button>
       {provider === 'decart' && <button type="button" className="ex-button" disabled={busy || !status?.accounts.decart.configured || !!key} onClick={() => void run('verify')}>验证连接</button>}</div>
     </form>
-    {status?.pending && <div><p role="status">待生效：{providerLabel(status.desired)} · {status.applyAfterStop ? '释放后切换' : target ? `已就绪 ${target.ready} 件 · 待准备 ${target.unavailable} 件` : '检查素材中'}</p><button type="button" className="ex-button" disabled={busy} onClick={() => void run('prepare')}>准备目标服务素材</button><button type="button" className="ex-button" disabled={busy || status.applyAfterStop || !target || target.unavailable > 0 || target.ready === 0} onClick={() => void run('apply')}>切换服务</button></div>}
+    {status?.pending && <div><p role="status">待生效：{providerLabel(status.desired)} · {status.applyAfterStop ? '释放后切换' : target ? `可用 ${target.ready} 件 · 处理中或需处理 ${target.unavailable} 件` : '检查素材中'}</p><button type="button" className="ex-button" disabled={busy || status.applyAfterStop || !target || target.ready === 0} onClick={() => void run('apply')}>切换服务</button></div>}
     {message && <p role="status">{message}</p>}{error && <p role="alert" className="ex-field-error">{error}</p>}
   </section>;
 }

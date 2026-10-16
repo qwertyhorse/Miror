@@ -3,7 +3,7 @@ import { ArrowLeft, Hand, Link2, Maximize2, Monitor, Play, RotateCcw, Sparkles, 
 import { EXHIBITION_MODE_LABELS, exhibitionReferenceImage, isExhibitionLocallyEnded, type ExhibitionCommand, type ExhibitionState, type ExhibitionMirrorSummary } from '../../shared/exhibition';
 import { resolveExhibitionGestureSettings, type ExhibitionGestureKind } from '../../shared/exhibitionGestures';
 import { appUrl } from '../versionScope';
-import { enabledLooksForMode, phaseLabel } from './catalog';
+import { enabledLooksForMode, lookById, phaseLabel } from './catalog';
 import { MirrorConsole } from './MirrorConsole';
 import { useMirrors, type MirrorRegistry } from './useMirrors';
 import { exhibitionUrl } from './mirrorApi';
@@ -75,8 +75,8 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
   const remote = presentation === 'remote';
   const kioskLabel = passive ? '镜端状态预览' : remote ? '镜端远程控制' : 'AI 试衣镜';
   const enabled = enabledLooksForMode(state);
-  const look = enabled.find(item => item.id === state.selectedLookId);
-  const shown = enabled.find(item => item.id === (state.displayedLookId ?? state.selectedLookId)) ?? look;
+  const look = lookById(state, state.selectedLookId);
+  const shown = lookById(state, state.displayedLookId ?? state.selectedLookId) ?? look;
   const welcome = state.phase === 'idle' || state.phase === 'select';
   const locallyEnded = isExhibitionLocallyEnded(state);
   const loading = state.phase === 'generating' || state.phase === 'positioning';
@@ -427,11 +427,11 @@ export function Kiosk({ state, send, disabled = false, passive = false, live, st
                         : currentAcknowledgement && configuredGestures.includes('open_palm') && gestures.armed && !gestures.needsRelease ? '可以再次抬手'
                           : !gestures.handDetected ? '请露出手'
                             : gestures.needsRelease ? '收手或稍停' : gestures.armed ? gestureInstruction : '请露出手掌';
-  if (!look || !visualLook || !enabled.length) return <section className={`ex-kiosk ex-mirror-minimal ex-empty-mode${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
+  if (!look || !visualLook || (!enabled.length && welcome)) return <section className={`ex-kiosk ex-mirror-minimal ex-empty-mode${cameraControl ? ' ex-has-camera-control' : ''}`} style={skinStyle} aria-label={passive ? '镜端状态预览' : presentation === 'terminal' ? '智能镜大屏' : kioskLabel} data-mode={EXHIBITION_MODE_LABELS[mode]} data-skin={skin}>
     <header className="ex-mirror-brand"><Brand /></header>
     <div className={`ex-mirror-stage${localPreview ? '' : ' ex-mirror-empty'}`}>
-      {localPreview ? <><StreamVideo stream={localPreview} mirrored={live?.mirrored} label="本地取景" /><div className="ex-visual-status" role="status"><span>暂无可用素材</span></div></>
-        : <><Sparkles aria-hidden="true" /><span>暂无可用素材</span></>}
+      {localPreview ? <><StreamVideo stream={localPreview} mirrored={live?.mirrored} label="本地取景" /><div className="ex-visual-status" role="status"><span>{state.catalog?.emptyMessage ?? '当前模式暂无可用素材'}</span></div></>
+        : <><Sparkles aria-hidden="true" /><span>{state.catalog?.emptyMessage ?? '当前模式暂无可用素材'}</span></>}
       <div className="ex-mirror-stage-actions">{recoveryButton ?? (!hasStop && <button className="ex-kiosk-primary" disabled><Play fill="currentColor" />开始体验</button>)}</div>
     </div>
     <footer className="ex-mirror-footer"><div className="ex-mirror-footer-tools">{stopButton}{cameraControl}</div></footer>

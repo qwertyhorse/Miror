@@ -30,13 +30,17 @@ export class ApiError extends Error {
 
 /** Mirror callers supply their own device-scoped API route. */
 export async function api<T>(path: string, method = 'GET', payload?: unknown, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(appUrl(`/api${path}`), {
+  let response: Response;
+  try { response = await fetch(appUrl(`/api${path}`), {
     method,
-    headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'binding-v1', 'X-Miror-Realtime': 'decart-v1', ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-Miror-Protocol': '2', 'X-Miror-Material': 'catalog-v2', 'X-Miror-Realtime': 'decart-v1', ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: payload !== undefined ? JSON.stringify(payload) : undefined,
     cache: 'no-store',
     signal,
-  });
+  }); } catch (cause) {
+    if (signal?.aborted || (cause instanceof DOMException && cause.name === 'AbortError')) throw cause;
+    throw new ApiError('连接中断，请检查网络后重试。', 'NETWORK_UNAVAILABLE');
+  }
   let value: unknown;
   try {
     value = await response.json();

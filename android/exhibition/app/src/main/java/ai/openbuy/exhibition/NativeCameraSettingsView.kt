@@ -26,19 +26,13 @@ internal open class NativeCameraSettingsView(context: Context) : LinearLayout(co
         textSize = 13f
     }
     val rotationSpinner = Spinner(context, Spinner.MODE_DROPDOWN).apply {
-        contentDescription = "画面方向"
+        contentDescription = "安装方向"
         background = null
         setPadding(0, 0, 0, 0)
         setPopupBackgroundDrawable(MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1)))
     }
     val captureSpinner = Spinner(context, Spinner.MODE_DROPDOWN).apply {
         contentDescription = "采集分辨率"
-        background = null
-        setPadding(0, 0, 0, 0)
-        setPopupBackgroundDrawable(MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1)))
-    }
-    val xmaxRotationSpinner = Spinner(context, Spinner.MODE_DROPDOWN).apply {
-        contentDescription = "XMAX输入方向"
         background = null
         setPadding(0, 0, 0, 0)
         setPopupBackgroundDrawable(MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1)))
@@ -85,25 +79,12 @@ internal open class NativeCameraSettingsView(context: Context) : LinearLayout(co
                 isClickable = false
             }, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = dp(12) })
         }, LayoutParams(-1, dp(48)))
-        addView(MirrorSettingsStyle.label(context).apply { text = "画面方向" },
+        addView(MirrorSettingsStyle.label(context).apply { text = "安装方向" },
             LayoutParams(-1, -2).apply { topMargin = dp(16); bottomMargin = dp(8) })
         rotationSpinner.adapter = choicesAdapter(listOf("默认", "顺时针 90°", "旋转 180°", "逆时针 90°"))
         addView(FrameLayout(context).apply {
             background = MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1))
             addView(rotationSpinner, FrameLayout.LayoutParams(-1, -1))
-            addView(ImageView(context).apply {
-                setImageResource(R.drawable.mirror_chevron_down)
-                imageTintList = android.content.res.ColorStateList.valueOf(MirrorSettingsStyle.SECONDARY)
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                isClickable = false
-            }, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = dp(12) })
-        }, LayoutParams(-1, dp(48)))
-        addView(MirrorSettingsStyle.label(context).apply { text = "XMAX输入方向" },
-            LayoutParams(-1, -2).apply { topMargin = dp(16); bottomMargin = dp(8) })
-        xmaxRotationSpinner.adapter = choicesAdapter(listOf("跟随摄像头", "0°", "顺时针 90°", "旋转 180°", "逆时针 90°"))
-        addView(FrameLayout(context).apply {
-            background = MirrorUiTheme.rounded(Color.WHITE, dp(10).toFloat(), MirrorSettingsStyle.BORDER, dp(1))
-            addView(xmaxRotationSpinner, FrameLayout.LayoutParams(-1, -1))
             addView(ImageView(context).apply {
                 setImageResource(R.drawable.mirror_chevron_down)
                 imageTintList = android.content.res.ColorStateList.valueOf(MirrorSettingsStyle.SECONDARY)

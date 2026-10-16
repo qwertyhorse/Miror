@@ -40,7 +40,7 @@ async function fixture(totalLimit = 360) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', protocol = '2') => fetch(base + path, {
-    method, headers: { 'X-Miror-Protocol': protocol, 'X-Miror-Material': 'binding-v1', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
+    method, headers: { 'X-Miror-Protocol': protocol, 'X-Miror-Material': 'catalog-v2', 'Content-Type': 'application/json', Origin: 'http://xuminghong.local:10200' },
     ...(value === undefined ? {} : { body: JSON.stringify(value) }),
   });
   const root = (id: string) => `/api/exhibition/mirrors/${id}`;

@@ -8,7 +8,7 @@ import type { ExhibitionLiveController } from './useExhibitionLive';
 import type { MirrorRegistry } from './useMirrors';
 import { exhibitionUrl } from './mirrorApi';
 import { exhibitionBrowserTestUrl, exhibitionCameraUrl } from './cameraEntry';
-import { enabledLooksForMode, phaseLabel } from './catalog';
+import { enabledLooksForMode, lookById, phaseLabel } from './catalog';
 import { ExperienceModeChips, experienceModeLabel } from './ExperienceModeChips';
 import { WardrobePanel } from './WardrobePanel';
 import { CopyDialog } from './CopyDialog';
@@ -145,10 +145,10 @@ function MirrorConsoleContent({ controller, live, mirror, registry, selectMirror
   const realtime = state.providerMode === 'xmax';
   const locallyEnded = isExhibitionLocallyEnded(state);
   const enabledLooks = enabledLooksForMode(state);
-  const look = enabledLooks.find(item => item.id === state.selectedLookId);
+  const look = lookById(state, state.selectedLookId);
   const disabled = pending || controller.stopPending || !connected;
   const canStop = pending || (!!state.live && !locallyEnded) || !['idle', 'select'].includes(state.phase);
-  const canNavigate = !!look && enabledLooks.length > 1 && (configurable || state.phase === 'showcase');
+  const canNavigate = !!look && (enabledLooks.length > 1 || (enabledLooks.length === 1 && !enabledLooks.some(item => item.id === look.id))) && (configurable || state.phase === 'showcase');
   const latestDeletingMirror = registry.data?.mirrors.find(item => item.id === deletingMirror?.id);
   const deletePhase = deletingMirror?.id === mirror.id ? state.phase : latestDeletingMirror?.phase;
   const deleteBlockedReason = !latestDeletingMirror ? '这台智能镜已被删除。'
@@ -195,7 +195,7 @@ function MirrorConsoleContent({ controller, live, mirror, registry, selectMirror
                 <div className="ex-real-control-heading"><Monitor size={15} />真机控制</div>
                 <div className="ex-experience-setting"><ExperienceModeChips allowedModes={live.liveStatus?.providerId === 'decart' ? ['clothx'] : undefined} label="当前体验模式" value={state.experienceMode} disabled={disabled || !configurable} onChange={experienceMode => { if (experienceMode !== state.experienceMode) void send({ action: 'configure', experienceMode }); }} /></div>
                 <OutfitSwitchSettings controller={controller} />
-                {!look && <p className="ex-no-mode-material" role="status">请在素材管理中为 {experienceModeLabel(state.experienceMode)} 上传并启用素材后再开始体验。</p>}
+                {!look && <p className="ex-no-mode-material" role="status">请在素材管理中为 {experienceModeLabel(state.experienceMode)} 上传素材，处理完成后开始体验。</p>}
                 <MirrorDeviceBinding key={mirror.id} mirror={mirror} controller={controller} registry={registry} />
                 <DeviceSettings controller={controller} live={live} mirrorId={mirror.id} />
                 {state.lifecycle?.connection === 'recovering' && <p role="status">正在恢复连接</p>}

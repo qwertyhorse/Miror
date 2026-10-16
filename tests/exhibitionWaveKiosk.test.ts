@@ -282,7 +282,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it('accepts a hand-only control target and separately explains competing hands', async () => {
+  it('accepts a hand-only control target and asks for a palm when hands are ambiguous', async () => {
     capture.controlSource = 'hand';
     const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
@@ -292,7 +292,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     f.send.mockClear();
     capture.operatorStatus = 'ambiguous'; capture.ambiguityReason = 'hands';
     await f.render();
-    expect(control().textContent).toBe('请只露一只手');
+    expect(control().textContent).toBe('请露出手掌');
     expect(f.send).not.toHaveBeenCalled();
   });
 
@@ -300,7 +300,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     capture.operatorStatus = 'ambiguous'; capture.handDetected = true;
     const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
-    expect(control().textContent).toBe('请单人体验');
+    expect(control().textContent).toBe('请露出手掌');
     expect(control().getReactProps()['data-operator']).toBe('ambiguous');
     expect(f.send).not.toHaveBeenCalled();
     capture.operatorStatus = 'locked'; await f.render();

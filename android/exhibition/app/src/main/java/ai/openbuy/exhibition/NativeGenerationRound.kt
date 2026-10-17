@@ -139,8 +139,9 @@ internal class NativeGenerationRound(
                 val expiresAt = validateRecord(created, noReference, prompt, if (prebound) 1 else 0, createdReference, null)
                 val token = created.optString("token")
                 NativeRoundMetadata.requireValid(NativeRoundMetadata.temporaryKey.matches(token), "临时连接凭证无效。")
-                NativeRoundMetadata.requireValid(created.optString("model") == "x2.0", "当前模型不支持展台体验。")
                 val region = created.getString("providerRegion")
+                val model = created.optString("model")
+                NativeRoundMetadata.requireValid(NativeXmaxModel.matches(model, region), "请更新后台后使用当前 XMAX 模型。")
                 providerRegion = region
                 val continuous = created.optJSONObject("exhibition")?.optBoolean("continuous", false) == true && mode != "mox"
                 launch {
@@ -231,7 +232,7 @@ internal class NativeGenerationRound(
                 val providerId = controller.connect(
                     token = token,
                     region = region,
-                    model = "x2.0",
+                    model = model,
                     position = cameraPosition,
                     image = if (mode == "mox") image else null,
                     cameraDeviceId = if (mode == "mox") null else cameraDeviceId,
@@ -392,6 +393,7 @@ internal class NativeGenerationRound(
         val region = record.optString("providerRegion")
         NativeRoundMetadata.requireValid(region in setOf("cn", "global")
             && (providerRegion == null || providerRegion == region), "服务区域无效。")
+        NativeRoundMetadata.requireValid(NativeXmaxModel.matches(record.optString("model"), region), "请更新后台后使用当前 XMAX 模型。")
         return NativeRoundMetadata.expiryMillis(record)
     }
 

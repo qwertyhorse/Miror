@@ -24,6 +24,26 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { clients.splice(0).forEach(value => value.stop()); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('mirror-scoped exhibition client', () => {
+  it('reports a request timeout clearly and clears it after the backend recovers', async () => {
+    const fetcher = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(new DOMException('signal is aborted without reason', 'AbortError')), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    const east = client('east'); east.start();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(east.getSnapshot()).toMatchObject({ connected: false, error: '后台响应超时，请重试。' });
+    fetcher.mockImplementation(async () => response(state('east', 2)));
+    await east.refresh();
+    expect(east.getSnapshot()).toMatchObject({ connected: true, error: '', state: { revision: 2 } });
+  });
+  it('does not publish a timeout error when an obsolete request is cancelled', async () => {
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(new DOMException('signal is aborted without reason', 'AbortError')), { once: true });
+    })));
+    const east = client('east'); east.start(); east.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(east.getSnapshot().error).toBe('');
+  });
   it('returns the newly uploaded material at the front of an existing catalog', async () => {
     const uploaded = state('east', 6);
     uploaded.looks.unshift({ ...uploaded.looks[0], id: 'upload-newest', name: '新素材', source: 'upload' });

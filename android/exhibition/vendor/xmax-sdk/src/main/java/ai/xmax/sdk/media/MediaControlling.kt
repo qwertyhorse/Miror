@@ -15,7 +15,9 @@ import ai.xmax.sdk.RealtimeExternalVideoSource
 import android.graphics.Bitmap
 import android.net.Uri
 
-/** 定义媒体层向 Core 暴露的本地媒体能力。 */
+/**
+ * 定义媒体层向 Core 暴露的本地媒体能力。
+ */
 internal interface MediaControlling : InteractionControlling {
     val currentTrack: RealtimeVideoTrack?
 
@@ -37,6 +39,16 @@ internal interface MediaControlling : InteractionControlling {
     ): RealtimeMediaStream
 
     val isExternalVideo: Boolean
+
+    /**
+     * 当前是否为本地解码后通过 RTC 上传的视频文件。
+     */
+    val isLocalVideo: Boolean get() = false
+
+    /**
+     * 当前是否为持续通过 RTC 上传图片帧的本地图片。
+     */
+    val isLocalImage: Boolean get() = false
 
     fun setCameraPreviewReadyListener(listener: RealtimeCameraPreviewReadyListener?)
 
@@ -90,7 +102,9 @@ internal interface MediaControlling : InteractionControlling {
 
     suspend fun stopExternalVideoStream()
 
-    /** 只替换外部输入，保留引擎；准备回调执行前已解绑旧供帧入口。 */
+    /**
+     * 只替换外部输入，保留引擎；准备回调执行前已解绑旧供帧入口。
+     */
     suspend fun replaceExternalVideoStream(
         videoFormat: RealtimeVideoFormat?,
         targetSource: suspend () -> RealtimeExternalVideoSource,

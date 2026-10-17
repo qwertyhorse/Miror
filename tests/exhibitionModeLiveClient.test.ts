@@ -5,6 +5,7 @@ import type { MoXInteraction } from '../src/exhibition/MoXDragSurface';
 
 const running: ExhibitionLiveConnection[] = [];
 afterEach(async () => { for (const connection of running.splice(0)) await connection.stop(); });
+async function flush() { for (let index = 0; index < 30; index++) await Promise.resolve(); }
 function setup(mode: ExhibitionExperienceMode, freePrompt = '保持人物动作，将场景换成参考图中的森林', referenceKind: 'image' | 'none' = 'image') {
   const prompt = exhibitionPromptForLook({ mode, prompt: freePrompt });
   const track = { readyState: 'live', onended: null, stop: vi.fn() };
@@ -31,6 +32,65 @@ describe('mode-specific exhibition generation', () => {
     expect(f.deps.create).toHaveBeenCalledTimes(1);
     expect(f.deps.connect).toHaveBeenCalledWith(mode === 'mox' ? f.reference : f.stream, expect.objectContaining({ exhibition: expect.objectContaining({ mode, prompt: f.prompt }) }), expect.any(Object));
     expect(f.deps.clone).toHaveBeenCalledTimes(mode === 'mox' ? 0 : 1);
+  });
+  it.each(EXHIBITION_EXPERIENCE_MODES.filter(mode => mode !== 'mox'))('keeps %s running when recording completion arrives', async mode => {
+    const f = setup(mode); await f.connection.start();
+    f.callbacks().onRemoteStream(f.stream); f.connection.reportRenderedFrame(f.stream); await flush();
+    expect(f.events.status).toHaveBeenLastCalledWith('running');
+
+    for (const event of [
+      { event: 'video_completed' },
+      { event: 'video_completed', uid: 'current-task', session_uid: 'current-task', result: { video_duration_ms: 96_000 } },
+      { event: 'video_completed', uid: 'older-task', session_uid: 'older-task' },
+    ]) {
+      f.callbacks().onRoomEvent(event); await flush();
+      expect(f.connection.stopped).toBe(false);
+      expect(f.events.stream).toHaveBeenLastCalledWith(f.stream);
+      expect(f.events.status).toHaveBeenLastCalledWith('running');
+    }
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.sdk.set).toHaveBeenCalledOnce(); expect(f.deps.firstFrame).toHaveBeenCalledOnce();
+    expect(f.deps.stop).not.toHaveBeenCalled(); expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.sdk.stopGeneration).not.toHaveBeenCalled(); expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(f.track.stop).not.toHaveBeenCalled(); expect(f.events.stream).not.toHaveBeenCalledWith(null);
+  });
+  it('does not terminate camera startup when completion arrives before the initial SDK set resolves', async () => {
+    const f = setup('clothx');
+    let resolveSet!: () => void;
+    vi.mocked(f.sdk.set).mockImplementationOnce(() => new Promise<void>(resolve => { resolveSet = resolve; }));
+    const starting = f.connection.start(); await flush();
+    expect(f.sdk.set).toHaveBeenCalledOnce(); expect(f.deps.link).toHaveBeenCalledOnce();
+    f.callbacks().onRoomEvent({ event: 'video_completed', uid: 'previous-task', session_uid: 'previous-task' });
+    await flush();
+    expect(f.connection.stopped).toBe(false); expect(f.deps.stop).not.toHaveBeenCalled();
+    resolveSet(); await starting;
+    f.callbacks().onRemoteStream(f.stream); f.connection.reportRenderedFrame(f.stream); await flush();
+    expect(f.events.status).toHaveBeenLastCalledWith('running');
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.sdk.set).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(f.track.stop).not.toHaveBeenCalled(); expect(f.deps.reportError).not.toHaveBeenCalled();
+  });
+  it.each(['onError', 'onDisconnect'] as const)('still stops a real %s failure after a nonfatal recording completion', async callback => {
+    const f = setup('clothx'); await f.connection.start();
+    f.callbacks().onRemoteStream(f.stream); f.connection.reportRenderedFrame(f.stream); await flush();
+    f.callbacks().onRoomEvent({ event: 'video_completed', uid: 'older-task' }); await flush();
+    expect(f.connection.stopped).toBe(false); expect(f.deps.reportError).not.toHaveBeenCalled();
+
+    if (callback === 'onError') f.callbacks().onError('RTC failure', { code: 'SESSION_ERROR', details: { reason_code: 'rtc_async_error' } });
+    else f.callbacks().onDisconnect('rtc_reconnect_timeout');
+    await flush();
+    expect(f.connection.stopped).toBe(true);
+    expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).toHaveBeenCalledOnce();
+    expect(f.track.stop).toHaveBeenCalledOnce(); expect(f.events.stream).toHaveBeenLastCalledWith(null);
+    expect(f.deps.reportError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: 'rtc_failed', lookId: 'look-a', generationNumber: 1 }));
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+  });
+  it('ignores a recording completion delivered after an explicit stop', async () => {
+    const f = setup('clothx'); await f.connection.start(); await f.connection.stop();
+    f.callbacks().onRoomEvent({ event: 'video_completed', uid: 'retired-task' }); await flush();
+    expect(f.connection.stopped).toBe(true);
+    expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).toHaveBeenCalledOnce();
+    expect(f.deps.reportError).not.toHaveBeenCalled(); expect(f.track.stop).toHaveBeenCalledOnce();
   });
   it('rejects mismatched mode before sending the reference or any input', async () => {
     const f = setup('charx'); f.created.exhibition.mode = 'clothx'; await f.connection.start();

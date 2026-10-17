@@ -36,12 +36,14 @@ export function initialLifecycle(): ExperienceLifecycle {
   return { protocol: EXHIBITION_PROTOCOL, experienceId: null, state: 'idle', controllerEpoch: 0, terminalRevision: 0,
     policyVersion: 1, connection: 'idle', recoveryAttempts: [], consecutiveFailures: 0 };
 }
-export function admitRecovery(state: ExperienceLifecycle, now: number, planned = false): boolean {
+export function admitRecovery(state: ExperienceLifecycle, now: number, planned = false, continuous = false): boolean {
   state.recoveryAttempts = state.recoveryAttempts.filter(at => at > now - RECOVERY_WINDOW_MS);
   if (state.healthySince !== undefined && now - state.healthySince >= RECOVERY_STABLE_MS) state.consecutiveFailures = 0;
   if (planned) return state.state === 'active';
-  if (state.state !== 'active' || state.consecutiveFailures >= 2 || state.recoveryAttempts.length >= 3) return false;
-  state.consecutiveFailures++; state.recoveryAttempts.push(now); delete state.healthySince;
+  if (state.state !== 'active' || (!continuous && (state.consecutiveFailures >= 2 || state.recoveryAttempts.length >= 3))) return false;
+  state.consecutiveFailures = Math.min(Number.MAX_SAFE_INTEGER, state.consecutiveFailures + 1);
+  // Keep durable history bounded even when continuous exhibitions keep retrying.
+  state.recoveryAttempts = [...state.recoveryAttempts, now].slice(-3); delete state.healthySince;
   return true;
 }
 

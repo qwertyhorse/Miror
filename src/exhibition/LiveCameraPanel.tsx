@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Camera, CameraOff, RefreshCw, ExternalLink } from 'lucide-react';
 import { appUrl } from '../versionScope';
 import { exhibitionUrl } from './mirrorApi';
+import { cameraLabels } from './cameraLabels';
+import { CustomSelect } from '../components/SelectionControls';
+import { subscribeXmaxVideoBinding, xmaxVideoBinding, type XmaxVideoAttachment } from './xmaxVideoBinding';
 import type { ExhibitionLiveController } from './useExhibitionLive';
 import './live-camera.css';
 
@@ -30,22 +33,43 @@ export function attachExhibitionStream(video: HTMLVideoElement, stream: MediaStr
 }
 
 /** Local video never reports a generated frame. Pass onFirstFrame only for XMAX output. */
-export function StreamVideo({ stream, mirrored = false, className = '', label = '摄像头本地预览', onFirstFrame }: {
-  stream: MediaStream | null; mirrored?: boolean; className?: string; label?: string; onFirstFrame?: (stream: MediaStream) => void;
+export function StreamVideo({ stream, mirrored = false, interactive = false, className = '', label = '摄像头本地预览', onFirstFrame }: {
+  stream: MediaStream | null; mirrored?: boolean; interactive?: boolean; className?: string; label?: string; onFirstFrame?: (stream: MediaStream) => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const sdkContainer = useRef<HTMLDivElement>(null);
+  const sdkAttachment = useRef<XmaxVideoAttachment | null>(null);
+  const subscribe = useCallback((listener: () => void) => subscribeXmaxVideoBinding(stream, listener), [stream]);
+  const snapshot = useCallback(() => xmaxVideoBinding(stream), [stream]);
+  const binding = useSyncExternalStore(subscribe, snapshot, snapshot);
   const frameCallback = useRef(onFirstFrame);
   frameCallback.current = onFirstFrame;
+  const presentation = useRef({ interactive, mirrored }); presentation.current = { interactive, mirrored };
   const [needsPlay, setNeedsPlay] = useState(false);
   useEffect(() => {
+    setNeedsPlay(false);
+    if (binding && sdkContainer.current) {
+      let disposed = false;
+      const attachment = binding.attach(sdkContainer.current, {
+        ...presentation.current,
+        onFirstFrame: boundStream => { if (!disposed) frameCallback.current?.(boundStream); },
+        onPlayBlocked: () => { if (!disposed) setNeedsPlay(true); },
+      });
+      sdkAttachment.current = attachment;
+      return () => { disposed = true; attachment.dispose(); if (sdkAttachment.current === attachment) sdkAttachment.current = null; };
+    }
     const video = ref.current;
     if (!video) return;
-    setNeedsPlay(false);
     return attachExhibitionStream(video, stream, boundStream => frameCallback.current?.(boundStream), () => setNeedsPlay(true));
-  }, [stream]);
+  }, [stream, binding]);
+  useEffect(() => { sdkAttachment.current?.update({ interactive, mirrored }); }, [interactive, mirrored, binding]);
   return <div className={`ex-stream-video ${className}`}>
-    <video ref={ref} autoPlay muted playsInline aria-label={label} style={{ transform: mirrored ? 'scaleX(-1)' : undefined }} />
-    {needsPlay && <button type="button" className="ex-video-play" onClick={() => void ref.current?.play().then(() => setNeedsPlay(false)).catch(() => setNeedsPlay(true))}>点击播放画面</button>}
+    {binding ? <div ref={sdkContainer} role="img" aria-label={label} style={{ position: 'absolute', inset: 0 }} />
+      : <video ref={ref} autoPlay muted playsInline aria-label={label} style={{ transform: mirrored ? 'scaleX(-1)' : undefined }} />}
+    {needsPlay && <button type="button" className="ex-video-play" onClick={() => {
+      const playing = binding ? sdkAttachment.current?.play() : ref.current?.play();
+      void playing?.then(() => setNeedsPlay(false)).catch(() => setNeedsPlay(true));
+    }}>点击播放画面</button>}
   </div>;
 }
 
@@ -57,6 +81,7 @@ export function LiveCameraPanel({ live, compact = false, mirrorId = 'default' }:
   const cameraHost = window.location.hostname;
   const cameraUrl = `https://${cameraHost}:10202${exhibitionUrl('/exhibition/screen', mirrorId)}`;
   const ownsGeneration = ['preparing', 'connecting', 'running', 'stopping'].includes(live.status);
+  const labels = cameraLabels(live.cameras);
   return <section className={`ex-camera-panel${compact ? ' ex-camera-panel-compact' : ''}`} aria-label="摄像头设置">
     <div className="ex-camera-panel-heading"><Camera size={19} /><strong>摄像头与实时换装</strong><span role="status">{statusLabel[live.status]}</span></div>
     {!live.secure ? <div className="ex-camera-note">
@@ -70,9 +95,10 @@ export function LiveCameraPanel({ live, compact = false, mirrorId = 'default' }:
         {live.cameraStream ? <button type="button" className="ex-camera-button" onClick={live.stopCamera}><CameraOff size={17} />关闭摄像头{ownsGeneration ? '并停止' : ''}</button>
           : <button type="button" className="ex-camera-button ex-camera-primary" disabled={live.opening || live.status === 'other-device'} onClick={() => void live.startCamera()}><Camera size={17} />{live.opening ? '等待授权…' : '开启摄像头'}</button>}
         {live.opening && <button type="button" className="ex-camera-button" onClick={live.stopCamera}>取消等待</button>}
-        {live.cameras.length > 0 && <label className="ex-camera-select">摄像头<select value={live.selectedCameraId} disabled={live.opening || ownsGeneration} onChange={event => void live.startCamera(event.target.value)}>
-          {live.cameras.map((camera, index) => <option key={camera.deviceId || index} value={camera.deviceId}>{camera.label || `摄像头 ${index + 1}`}</option>)}
-        </select></label>}
+        {live.cameras.length > 0 && <div className="ex-camera-select"><span>摄像头</span><CustomSelect label="摄像头" placeholder="选择摄像头"
+          value={live.selectedCameraId} disabled={live.opening || ownsGeneration} onChange={value => void live.startCamera(value)}
+          options={live.cameras.filter(camera => !!camera.deviceId).map(camera => ({ value: camera.deviceId, label: labels[live.cameras.indexOf(camera)] }))} />
+        </div>}
         <label className="ex-camera-mirror"><input type="checkbox" checked={live.mirrored} onChange={event => live.setMirrored(event.target.checked)} />镜像显示</label>
       </div>
       {live.cameraStream && !ownsGeneration && <small>当前仅本地预览。选好服装后，用户点击开始即可自动换装。</small>}

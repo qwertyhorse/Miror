@@ -15,7 +15,7 @@ export default defineConfig(({ mode }) => ({
     },
     react(),
   ],
-  optimizeDeps: { include: mode === "test" ? [] : ["@xmaxai/sdk-global"] },
+  optimizeDeps: { include: mode === "test" ? [] : ["@xmaxai/web-sdk"] },
   resolve: {
     alias: {
       "cos-js-sdk-v5": fileURLToPath(new URL("./node_modules/cos-js-sdk-v5/src/cos.js", import.meta.url)),

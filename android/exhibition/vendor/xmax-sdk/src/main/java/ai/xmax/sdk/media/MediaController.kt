@@ -30,7 +30,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.withLock
 
-/** 统一协调本地媒体所有权以及 RTC Engine 生命周期。 */
+/**
+ * 统一协调本地媒体所有权以及 RTC Engine 生命周期。
+ */
 internal class MediaController(
     private val rtcManager: RtcManaging,
     private val cameraController: CameraController,
@@ -100,8 +102,9 @@ internal class MediaController(
     override suspend fun startInteraction(
         taskId: String,
         videoFormat: RealtimeVideoFormat,
+        useDisplayedSize: Boolean,
     ) {
-        interactionController.startInteraction(taskId, videoFormat)
+        interactionController.startInteraction(taskId, videoFormat, useDisplayedSize)
     }
 
     override suspend fun stopInteraction() {
@@ -173,6 +176,12 @@ internal class MediaController(
         stopSource(LocalMediaKind.IMAGE)
     }
 
+    override val isLocalVideo: Boolean
+        get() = synchronized(stateLock) { activeSource == LocalMediaKind.VIDEO }
+
+    override val isLocalImage: Boolean
+        get() = synchronized(stateLock) { activeSource == LocalMediaKind.IMAGE }
+
     override suspend fun createLocalVideoStream(
         uri: Uri,
         videoFormat: RealtimeVideoFormat?,
@@ -188,7 +197,9 @@ internal class MediaController(
 
     override suspend fun stopExternalVideoStream() { stopSource(LocalMediaKind.EXTERNAL) }
 
-    /** 切流不销毁引擎；失败时保留媒体类型，供后续重试或完整清理正确回收资源。 */
+    /**
+     * 切流不销毁引擎；失败时保留媒体类型，供后续重试或完整清理正确回收资源。
+     */
     override suspend fun replaceExternalVideoStream(
         videoFormat: RealtimeVideoFormat?,
         targetSource: suspend () -> RealtimeExternalVideoSource,

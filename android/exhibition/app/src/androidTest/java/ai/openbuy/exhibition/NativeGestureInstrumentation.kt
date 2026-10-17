@@ -1,17 +1,21 @@
 package ai.openbuy.exhibition
 
 import android.app.Activity
+import android.app.Dialog
 import android.app.Instrumentation
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.os.Bundle
+import android.os.Build
 import android.os.SystemClock
 import android.webkit.WebView
+import android.view.View
+import android.widget.FrameLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -30,6 +34,12 @@ class NativeGestureInstrumentation : Instrumentation() {
     override fun onStart() {
         val result = Bundle()
         try {
+            verifyImmersiveWindow()
+            if (arguments.getString("immersiveOnly") == "true") {
+                result.putString("stream", "\n" + JSONArray(checks).toString(2) + "\n")
+                finish(Activity.RESULT_OK, result)
+                return
+            }
             val provider = main { WebView.getCurrentWebViewPackage()?.versionName.orEmpty() }
             require(provider.substringBefore('.').toInt() in 69..74) { "Expected real legacy WebView 69–74, received $provider" }
             verifyBridge()
@@ -45,6 +55,25 @@ class NativeGestureInstrumentation : Instrumentation() {
             result.putString("stream", "\nNative gesture instrumentation failed: ${failure.stackTraceToString()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun verifyImmersiveWindow() {
+        main {
+            val dialog = Dialog(targetContext, R.style.AppTheme)
+            val window = checkNotNull(dialog.window)
+            check(window.peekDecorView() == null) { "Regression must begin before decor creation" }
+            MirrorImmersive.apply(window)
+            val decor = checkNotNull(window.peekDecorView())
+            if (Build.VERSION.SDK_INT < 30 || decor.windowInsetsController == null) {
+                check(decor.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN != 0)
+                check(decor.systemUiVisibility and View.SYSTEM_UI_FLAG_HIDE_NAVIGATION != 0)
+            }
+            dialog.setContentView(FrameLayout(targetContext))
+            MirrorImmersive.apply(window)
+            check(window.peekDecorView() === decor)
+        }
+        checks.add("Immersive mode before and after setContentView creates decor without crashing")
     }
 
     private fun verifyBridge() {
@@ -96,7 +125,7 @@ class NativeGestureInstrumentation : Instrumentation() {
 
     override fun callActivityOnStart(activity: Activity) {
         if (activity is NativeExhibitionActivity && !arguments.getString("fixtureUrl").isNullOrEmpty()) {
-            // x86's vendor RTC cannot load libbytenn. Replace its ready boundary only;
+            // Keep this isolated UI fixture independent of camera hardware;
             // never claim that this emulator verified a physical camera or cloud video.
             setField(activity, "cameraReady", true)
         }
@@ -119,6 +148,33 @@ class NativeGestureInstrumentation : Instrumentation() {
         val activity = waitForMonitorWithTimeout(monitor, 15_000) as? NativeExhibitionActivity
             ?: error("Legacy launcher did not route to NativeExhibitionActivity")
         try {
+            if (mode == "local") {
+                await("bound Activity with old local selection", 30_000) {
+                    main { field<Boolean>(activity, "cameraReady") && field<JSONObject?>(activity, "state") != null &&
+                        field<String?>(activity, "mirrorId") != null }
+                }
+                verifyMaterialCatalog(activity)
+                // Old installations must become off, without silently switching to a remote upload.
+                repeat(5) {
+                    main {
+                        check(field<String>(activity, "gestureMode") == "off") { "Old local selection was not disabled" }
+                        check(!field<Boolean>(activity, "gestureCaptureEnabled")) { "Disabled recognition enabled camera sampling" }
+                        check(field<NativeHandTracker?>(activity, "handTracker") == null) { "Disabled recognition started MediaPipe" }
+                        check(field<NativeGestureBridge?>(activity, "gestureBridge") == null) { "Disabled recognition started a detector bridge" }
+                        check(field<NativeRemoteGestures?>(activity, "remoteGestures") == null) { "Old local selection started remote inference" }
+                        check(field<JSONObject?>(activity, "gestureState") == null) { "Disabled recognition received an inference result" }
+                        check(field<NativeXmaxController>(activity, "controller").acquireLocalFrameReceiver?.invoke() == null) {
+                            "Disabled recognition accepted an analysis frame"
+                        }
+                    }
+                    Thread.sleep(110)
+                }
+                val final = status(controlUrl)
+                check(final.getJSONArray("commands").length() == 0) { "Disabled recognition submitted a select request" }
+                check(final.getJSONArray("sessionAttempts").length() == 0) { "Disabled recognition attempted paid generation" }
+                checks.add("Old local selection becomes off: no sampling, local detector, remote inference or gesture commands")
+                return
+            }
             await("bound Activity and $mode gesture runtime", 30_000) {
                 main { field<Boolean>(activity, "cameraReady") && field<JSONObject?>(activity, "gestureState") != null }
             }
@@ -130,34 +186,19 @@ class NativeGestureInstrumentation : Instrumentation() {
                 if (wait > 0) Thread.sleep(wait)
                 val timestamp = SystemClock.elapsedRealtime()
                 lastFeed = timestamp
-                if (mode == "local") {
-                    val tracked = (0 until hand.length()).map { index ->
-                        val item = hand.getJSONObject(index)
-                        val points = item.getJSONArray("landmarks")
-                        NativeTrackedHand(item.getString("handedness"), (0 until points.length()).map { point ->
-                            val value = points.getJSONObject(point)
-                            NativeHandPoint((1 - value.getDouble("x")).toFloat(), value.getDouble("y").toFloat(), 0f)
-                        })
-                    }
-                    main {
-                        val tracker = field<NativeHandTracker>(activity, "handTracker")
-                        field<(NativeHandResult) -> Unit>(tracker, "onResult")(
-                            NativeHandResult(tracked, timestamp, 1, 1, 480, 480))
-                    }
-                } else {
-                    // The fixture replaces ML output, then runs the real server detector and epoch gates.
-                    control(controlUrl, JSONObject().put("gestureHands", hand))
-                    val released = java.util.concurrent.atomic.AtomicBoolean()
-                    val frame = NativeCameraFrame(Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888), timestamp, 1, { true }) { released.set(true) }
-                    val receiver = main { field<NativeXmaxController>(activity, "controller").onLocalFrame }
-                    check(receiver != null)
-                    receiver(frame)
-                    // A frame crossing a busy/config boundary is intentionally dropped, never replayed.
-                    await("remote camera ownership returned", 3_000) { released.get() }
-                }
-                if (mode == "local") await("$mode frame delivery", 3_000) {
-                    main { field<JSONObject?>(activity, "gestureState")?.optLong("timestamp") == timestamp }
-                }
+                // The fixture replaces ML output, then runs the real server detector and epoch gates.
+                control(controlUrl, JSONObject().put("gestureHands", hand))
+                val receiver = main { field<NativeXmaxController>(activity, "controller").acquireLocalFrameReceiver?.invoke() }
+                    ?: return // Match the SDK: busy/unready consumers reject before any pixel copy.
+                val released = java.util.concurrent.atomic.AtomicBoolean()
+                val frame = NativeGestureFrame(64, 64, 0, false,
+                    ByteBuffer.wrap(ByteArray(64 * 64) { 16 }),
+                    ByteBuffer.wrap(ByteArray(32 * 32) { 128.toByte() }),
+                    ByteBuffer.wrap(ByteArray(32 * 32) { 128.toByte() }),
+                    64, 32, 32, timestamp, 1, { true }) { released.set(true) }
+                receiver(frame)
+                // A frame crossing a busy/config boundary is intentionally dropped, never replayed.
+                await("remote camera ownership returned", 3_000) { released.get() }
             }
             fun observe(duration: Long, hand: JSONArray = hands()) {
                 val end = SystemClock.elapsedRealtime() + duration

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createGestureInference, type GestureInferenceResult } from '../server/gestureInference';
+import type { RemoteGestureI420Metadata } from '../shared/remoteGestures';
 
 const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock('node:child_process', () => ({ spawn }));
@@ -15,14 +16,67 @@ function worker(ready = true) {
   };
   process.stdin = new PassThrough(); process.stdout = new PassThrough(); process.stderr = new PassThrough();
   process.kill = vi.fn(() => { queueMicrotask(() => process.emit('exit', 0)); return true; });
-  const requests: Array<{ id: number; timestamp: number; jpeg: string }> = [];
-  process.stdin.on('data', value => requests.push(JSON.parse(value.toString())));
+  type Request = { id: number; timestamp: number; jpeg?: string; settings: typeof settings & { inputLongEdge?: number };
+    frame?: RemoteGestureI420Metadata & { byteLength: number }; bytes?: Buffer };
+  const requests: Request[] = [];
+  let input = Buffer.alloc(0), raw: Request | undefined;
+  process.stdin.on('data', value => {
+    input = Buffer.concat([input, value]);
+    while (input.length) {
+      if (raw) {
+        const size = raw.frame!.byteLength;
+        if (input.length < size) return;
+        requests.push({ ...raw, bytes: input.subarray(0, size) }); input = input.subarray(size); raw = undefined;
+      } else {
+        const newline = input.indexOf(10);
+        if (newline < 0) return;
+        const request = JSON.parse(input.subarray(0, newline).toString()) as Request;
+        input = input.subarray(newline + 1);
+        if (request.frame) raw = request; else requests.push(request);
+      }
+    }
+  });
   spawn.mockImplementationOnce(() => { if (ready) queueMicrotask(() => process.stdout.write('{"type":"ready"}\n')); return process; });
   return { process, requests, reply(value: unknown) { process.stdout.write(`${JSON.stringify(value)}\n`); } };
 }
 afterEach(() => { spawn.mockReset(); vi.unstubAllEnvs(); });
 
 describe('Linux gesture inference process lifecycle', () => {
+  it('sends raw full-size I420 bytes through the private pipe without base64 and keeps frame boundaries', async () => {
+    const child = worker(); const runtime = await createGestureInference();
+    const frame: RemoteGestureI420Metadata = { format: 'i420-v1', width: 1920, height: 1080, rotation: 90, mirrored: true };
+    const pixels = Buffer.alloc(1920 * 1080 * 3 / 2, 10); // Newlines inside pixels must not split protocol messages.
+    const first = runtime.infer(pixels, 1, { ...settings, inputLongEdge: 480 }, frame);
+    expect(child.requests).toHaveLength(1);
+    expect(child.requests[0]).toMatchObject({ id: 1, frame: { ...frame, byteLength: pixels.length }, settings: { inputLongEdge: 480 } });
+    expect(child.requests[0].jpeg).toBeUndefined();
+    expect(child.requests[0].bytes?.equals(pixels)).toBe(true);
+    await expect(runtime.infer(pixels, 2, settings, frame)).rejects.toMatchObject({ code: 'INFERENCE_BUSY' });
+    child.reply({ type: 'result', id: 1, result }); await first;
+    const second = runtime.infer(jpeg, 2, settings);
+    expect(child.requests[1].jpeg).toBe(jpeg.toString('base64'));
+    child.reply({ type: 'result', id: 2, result }); await second;
+    await runtime.close();
+  });
+
+  it('rejects malformed raw geometry, exact lengths and sampling limits before touching the pipe', async () => {
+    const child = worker(); const runtime = await createGestureInference();
+    const frame: RemoteGestureI420Metadata = { format: 'i420-v1', width: 3, height: 3, rotation: 0, mirrored: false };
+    const pixels = Buffer.alloc(17); // Odd dimensions use ceil(width/2) × ceil(height/2) chroma planes.
+    for (const changed of [{ width: 0 }, { height: 4097 }, { width: 4096, height: 4096 },
+      { width: 1.5 }, { rotation: 45 }, { mirrored: 'false' }, { format: 'nv12' }]) {
+      await expect(runtime.infer(pixels, 1, settings, { ...frame, ...changed } as RemoteGestureI420Metadata))
+        .rejects.toMatchObject({ code: 'INVALID_IMAGE' });
+    }
+    for (const size of [0, 16, 18, 16 * 1024 * 1024 + 1])
+      await expect(runtime.infer(Buffer.alloc(size), 1, settings, frame)).rejects.toMatchObject({ code: 'INVALID_IMAGE' });
+    await expect(runtime.infer(pixels, 1, { ...settings, inputLongEdge: 1080 }, frame)).rejects.toMatchObject({ code: 'INVALID_SETTINGS' });
+    expect(child.requests).toHaveLength(0);
+    const accepted = runtime.infer(pixels, 1, settings, frame);
+    child.reply({ type: 'result', id: 1, result }); await accepted;
+    await runtime.close();
+  });
+
   it('starts with the full pose model and supports explicit model path overrides', async () => {
     worker();
     const defaults = await createGestureInference();

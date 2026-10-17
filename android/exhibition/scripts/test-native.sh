@@ -129,7 +129,7 @@ def main():
              SOURCE / 'UrlPolicy.java', TESTS / 'UrlPolicyTest.java'])
         run([java, '-cp', api_classes, 'ai.openbuy.exhibition.UrlPolicyTest'], timeout=60)
         run(compiler + ['-classpath', api_classpath, '-d', api_classes,
-                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeMaterialCatalog.kt', TESTS / 'ExhibitionApiContractTest.kt'])
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeGestureFrame.kt', SOURCE / 'NativeMaterialCatalog.kt', TESTS / 'ExhibitionApiContractTest.kt'])
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',
              '-cp', api_classpath, 'ai.openbuy.exhibition.ExhibitionApiContractTestKt'], timeout=60)
 
@@ -140,11 +140,12 @@ def main():
         print('Run bounded remote gesture uploads against an isolated HTTP peer.', flush=True)
         run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', upload_classes, SOURCE / 'UrlPolicy.java'])
         run(compiler + ['-classpath', upload_classpath, '-d', upload_classes,
-                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeCameraFrame.kt', SOURCE / 'NativeGestureSampling.kt', SOURCE / 'NativeRemoteGestures.kt',
-                        TESTS / 'NativeRemoteGesturesTest.kt', TESTS / 'NativeGestureSamplingTest.kt'] + upload_stubs)
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeGestureFrame.kt', SOURCE / 'NativeCameraFrame.kt', SOURCE / 'NativeGestureSampling.kt', SOURCE / 'NativeRemoteGestures.kt',
+                        TESTS / 'NativeRemoteGesturesTest.kt', TESTS / 'NativeGestureSamplingTest.kt', TESTS / 'NativeGestureFrameTest.kt'] + upload_stubs)
         run([java, '-Dsun.net.http.allowRestrictedHeaders=true', '--add-modules', 'jdk.httpserver',
              '-cp', upload_classpath, 'ai.openbuy.exhibition.NativeRemoteGesturesTestKt'], timeout=60)
         run([java, '-cp', upload_classpath, 'ai.openbuy.exhibition.NativeGestureSamplingTestKt'], timeout=60)
+        run([java, '-cp', upload_classpath, 'ai.openbuy.exhibition.NativeGestureFrameTestKt'], timeout=60)
 
         tls_dir = temporary / 'tls'
         tls_classes = tls_dir / 'classes'
@@ -160,7 +161,7 @@ def main():
                  '-validity', '2', '-noprompt'], timeout=60)
         run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', tls_classes, SOURCE / 'UrlPolicy.java'])
         run(compiler + ['-classpath', tls_classpath, '-d', tls_classes,
-                        SOURCE / 'ExhibitionApi.kt', TESTS / 'ExhibitionLanTlsTest.kt'])
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeGestureFrame.kt', TESTS / 'ExhibitionLanTlsTest.kt'])
         run([java, '--add-modules', 'jdk.httpserver',
              f'-Dfixture.trustedKeystore={tls_dir / "trusted.jks"}',
              f'-Dfixture.untrustedKeystore={tls_dir / "untrusted.jks"}',
@@ -194,9 +195,53 @@ def main():
         print('Run native camera identity and selection fixtures.', flush=True)
         run(compiler + ['-classpath', camera_classpath, '-d', camera_classes,
                         SOURCE / 'NativeCameraSelection.kt', SOURCE / 'NativeCameraCaptureSelection.kt',
-                        TESTS / 'NativeCameraSelectionTest.kt', TESTS / 'NativeCameraCaptureSelectionTest.kt'])
+                        SOURCE / 'NativeCameraCompatibility.kt', SOURCE / 'NativeCameraPreviewRecovery.kt',
+                        TESTS / 'NativeCameraSelectionTest.kt', TESTS / 'NativeCameraCaptureSelectionTest.kt',
+                        TESTS / 'NativeCameraCompatibilityTest.kt', TESTS / 'NativeCameraPreviewRecoveryTest.kt'])
         run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraSelectionTestKt'], timeout=60)
         run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraCaptureSelectionTestKt'], timeout=60)
+        run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraCompatibilityTestKt'], timeout=60)
+        run([java, '-cp', camera_classpath, 'ai.openbuy.exhibition.NativeCameraPreviewRecoveryTestKt'], timeout=60)
+
+        controller_classes = temporary / 'controller/classes'
+        controller_classes.mkdir(parents=True)
+        controller_classpath = os.pathsep.join(map(str, [controller_classes, stdlib, coroutines]))
+        controller_stubs = sorted((TESTS / 'controller-stubs').rglob('*.kt'))
+        sdk_source = PROJECT / 'vendor/xmax-sdk/src/main/java/ai/xmax/sdk'
+        sdk_models = [
+            'core/realtime/RealtimeModel.kt', 'service/realtime/RealtimeVideoFormat.kt',
+            'service/realtime/RealtimeState.kt', 'foundation/media/camera/CameraPosition.kt',
+            'foundation/media/camera/RealtimeCameraCaptureFormat.kt',
+            'foundation/media/camera/RealtimeCameraCaptureInfo.kt',
+            'foundation/media/camera/RealtimeCameraDevice.kt',
+            'foundation/media/video/VideoContentMode.kt',
+            'foundation/media/video/RealtimeVideoFrame.kt',
+            'foundation/media/video/RealtimeLocalVideoFrameListener.kt',
+        ]
+        print('Run actual NativeXmaxController capture and model format boundary fixtures.', flush=True)
+        run(compiler + ['-classpath', controller_classpath, '-d', controller_classes,
+                        SOURCE / 'NativeXmaxController.kt', SOURCE / 'NativeXmaxModel.kt',
+                        SOURCE / 'NativeCameraSelection.kt', SOURCE / 'NativeCameraCaptureSelection.kt',
+                        SOURCE / 'NativeGestureFrame.kt', SOURCE / 'NativeGestureSampling.kt',
+                        TESTS / 'NativeXmaxControllerCaptureTest.kt',
+                        TESTS / 'stubs/ai/openbuy/exhibition/FixtureMainDispatcherFactory.kt']
+            + [sdk_source / path for path in sdk_models] + controller_stubs)
+        shutil.copytree(TESTS / 'stubs/META-INF', controller_classes / 'META-INF', dirs_exist_ok=True)
+        run([java, '-cp', controller_classpath, 'ai.openbuy.exhibition.NativeXmaxControllerCaptureTestKt'], timeout=60)
+
+        computer_classes = temporary / 'computer-video/classes'
+        computer_classes.mkdir(parents=True)
+        computer_classpath = os.pathsep.join(map(str, [computer_classes, stdlib, json_jar]))
+        computer_stubs = sorted((TESTS / 'computer-video-stubs').rglob('*.kt'))
+        print('Run actual LAN video receiver epoch, render readiness and cleanup fixtures.', flush=True)
+        run(compiler + ['-nowarn', '-classpath', computer_classpath, '-d', computer_classes,
+                        SOURCE / 'NativeComputerVideoReceiver.kt', SOURCE / 'NativeComputerVideoDecoderFactory.kt',
+                        SOURCE / 'NativeComputerPresentation.kt', TESTS / 'NativeComputerPresentationTest.kt',
+                        TESTS / 'NativeComputerVideoReceiverTest.kt', TESTS / 'NativeComputerVideoDecoderFactoryTest.kt']
+            + computer_stubs)
+        run([java, '-cp', computer_classpath, 'ai.openbuy.exhibition.NativeComputerVideoReceiverTestKt'], timeout=60)
+        run([java, '-cp', computer_classpath, 'ai.openbuy.exhibition.NativeComputerVideoDecoderFactoryTestKt'], timeout=60)
+        run([java, '-cp', computer_classpath, 'ai.openbuy.exhibition.NativeComputerPresentationTestKt'], timeout=60)
 
         pixels_classes = temporary / 'camera-pixels/classes'
         pixels_classes.mkdir(parents=True)
@@ -226,6 +271,32 @@ def main():
                         TESTS / 'NativeGestureFrameGateTest.kt', TESTS / 'NativeGestureReleaseFenceTest.kt'])
         run([java, '-cp', gesture_classpath, 'ai.openbuy.exhibition.NativeGestureFrameGateTestKt'], timeout=60)
         run([java, '-cp', gesture_classpath, 'ai.openbuy.exhibition.NativeGestureReleaseFenceTestKt'], timeout=60)
+
+        trajectory_classes = temporary / 'trajectory/classes'
+        trajectory_classes.mkdir(parents=True)
+        trajectory_classpath = os.pathsep.join(map(str, [trajectory_classes, stdlib]))
+        trajectory_source = PROJECT / 'vendor/xmax-sdk/src/main/java/ai/xmax/sdk/render/trajectory'
+        trajectory_stubs = sorted((TESTS / 'trajectory-stubs').rglob('*.kt'))
+        print('Run actual SDK trajectory allocation, idle drawing, fade and visibility fixtures.', flush=True)
+        run(compiler + ['-nowarn', '-classpath', trajectory_classpath, '-d', trajectory_classes,
+                        trajectory_source / 'TrajectoryOverlayView.kt',
+                        trajectory_source / 'DefaultTrajectoryEffectRenderer.kt',
+                        trajectory_source / 'TrajectoryEffectRendering.kt',
+                        TESTS / 'TrajectoryRenderLifecycleTest.kt'] + trajectory_stubs)
+        run([java, '-cp', trajectory_classpath, 'ai.xmax.sdk.TrajectoryRenderLifecycleTestKt'], timeout=60)
+
+        render_classes = temporary / 'video-render/classes'
+        render_classes.mkdir(parents=True)
+        render_classpath = os.pathsep.join(map(str, [render_classes, stdlib]))
+        render_source = PROJECT / 'vendor/xmax-sdk/src/main/java/ai/xmax/sdk/render/video'
+        render_stubs = sorted((TESTS / 'render-stubs').rglob('*.kt'))
+        print('Run actual SDK local SurfaceView and remote TextureView lifecycle fixtures.', flush=True)
+        run(compiler + ['-nowarn', '-classpath', render_classpath, '-d', render_classes,
+                        render_source / 'CameraRenderSurfaceView.kt', render_source / 'VideoRenderSize.kt',
+                        render_source / 'FrameReportingTextureView.kt', render_source / 'VideoRenderBinding.kt',
+                        render_source / 'VideoRenderRegistry.kt', render_source / 'XmaxVideoView.kt',
+                        render_source / 'XmaxRealtimeVideoView.kt', TESTS / 'VideoRenderLifecycleTest.kt'] + render_stubs)
+        run([java, '-cp', render_classpath, 'ai.xmax.sdk.VideoRenderLifecycleTestKt'], timeout=60)
 
         ui_classes = temporary / 'mirror-ui/classes'
         ui_classes.mkdir(parents=True)
@@ -271,7 +342,7 @@ def main():
         print('Run isolated NativeGenerationRound flow fixtures.', flush=True)
         run([javac, '-encoding', 'UTF-8', '--release', '17', '-d', flow_classes, SOURCE / 'UrlPolicy.java'])
         run(compiler + ['-classpath', flow_classpath, '-d', flow_classes,
-                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeGenerationRound.kt',
+                        SOURCE / 'ExhibitionApi.kt', SOURCE / 'NativeGestureFrame.kt', SOURCE / 'NativeGenerationRound.kt', SOURCE / 'NativeXmaxModel.kt',
                         SOURCE / 'NativeCameraSelection.kt', SOURCE / 'NativeCameraCaptureSelection.kt',
                         TESTS / 'NativeRoundFlowTest.kt'] + stub_sources)
         shutil.copytree(stubs / 'META-INF', flow_classes / 'META-INF', dirs_exist_ok=True)

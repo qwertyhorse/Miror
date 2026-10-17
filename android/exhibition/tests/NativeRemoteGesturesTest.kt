@@ -1,6 +1,6 @@
 package ai.openbuy.exhibition
 
-import android.graphics.Bitmap
+import java.nio.ByteBuffer
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.*
@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-/** Actual uploader and HTTP transport; only Bitmap pixels and the disposable Linux peer are substituted. */
+/** Actual raw uploader and HTTP transport against a disposable Linux peer. */
 fun main() = runBlocking {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     val workers = Executors.newCachedThreadPool()
@@ -42,11 +42,15 @@ fun main() = runBlocking {
             check(exchange.requestHeaders.getFirst("Cache-Control") == "no-store")
             val route = exchange.requestURI.path.removePrefix(prefix)
             if (route == "frame") {
-                check(exchange.requestHeaders.getFirst("Content-Type") == "image/jpeg")
+                check(exchange.requestHeaders.getFirst("Content-Type") == "application/x-openbuy-i420")
                 check(exchange.requestHeaders.getFirst("X-OpenBuy-Terminal-Id") == "terminal-fixture")
                 check(exchange.requestHeaders.getFirst("X-OpenBuy-Terminal-Token") == "fixture-secret")
-                check(exchange.requestBody.readBytes().isNotEmpty())
                 fun header(name: String) = exchange.requestHeaders.getFirst("X-OpenBuy-Gesture-$name")
+                check(header("Width") == "5" && header("Height") == "3")
+                check(header("Rotation") == "90" && header("Mirrored") == "true")
+                val expected = ByteArray(15) { it.toByte() } + ByteArray(6) { (40 + it).toByte() } + ByteArray(6) { (80 + it).toByte() }
+                check(exchange.requestHeaders.getFirst("Content-Length") == expected.size.toString())
+                check(exchange.requestBody.readBytes().contentEquals(expected))
                 val metadata = NativeGestureUpload(header("Session"), header("Epoch").toLong(), header("Seq").toLong(),
                     header("Time").toLong(), header("Blocked").toBooleanStrict())
                 uploads.add(metadata)
@@ -58,7 +62,7 @@ fun main() = runBlocking {
                 val body = JSONObject(exchange.requestBody.bufferedReader().use { it.readText() })
                 check(body.getString("terminalId") == "terminal-fixture" && body.getString("terminalToken") == "fixture-secret")
                 when (route) {
-                    "open" -> exchange.replyGesture(JSONObject().put("sessionId", "session-${opens.incrementAndGet()}").put("epoch", 0))
+                    "open" -> exchange.replyGesture(JSONObject().put("sessionId", "session-${opens.incrementAndGet()}").put("epoch", 0).put("frameFormat", "i420-v1"))
                     "control" -> {
                         controls.add(body)
                         exchange.replyGesture(JSONObject(body.toString()).put("event", "open_palm").put("needsRelease", true))
@@ -74,28 +78,34 @@ fun main() = runBlocking {
     val api = ExhibitionApi("http://127.0.0.1:${server.address.port}/v1.1/exhibition/screen", "terminal-fixture", "fixture-secret", "test")
     val remote = NativeRemoteGestures(api.gestures("default"), { states.add(JSONObject(it.toString())) }, errors::add,
         now::get, callbacks)
-    val frames = CopyOnWriteArrayList<NativeCameraFrame>()
+    val frames = CopyOnWriteArrayList<NativeGestureFrame>()
     val recycled = CopyOnWriteArrayList<AtomicInteger>()
-    fun frame(generation: Long = 1, current: () -> Boolean = { true }): NativeCameraFrame {
+    fun frame(generation: Long = 1, current: () -> Boolean = { true }): NativeGestureFrame {
         now.addAndGet(110)
         val releases = AtomicInteger()
-        return NativeCameraFrame(Bitmap(640, 360), now.get(), generation, current) { releases.incrementAndGet() }
+        return NativeGestureFrame(5, 3, 90, true,
+            ByteBuffer.wrap(ByteArray(15) { it.toByte() }), ByteBuffer.wrap(ByteArray(6) { (40 + it).toByte() }),
+            ByteBuffer.wrap(ByteArray(6) { (80 + it).toByte() }), 5, 3, 3,
+            now.get(), generation, current) { releases.incrementAndGet() }
             .also { frames.add(it); recycled.add(releases) }
     }
     suspend fun configure(blocked: Boolean, key: String = "scope") = withContext(callbacks) { remote.configure(true, blocked, key) }
     fun frameStates() = states.count { it.has("seq") }
     try {
+        verify(!remote.canAcceptFrame(), "Disabled/unready upload never asks SDK to copy a frame")
         configure(false)
         await("open and control") { states.isNotEmpty() }
+        verify(remote.canAcceptFrame(), "A ready session accepts its first raw camera frame")
         verify(opens.get() == 1 && controls.last().getBoolean("reset"), "A new session requires a release fence")
         verify(states.all { it.isNull("event") }, "Control snapshots cannot dispatch commands")
         val firstResponse = CountDownLatch(1)
         frameAction.set { exchange, response -> firstResponse.await(3, TimeUnit.SECONDS); exchange.replyGesture(response) }
         remote.submit(frame())
         await("first upload") { uploads.size == 1 }
+        verify(!remote.canAcceptFrame(), "One upload blocks SDK copying before another frame exists")
         val dropped = frame()
         remote.submit(dropped)
-        verify(dropped.bitmap.recycleCount.get() == 1, "Busy uploader drops and releases the next frame")
+        verify(!dropped.isCurrent() && recycled.last().get() == 1, "Busy uploader drops and releases the next frame")
         verify(uploads.size == 1, "No pending image is uploaded behind an in-flight frame")
         configure(true)
         await("cancelled frame release") { recycled[0].get() == 1 }
@@ -122,7 +132,7 @@ fun main() = runBlocking {
         verify(frameStates() == before, "An 800 ms old frame never reaches the Activity")
         val outdated = frame(0)
         remote.submit(outdated)
-        verify(outdated.bitmap.recycleCount.get() == 1 && uploads.size == 3, "Earlier camera generations are discarded")
+        verify(!outdated.isCurrent() && recycled.last().get() == 1 && uploads.size == 3, "Earlier camera generations are discarded")
 
         frameAction.set { exchange, _ -> exchange.replyGesture(JSONObject().put("code", "GESTURE_BUSY"), 409) }
         remote.submit(frame())
@@ -153,19 +163,21 @@ fun main() = runBlocking {
         await("all frame ownership returned") { recycled.all { it.get() == 1 } }
         delay(80)
         verify(frameStates() == finalBefore, "Closing cannot deliver a late gesture")
-        verify(frames.all { it.bitmap.recycleCount.get() == 1 }, "Every accepted and rejected bitmap is recycled exactly once")
+        verify(recycled.all { it.get() == 1 }, "Every accepted and rejected raw frame releases exactly once")
         await("session close") { closes.get() >= 2 }
         verify(failures.isEmpty(), "All real HTTP headers, credentials, paths and bodies match the contract")
         val countBeforeTimeout = uploads.size
         frameAction.set { exchange, response -> Thread.sleep(2_000); exchange.replyGesture(response) }
         val started = System.nanoTime()
         try {
-            api.gestures("default").frame(NativeGestureUpload("session-timeout", 1, 0, now.get(), true), byteArrayOf(1))
+            api.gestures("default").frame(NativeGestureUpload("session-timeout", 1, 0, now.get(), true), frame())
             error("Expected bounded frame timeout")
         } catch (_: ExhibitionApiException) { /* Actual OkHttp total call timeout, no retries. */ }
         val elapsed = (System.nanoTime() - started) / 1_000_000
         verify(elapsed in 800..1_800, "Frame networking ends near the 1200 ms hard deadline: $elapsed ms")
         verify(uploads.size == countBeforeTimeout + 1, "Timed-out POST is not automatically retransmitted")
+        frames.last().close()
+        verify(recycled.all { it.get() == 1 }, "Timeout caller releases raw ownership once")
         println("NativeRemoteGestures: $assertions assertions passed; disposable HTTP peer only.")
     } finally {
         withContext(callbacks) { remote.close() }

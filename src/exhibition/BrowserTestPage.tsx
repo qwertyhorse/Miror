@@ -34,7 +34,6 @@ class BrowserTestClient {
   private attached = false;
   private disposed = false;
   private disposal?: ReturnType<typeof setTimeout>;
-  private expiry?: ReturnType<typeof setTimeout>;
   private closing?: Promise<void>;
   constructor(readonly sourceId: string, readonly testId: string | null) {}
   getSnapshot = () => this.snapshot;
@@ -94,7 +93,8 @@ class BrowserTestClient {
       if (this.disposed) { void this.closeRequest(id, true).catch(() => {}); return; }
       this.remember(session);
       this.publish({ phase: 'ready', session, error: '' });
-      this.expiry = setTimeout(() => { void this.close(); }, Math.max(0, session.expiresAt - Date.now()));
+      // Mirror API activity renews the server lease. The initial deadline must
+      // not end a page that is still being used.
     } catch (cause) {
       if (!this.disposed) this.publish({ phase: 'error', error: cause instanceof Error ? cause.message : '测试暂不可用，请重新测试。' });
     }
@@ -112,7 +112,7 @@ class BrowserTestClient {
     this.attached = false;
     // React's StrictMode probe immediately reattaches this same client.
     this.disposal = setTimeout(() => {
-      this.disposed = true; clearTimeout(this.expiry);
+      this.disposed = true;
       const session = this.snapshot.session;
       if (session && this.snapshot.phase !== 'closed') void this.closeRequest(session.mirror.id, true).catch(() => {});
     }, 0);
@@ -121,7 +121,6 @@ class BrowserTestClient {
     if (this.closing) return this.closing;
     const session = this.snapshot.session;
     if (!session || this.snapshot.phase === 'closed') return Promise.resolve();
-    clearTimeout(this.expiry);
     // Unmount the capture/RTC owner immediately, including when server cleanup needs a retry.
     this.publish({ phase: 'closing', error: '' });
     this.closing = this.closeRequest(session.mirror.id).then(() => {

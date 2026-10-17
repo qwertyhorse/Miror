@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
+import okio.BufferedSink
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -77,15 +78,29 @@ class ExhibitionApi(
         return resolved.toASCIIString()
     }
 
-    suspend fun connectTerminal(cameraReport: JSONObject? = null): JSONObject = json(
+    suspend fun connectTerminal(cameraReport: JSONObject? = null, cameraCapable: Boolean = true): JSONObject = json(
         "/exhibition/terminals/connect", "POST", JSONObject()
             .put("terminalId", terminalId).put("token", terminalToken)
             .put("label", label).put("platform", "android")
-            .put("cameraCapabilities", JSONObject().put("version", 1))
+            .apply { if (cameraCapable) put("cameraCapabilities", JSONObject().put("version", 1)) }
             .apply { cameraReport?.let { put("cameraReport", it) } },
     )
 
     suspend fun state(mirrorId: String): JSONObject = json(mirrorPath(mirrorId))
+
+    suspend fun pollComputerDisplay(mirrorId: String, receiverId: String, sessionId: String?, after: Long): JSONObject =
+        json("${mirrorPath(mirrorId)}/display/receiver/poll", "POST", JSONObject()
+            .put("terminalId", terminalId).put("terminalToken", terminalToken)
+            .put("receiverId", receiverId).put("after", after)
+            .put("capabilities", org.json.JSONArray().put("page").put("page-rendered"))
+            .apply { sessionId?.let { put("sessionId", it) } }, 5_000)
+
+    suspend fun signalComputerDisplay(mirrorId: String, receiverId: String, sessionId: String,
+        kind: String, payload: JSONObject): JSONObject =
+        json("${mirrorPath(mirrorId)}/display/receiver/signal", "POST", JSONObject()
+            .put("terminalId", terminalId).put("terminalToken", terminalToken)
+            .put("receiverId", receiverId).put("sessionId", sessionId)
+            .put("kind", kind).put("payload", payload), 5_000)
 
     internal fun gestures(mirrorId: String): NativeGestureTransport {
         val path = "${mirrorPath(mirrorId)}/gestures"
@@ -95,9 +110,12 @@ class ExhibitionApi(
             override suspend fun control(sessionId: String, epoch: Long, blocked: Boolean, reset: Boolean) =
                 gestureRequest("$path/control", credentials().put("sessionId", sessionId)
                     .put("epoch", epoch).put("blocked", blocked).put("reset", reset), timeoutMs = 1_200)
-            override suspend fun frame(metadata: NativeGestureUpload, jpeg: ByteArray): JSONObject {
-                require(jpeg.isNotEmpty() && jpeg.size <= 256 * 1024) { "手势采样图片过大。" }
-                return gestureRequest("$path/frame", jpeg = jpeg, headers = mapOf(
+            override suspend fun frame(metadata: NativeGestureUpload, frame: NativeGestureFrame): JSONObject {
+                return gestureRequest("$path/frame", frame = frame, headers = mapOf(
+                    "X-OpenBuy-Gesture-Width" to frame.width.toString(),
+                    "X-OpenBuy-Gesture-Height" to frame.height.toString(),
+                    "X-OpenBuy-Gesture-Rotation" to frame.rotationDegrees.toString(),
+                    "X-OpenBuy-Gesture-Mirrored" to frame.mirrored.toString(),
                     "X-OpenBuy-Terminal-Id" to terminalId, "X-OpenBuy-Terminal-Token" to terminalToken,
                     "X-OpenBuy-Gesture-Session" to metadata.sessionId,
                     "X-OpenBuy-Gesture-Epoch" to metadata.epoch.toString(),
@@ -113,14 +131,28 @@ class ExhibitionApi(
     }
 
     private suspend fun gestureRequest(
-        path: String, json: JSONObject? = null, jpeg: ByteArray? = null,
+        path: String, json: JSONObject? = null, frame: NativeGestureFrame? = null,
         headers: Map<String, String> = emptyMap(), timeoutMs: Long,
     ): JSONObject = withContext(Dispatchers.IO) {
         suspendCancellableCoroutine { continuation ->
-            val bytes = jpeg ?: requireNotNull(json).toString().toByteArray(Charsets.UTF_8)
-            val mime = if (jpeg != null) "image/jpeg" else "application/json; charset=utf-8"
+            val body = if (frame == null) RequestBody.create(MediaType.parse("application/json; charset=utf-8"),
+                requireNotNull(json).toString().toByteArray(Charsets.UTF_8)) else object : RequestBody() {
+                override fun contentType() = MediaType.parse("application/x-openbuy-i420")
+                override fun contentLength() = frame.contentLength
+                override fun writeTo(sink: BufferedSink) {
+                    for (plane in frame.planes()) {
+                        while (plane.hasRemaining()) {
+                            if (!continuation.isActive || !frame.isCurrent()) throw IOException("Gesture frame expired")
+                            // Bounded views feed Okio's existing buffer without joining/copying the three planes.
+                            val chunk = plane.slice().apply { limit(minOf(remaining(), 8192)) }
+                            val written = sink.write(chunk)
+                            plane.position(plane.position() + written)
+                        }
+                    }
+                }
+            }
             val request = Request.Builder().url("$origin$VERSION_PATH/api$path")
-                .post(RequestBody.create(MediaType.parse(mime), bytes))
+                .post(body)
                 .header("Accept", "application/json").header("Cache-Control", "no-store")
                 .header("Origin", origin).header("X-Miror-Protocol", "2")
                 .apply { headers.forEach { (key, value) -> header(key, value) } }.build()
@@ -181,6 +213,7 @@ class ExhibitionApi(
         contentVersion: String = "",
     ): JSONObject = json("${mirrorPath(mirrorId)}/live/session", "POST", JSONObject()
         .put("deviceId", deviceId).put("lookId", lookId)
+        .put("xmaxModelFamily", "x2.1.1-preview")
         .put("generationNumber", generationNumber).put("expectedRevision", revision).put("contentVersion", contentVersion)
         .put("terminalId", terminalId).put("terminalToken", terminalToken), 30_000,
         headers = mapOf("X-Miror-Material" to "catalog-v2"))
@@ -381,6 +414,6 @@ internal data class NativeGestureUpload(
 internal interface NativeGestureTransport {
     suspend fun open(): JSONObject
     suspend fun control(sessionId: String, epoch: Long, blocked: Boolean, reset: Boolean): JSONObject
-    suspend fun frame(metadata: NativeGestureUpload, jpeg: ByteArray): JSONObject
+    suspend fun frame(metadata: NativeGestureUpload, frame: NativeGestureFrame): JSONObject
     suspend fun close(sessionId: String)
 }

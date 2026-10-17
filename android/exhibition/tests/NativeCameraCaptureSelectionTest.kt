@@ -66,5 +66,53 @@ fun main() {
     val measured = NativeCameraCaptureInfo(1920, 1080)
     verify(measured.width == 1920 && measured.height == 1080 && explicit.size == fourK,
         "Measured dimensions remain distinct from the user's requested resolution")
+
+    val timed = device(hd, fullHd, fourK).copy(fpsRanges = listOf(NativeCameraFpsRange(5, 30), NativeCameraFpsRange(30, 30)),
+        minimumFrameDurationsNs = mapOf(hd to 16_666_667L, fullHd to 33_333_333L, fourK to 66_666_667L))
+    fun fps(camera: NativeCameraDevice = timed, size: NativeCameraSize = fullHd) =
+        NativeCameraCaptureSelection.framesPerSecond(camera, size)
+    verify(fps() == 30, "1080p can request 30 only with both AE and selected-size evidence")
+    verify(fps(size = hd) == 30, "Fast small captures are capped at 30")
+    verify(fps(size = fourK) == 15, "Camera-wide 30 fps does not override a 15 fps 4K stream")
+    verify(automatic.resolve(timed) == fullHd && explicit.resolve(timed) == fourK,
+        "Choosing a capture rate does not change Automatic or explicit dimensions")
+    for (rate in listOf(1, 15, 20, 24, 25, 30)) {
+        verify(fps(timed.copy(fpsRanges = listOf(NativeCameraFpsRange(rate, rate)))) == rate,
+            "A valid lower AE ceiling is preserved: $rate")
+    }
+    verify(fps(timed.copy(fpsRanges = listOf(NativeCameraFpsRange(5, 60)))) == 30,
+        "A device that advertises 60 fps is still capped at 30")
+    verify(fps(timed.copy(fpsRanges = listOf(NativeCameraFpsRange(60, 60)))) == 24,
+        "A high-speed-only AE range does not prove support for a normal 30 fps request")
+    verify(fps(timed.copy(fpsRanges = listOf(NativeCameraFpsRange(1, Int.MAX_VALUE)))) == 30,
+        "An extreme AE upper bound cannot overflow or escape the capture cap")
+    verify(fps(device(fullHd)) == 24, "Unknown capabilities retain the compatible 24 fps request")
+    verify(fps(timed.copy(minimumFrameDurationsNs = emptyMap())) == 24,
+        "AE 30 alone does not authorize a faster selected-size request")
+    verify(fps(timed.copy(fpsRanges = emptyList())) == 24,
+        "A selected-size 30 fps duration alone does not authorize an increased AE request")
+    verify(fps(timed.copy(fpsRanges = listOf(NativeCameraFpsRange(5, 20)), minimumFrameDurationsNs = emptyMap())) == 20,
+        "Missing duration data still respects a known lower AE limit")
+    verify(fps(timed.copy(fpsRanges = emptyList()), fourK) == 15,
+        "Missing AE data still respects a known lower selected-size limit")
+    verify(fps(timed.copy(minimumFrameDurationsNs = mapOf(portraitFullHd to 33_333_333L))) == 24,
+        "Duration metadata for transposed dimensions is never borrowed")
+    verify(fps(timed.copy(sizes = emptyList())) == 24,
+        "A stale duration entry for an unadvertised size cannot raise the compatible rate")
+    verify(fps(timed.copy(unavailableSizes = setOf(fullHd))) == 24,
+        "An unavailable firmware mode cannot authorize a faster capture")
+    for (duration in listOf(0L, -1L, Long.MIN_VALUE)) {
+        verify(fps(timed.copy(minimumFrameDurationsNs = mapOf(fullHd to duration))) == 24,
+            "Absent or invalid duration is treated as unknown: $duration")
+    }
+    for ((duration, expected) in listOf(33_333_334L to 30, 33_333_335L to 29, 33_366_667L to 29,
+        40_000_000L to 25, 50_000_000L to 20, 66_666_667L to 15, 1_000_000_000L to 1, Long.MAX_VALUE to 1)) {
+        verify(fps(timed.copy(minimumFrameDurationsNs = mapOf(fullHd to duration))) == expected,
+            "Duration cap uses bounded integer math with nanosecond rounding: $duration")
+    }
+    verify(fps(timed.copy(fpsRanges = listOf(NativeCameraFpsRange(0, 30), NativeCameraFpsRange(-1, 30),
+        NativeCameraFpsRange(20, 10)))) == 24, "Malformed AE ranges cannot authorize a faster capture")
+    verify(fps(timed.copy(fpsRanges = timed.fpsRanges.reversed())) == fps(timed),
+        "AE capability ordering cannot change the selected rate")
     println("Native capture selection passed: $assertions assertions; no camera or cloud session opened.")
 }

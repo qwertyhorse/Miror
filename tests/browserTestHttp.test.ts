@@ -17,6 +17,7 @@ import type { KeyStatus, Provider } from '../server/types.ts';
 import type { ExhibitionMirrorSummary, ExhibitionState } from '../shared/exhibition.ts';
 import { createStaticRequestHandler } from '../scripts/static-web.mjs';
 import { createCameraRequestHandler } from '../scripts/camera-https.mjs';
+import { BROWSER_TEST_IDLE_MS, BROWSER_TEST_TTL_MS } from '../server/browserTests.ts';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -85,6 +86,28 @@ async function start(f: Awaited<ReturnType<typeof fixture>>, test: Awaited<Retur
 }
 
 describe('isolated browser test HTTP context', () => {
+  it('renews the scoped cookie and server lease while active, but does not renew invalid or idle contexts', async () => {
+    const f = await fixture(); const test = await f.create();
+    const end = f.now() + BROWSER_TEST_TTL_MS + BROWSER_TEST_IDLE_MS;
+    while (f.now() < end) {
+      f.advance(BROWSER_TEST_IDLE_MS - 1);
+      const response = await f.request(test.path + '/browser-test', undefined, test);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('set-cookie')).toBe(test.setCookie);
+      expect((await response.json()).expiresAt).toBe(f.now() + BROWSER_TEST_TTL_MS);
+      await f.mirrors.sweepLive();
+    }
+    const invalid = await f.request(test.path + '/browser-test', undefined, { cookie: 'miror_browser_test=' + '0'.repeat(64) });
+    expect(invalid.status).toBe(401); expect(invalid.headers.get('set-cookie')).toBeNull();
+    f.advance(BROWSER_TEST_IDLE_MS);
+    const expired = await f.request(test.path + '/browser-test', undefined, test);
+    expect(expired.status).toBe(410); expect(expired.headers.get('set-cookie')).toBeNull();
+    await f.mirrors.sweepLive();
+    const closed = await f.request(test.path + '/browser-test/close', {}, test);
+    expect(closed.status).toBe(200); expect(closed.headers.get('set-cookie')).toContain('Max-Age=0');
+    expect(f.issue).not.toHaveBeenCalled();
+  });
+
   it('automatically makes an upload available in an already-open test and wakes its change feed', async () => {
     const f = await fixture(); const test = await f.create();
     const queue = createMaterialPreparationQueue(f.mirrors, f.service, f.now);

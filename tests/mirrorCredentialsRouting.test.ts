@@ -64,14 +64,15 @@ async function fixture() {
   }) as typeof fetch;
   const provider = new XmaxProvider(keyDefault, fetcher);
   const providerFactory = vi.fn((key: string, region: XmaxRegion = 'global') => new XmaxProvider(key, fetcher, region));
+  const referenceUpload = vi.fn(async () => 'https://fixture-123.cos.ap-test.myqcloud.com/reference.png');
   const createService = (currentStore = store, currentSecrets = secrets, currentCredentials = credentials) => new TryOnService({
     provider, store: currentStore, secrets: currentSecrets, mirrorCredentials: currentCredentials, providerForApiKey: providerFactory,
-    referenceAssets: new ReferenceAssets(directory), referenceStorage: () => ({ upload: async () => 'https://fixture-123.cos.ap-test.myqcloud.com/reference.png', check: async () => true }),
+    referenceAssets: new ReferenceAssets(directory), referenceStorage: () => ({ upload: referenceUpload, check: async () => true }),
     resolveHost: async () => ['93.184.216.34'],
   });
   const service = createService();
   const save = (mirrorId: string, apiKey: string, region: XmaxRegion = 'global') => service.saveMirrorCredentials(mirrorId, { apiKey, region, expectedRevision: service.mirrorCredentialsStatus(mirrorId).revision });
-  return { directory, database, secrets, store, credentials, requests, issued, provider, providerFactory, service, createService, save };
+  return { directory, database, secrets, store, credentials, requests, issued, provider, providerFactory, referenceUpload, service, createService, save };
 }
 
 async function bindPrepared(service: TryOnService, id: string, mirrorId: string) {
@@ -88,6 +89,93 @@ function legacyRecord(id: string, tokenCipher?: string): SessionRecord {
 }
 
 describe('per-mirror credential routing and persistent session history', () => {
+  it.each([['cn', 'x2.1.1-preview-cn', 'cloud.xmax.22duck.cn'], ['global', 'x2.1.1-preview-us', 'api.xmax.ai']] as const)(
+    'keeps browser native %s model selection and credential restoration on its frozen source', async (region, model, hostname) => {
+      const f = await fixture(); f.save('source', keyA, region);
+      const browser = f.service.forBrowserTest('source');
+      // Session restoration must also work through the wrapper's forCredential contract.
+      browser.options.providerForApiKey = undefined;
+      f.save('source', keyB, region === 'cn' ? 'global' : 'cn');
+      f.provider.setApiKey(keyC);
+
+      const session = await browser.createExhibition({ mirrorId: 'browser-child', lookId: 'commute', deviceId: 'screen-browser-child', name: '浏览器测试',
+        referenceAsset: '/assets/exhibition/commute-cutout.png', mode: 'clothx', sessionNumber: 1, generationNumber: 1,
+        xmaxModelFamily: 'x2.1.1-preview' });
+      expect(session).toMatchObject({ model, providerRegion: region });
+      expect(browser.options.provider.credentialSnapshot!()).toBe(keyA);
+      expect(f.secrets.decrypt(f.store.get(session.id).providerKeyCipher!)).toBe(keyA);
+      expect(f.requests).toEqual([expect.objectContaining({ method: 'POST', hostname, credential: keyA })]);
+
+      await bindPrepared(browser, session.id, 'browser-child');
+      await browser.link(session.id, 'ums-browser-native-fixture');
+      await browser.get(session.id);
+      expect(await browser.stop(session.id)).toMatchObject({ status: 'stopped' });
+      expect(f.requests.every(request => request.hostname === hostname)).toBe(true);
+      expect(f.requests.filter(request => request.path.includes('/temporary-api-key/')).map(request => request.credential)).toEqual([keyA, keyA]);
+      expect(f.requests.filter(request => request.path.includes('/session/')).map(request => request.credential)).toEqual([session.token]);
+    });
+
+  it.each([['cn', 'x2.1.1-preview-cn', 'cloud.xmax.22duck.cn'], ['global', 'x2.1.1-preview-us', 'api.xmax.ai']] as const)(
+    'keeps native 1.0.9 %s issuance, verification and restart cleanup on its negotiated model endpoint', async (region, model, hostname) => {
+      const f = await fixture(); f.save('native', keyA, region);
+      const session = await f.service.createExhibition({ mirrorId: 'native', lookId: 'commute', deviceId: 'screen-native', name: '原生测试',
+        referenceAsset: '/assets/exhibition/commute-cutout.png', mode: 'clothx', sessionNumber: 1, generationNumber: 1,
+        xmaxModelFamily: 'x2.1.1-preview' });
+      expect(session).toMatchObject({ model, providerRegion: region });
+      expect(f.store.get(session.id).model).toBe(model);
+      expect(f.requests).toHaveLength(1);
+      expect(f.requests[0]).toMatchObject({ hostname, credential: keyA, method: 'POST' });
+      await bindPrepared(f.service, session.id, 'native');
+      await f.service.link(session.id, 'ums-native-model-fixture');
+      await f.service.get(session.id);
+      expect(f.requests.every(request => request.hostname === hostname)).toBe(true);
+      // The same persisted model survives a new process and a changed default credential.
+      closeStore(f.store); f.provider.setApiKey(keyC);
+      const restartedStore = openStore(f.database);
+      const restarted = f.createService(restartedStore, SecretBox.forDirectory(f.directory), new MirrorCredentialStore(f.directory, f.secrets));
+      await restarted.recover();
+      expect(restartedStore.get(session.id)).toMatchObject({ model, status: 'stopped' });
+      expect(f.requests.filter(request => request.path.endsWith('/inactive'))).toEqual([
+        expect.objectContaining({ hostname, credential: keyA }),
+      ]);
+      // No opt-in keeps the existing web SDK and existing mirrors on x2.0.
+      restarted.saveMirrorCredentials('browser', { apiKey: keyB, region, expectedRevision: 0 });
+      const browser = await create(restarted, 'browser');
+      expect(browser.model).toBe('x2.0');
+      expect(f.requests.at(-1)).toMatchObject({ hostname: region === 'cn' ? 'api.xmaxai.com' : 'api.xmax.ai', credential: keyB });
+    });
+
+  it('rejects unknown native model negotiation before reserving or issuing a credential', async () => {
+    const f = await fixture();
+    for (const xmaxModelFamily of [null, 'x2.0', 'x2.1.1-preview-cn', 'https://outside.invalid', 1]) {
+      await expect(f.service.createExhibition({ lookId: 'commute', deviceId: 'screen-native', name: '原生测试',
+        referenceAsset: '/assets/exhibition/commute-cutout.png', sessionNumber: 1, generationNumber: 1, xmaxModelFamily }))
+        .rejects.toMatchObject({ code: 'EXHIBITION_CLIENT_UPGRADE_REQUIRED' });
+    }
+    expect(f.store.list()).toHaveLength(0); expect(f.requests).toHaveLength(0);
+    expect(() => f.provider.forModel('x2.1.1-preview-cn')).toThrowError(expect.objectContaining({ code: 'INVALID_PROVIDER_MODEL' }));
+  });
+
+  it('negotiates through the exhibition entry point and reuses its prepared reference without another upload', async () => {
+    const f = await fixture(); f.save('native-entry', keyA, 'cn');
+    const exhibition = new ExhibitionService(join(f.directory, 'native-entry'), { mirrorId: 'native-entry' });
+    exhibition.attachLiveService(f.service);
+    exhibition.command({ action: 'configure', providerMode: 'xmax', autoReturnSeconds: 0 });
+    await exhibition.prepareReference('commute');
+    expect(f.referenceUpload).toHaveBeenCalledOnce();
+    exhibition.command({ action: 'begin' });
+    const input = { deviceId: 'screen-native-entry', lookId: 'commute', generationNumber: exhibition.get().generationNumber };
+    const before = exhibition.get();
+    await expect(exhibition.createLiveSession({ ...input, xmaxModelFamily: 'unknown' }))
+      .rejects.toMatchObject({ code: 'EXHIBITION_CLIENT_UPGRADE_REQUIRED' });
+    expect(exhibition.get()).toEqual(before); expect(f.requests).toHaveLength(0);
+    const created = await exhibition.createLiveSession({ ...input, xmaxModelFamily: 'x2.1.1-preview' });
+    expect(created).toMatchObject({ model: 'x2.1.1-preview-cn', referenceVersion: 1,
+      refImageUrl: 'https://fixture-123.cos.ap-test.myqcloud.com/reference.png' });
+    expect(f.requests).toEqual([expect.objectContaining({ hostname: 'cloud.xmax.22duck.cn', method: 'POST' })]);
+    expect(f.referenceUpload).toHaveBeenCalledOnce();
+  });
+
   it('issues concurrent mirrors through their own keys and keeps all later provider paths on the frozen credential', async () => {
     const f = await fixture(); f.save('east', keyA); f.save('west', keyB);
     const [east, west] = await Promise.all([create(f.service, 'east'), create(f.service, 'west')]);

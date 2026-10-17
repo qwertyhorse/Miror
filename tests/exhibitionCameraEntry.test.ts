@@ -7,10 +7,11 @@ import type { ExhibitionState } from '../shared/exhibition';
 import { createReactHost, flushReact } from './support/reactHost';
 import { scopedStorageKey } from '../src/versionScope';
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), registry: vi.fn(), terminal: vi.fn(), prepare: vi.fn(), release: vi.fn() }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), registry: vi.fn(), terminal: vi.fn(), computer: vi.fn(() => null), prepare: vi.fn(), release: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
 vi.mock('../src/exhibition/useMirrors', () => ({ useMirrors: mocks.registry }));
 vi.mock('../src/exhibition/useTerminalBinding', () => ({ useTerminalBinding: mocks.terminal }));
+vi.mock('../src/exhibition/ComputerSource', () => ({ ComputerSource: mocks.computer }));
 vi.mock('../src/exhibition/sdkPreparation', async importOriginal => ({
   ...await importOriginal<typeof import('../src/exhibition/sdkPreparation')>(),
   prepareExhibitionEntry: mocks.prepare,
@@ -52,6 +53,15 @@ async function cameraFixture(initial = snapshot(), options: { active?: boolean; 
 }
 
 describe('default mirror camera entry', () => {
+  it.each(['browser', 'android'] as const)('routes a computer %s output without the physical terminal binding client', async output => {
+    host = await createReactHost();
+    const url = new URL(`https://xuminghong.local:10202/v1.1/exhibition/computer?mirror=east&output=${output}`);
+    Object.assign(window.location, { href: url.href, pathname: url.pathname, search: url.search });
+    await host.render(createElement(ExhibitionApp));
+    expect(mocks.computer).toHaveBeenCalledWith(expect.objectContaining({ mirrorId: 'east', output }), undefined);
+    expect(mocks.terminal).not.toHaveBeenCalled(); expect(mocks.registry).not.toHaveBeenCalled();
+  });
+
   it('prepares the configured SDK during local preview without allocating or uploading, then releases on leaving', async () => {
     const f = await cameraFixture(snapshot(), { region: 'cn' });
     expect(mocks.prepare).toHaveBeenCalledExactlyOnceWith('cn');

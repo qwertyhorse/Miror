@@ -28,10 +28,14 @@ async function timedJson(url: string, scope: RequestScope, init: RequestInit = {
   const signal = scope.controller.signal;
   signal.addEventListener('abort', abort, { once: true });
   if (signal.aborted) abort();
-  const timer = setTimeout(abort, timeout);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; abort(); }, timeout);
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     return { ok: response.ok, result: await response.json() };
+  } catch (error) {
+    if (timedOut && !signal.aborted) throw new Error('后台响应超时，请重试。');
+    throw error;
   } finally {
     clearTimeout(timer);
     signal.removeEventListener('abort', abort);

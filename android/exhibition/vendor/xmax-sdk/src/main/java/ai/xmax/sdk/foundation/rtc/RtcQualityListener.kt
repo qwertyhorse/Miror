@@ -1,6 +1,11 @@
 package ai.xmax.sdk.foundation.rtc
 
-/** 中性的 RTC 网络质量等级。 */
+import ai.xmax.sdk.UplinkVideoStatistics
+import ai.xmax.sdk.DownlinkVideoStatistics
+
+/**
+ * 中性的 RTC 网络质量等级。
+ */
 internal enum class RtcQualityLevel {
     UNKNOWN,
     EXCELLENT,
@@ -11,8 +16,14 @@ internal enum class RtcQualityLevel {
     DOWN,
 }
 
-/** 接收 RTC 网络质量和性能回退事件。 */
+/**
+ * 接收厂商中立的视频统计、网络质量和性能回退事件。
+ */
 internal interface RtcQualityListener {
+    fun onUplinkVideoStatistics(statistics: UplinkVideoStatistics?)
+
+    fun onDownlinkVideoStatistics(statistics: DownlinkVideoStatistics?)
+
     fun onNetworkQuality(
         uplink: RtcQualityLevel,
         downlink: RtcQualityLevel,

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExhibitionLive, type ExhibitionLiveController, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import { exhibitionPromptForLook, type ExhibitionState } from '../shared/exhibition';
 import { createReactHost, flushReact } from './support/reactHost';
+import type { RealtimeConnectOptions } from '../src/exhibition/xmaxSdkContract';
+import { xmaxSessionFixture } from './support/xmaxSessionFixture';
 
 const mocks = vi.hoisted(() => {
   const sdk = { getSessionUid: vi.fn(() => 'provider-stable'), set: vi.fn(async () => {}), disconnect: vi.fn(async () => {}) };
@@ -13,8 +15,7 @@ const mocks = vi.hoisted(() => {
     models: { realtime: (name: string) => ({ name }) } };
 });
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
-vi.mock('@xmaxai/sdk', () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }));
-vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }));
+vi.mock('../src/exhibition/xmaxWebSdk', () => ({ createExhibitionSdk: () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }) }));
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); vi.useRealTimers(); });
 
@@ -33,7 +34,7 @@ async function fixture(initialState = snapshot(), continuous = false) {
   const output = new FixtureStream([track()]) as unknown as MediaStream;
   const getUserMedia = vi.fn(async () => camera); vi.stubGlobal('navigator', { mediaDevices: { getUserMedia, enumerateDevices: async () => [] } });
   vi.stubGlobal('fetch', vi.fn(async () => new Response('reference', { headers: { 'Content-Type': 'image/png' } })));
-  mocks.connect.mockImplementation(async (_stream, options: Parameters<ExhibitionLiveDeps['connect']>[2]) => { options.onRemoteStream(output); return mocks.sdk; });
+  mocks.connect.mockImplementation(async (_stream, options: Parameters<ExhibitionLiveDeps['connect']>[2] & Pick<RealtimeConnectOptions, 'onStateChange'>) => { options.onRemoteStream(output); return xmaxSessionFixture(mocks.sdk, options); });
   let value = { state: initialState, active: true, selectionPending: false };
   let live!: ExhibitionLiveController; let update!: (state: ExhibitionState, selectionPending?: boolean) => void;
   let record: any;

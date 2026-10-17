@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { isBenchmarkAddress } from './network.ts';
 import { ApiError, type Provider, type SessionRecord, type SessionRequest } from './types.ts';
-import type { XmaxRegion } from '../shared/xmax.ts';
+import { isXmaxRealtimeModel, xmaxNativeModel, XMAX_NATIVE_MODEL_FAMILY, type XmaxRegion } from '../shared/xmax.ts';
 import { apiKeyBudgetScope, SecretBox, SessionStore } from './store.ts';
 import { MirrorCredentialStore } from './mirrorCredentials.ts';
 import { XmaxProvider } from './provider.ts';
@@ -104,6 +104,7 @@ export class TryOnService {
     const provider: Provider = {
       configured: frozen.configured, region, credentialSnapshot: () => key,
       forCredential: (value, nextRegion) => this.providerForApiKey(value, nextRegion),
+      forModel: model => this.forSessionModel(frozen, model),
       issueKey: (credits, seconds) => frozen.issueKey(credits, seconds),
       keyStatus: token => frozen.keyStatus(token),
       deactivate: token => frozen.deactivate(token),
@@ -160,7 +161,7 @@ export class TryOnService {
   private sessionProvider(record: SessionRecord): Provider {
     const region = record.providerRegion ?? 'global';
     if (record.providerKeyCipher) {
-      try { return this.providerForApiKey(this.options.secrets.decrypt(record.providerKeyCipher), region); }
+      try { return this.forSessionModel(this.providerForApiKey(this.options.secrets.decrypt(record.providerKeyCipher), region), record.model); }
       catch { throw new ApiError('SESSION_CREDENTIALS_UNAVAILABLE', '会话原始密钥无法读取，停止状态尚未确认。', 503); }
     }
     // Old records did not retain their signing key. Only use the current default
@@ -169,9 +170,14 @@ export class TryOnService {
     if (context.key && this.options.store.sessionBudgetScope(record.id) !== context.scope) throw new ApiError('SESSION_CREDENTIALS_UNAVAILABLE', '会话原始密钥不可用，请保留原始配置后重试。', 503);
     if (context.region !== region) {
       if (!context.key) throw new ApiError('SESSION_CREDENTIALS_UNAVAILABLE', '会话原始区域配置不可用，停止状态尚未确认。', 503);
-      return this.providerForApiKey(context.key, region);
+      return this.forSessionModel(this.providerForApiKey(context.key, region), record.model);
     }
-    return context.provider;
+    return this.forSessionModel(context.provider, record.model);
+  }
+  private forSessionModel(provider: Provider, model?: string): Provider {
+    if (!isXmaxRealtimeModel(model)) return provider;
+    if (!provider.forModel) throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新后台后开始体验。', 426);
+    return provider.forModel(model);
   }
   public(record: SessionRecord) {
     const { tokenCipher: _secret, providerKeyCipher: _providerSecret, clientReleaseHash: _releaseSecret, ...safe } = record;
@@ -255,7 +261,8 @@ export class TryOnService {
     return this.mirrorCredentialsStatus(mirrorId);
   }
   /** Mirror-only session issuance; supplier quota is authoritative. */
-  async createExhibition(input: { mirrorId?: string; referenceMirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number; sessionLimits?: ExhibitionSessionLimits }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
+  async createExhibition(input: { mirrorId?: string; referenceMirrorId?: string; lookId: string; deviceId: string; name: string; referenceAsset: string; referenceKind?: ExhibitionReferenceKind; mode?: ExhibitionExperienceMode; prompt?: string; sessionNumber: number; generationNumber: number; sessionLimits?: ExhibitionSessionLimits; xmaxModelFamily?: unknown }, hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }) {
+    if (input.xmaxModelFamily !== undefined && input.xmaxModelFamily !== XMAX_NATIVE_MODEL_FAMILY) throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '当前镜端模型不受支持。', 426);
     const lookId = boundedText(input.lookId, '展会服装 ID');
     const deviceId = boundedText(input.deviceId, '设备 ID');
     const mirrorId = input.mirrorId ?? 'default';
@@ -271,19 +278,22 @@ export class TryOnService {
     if (!noReference && !sample && (!uploaded || (uploaded[1] ?? 'default') !== (input.referenceMirrorId ?? mirrorId) || uploaded[2] !== lookId || (!uploaded[2].startsWith('upload-') && !uploaded[3]))) throw new ApiError('EXHIBITION_INVALID_REFERENCE', '展会参考图必须来自当前试衣镜的服装库。');
     if (!Number.isSafeInteger(input.sessionNumber) || input.sessionNumber < 1 || !Number.isSafeInteger(input.generationNumber) || input.generationNumber < 1) throw new ApiError('EXHIBITION_INVALID_SESSION', '请先开始一轮展会体验。');
     return this.reserveSession({ targetItemId: lookId, sourceId: `exhibition:${deviceId}`, sourceKind: mode === 'mox' ? 'photo' : 'camera', sourceName: boundedText(input.name, '展会服装名称') }, '', input.referenceAsset, hooks,
-      { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber, ...(input.sessionLimits?.credits === null ? { continuous: true } : {}) } }, input.sessionLimits);
+      { exhibition: { mirrorId, lookId, deviceId, mode, prompt, sessionNumber: input.sessionNumber, generationNumber: input.generationNumber, ...(input.sessionLimits?.credits === null ? { continuous: true } : {}) } }, input.sessionLimits, input.xmaxModelFamily === XMAX_NATIVE_MODEL_FAMILY);
   }
   private async reserveSession(request: SessionRequest, reference: string, referenceAsset: string | undefined,
-    hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }, extra: Pick<SessionRecord, 'exhibition'> = {}, sessionLimits?: ExhibitionSessionLimits) {
+    hooks?: { onReserved?: (id: string) => void; cancelled?: () => boolean }, extra: Pick<SessionRecord, 'exhibition'> = {}, sessionLimits?: ExhibitionSessionLimits, nativeXmax = false) {
     const limits = sessionLimits === undefined ? { credits: this.perSessionLimit, expireSeconds: this.expireSeconds } : { ...sessionLimits };
     if (!isSessionLimits(limits)) throw new ApiError('EXHIBITION_INVALID_SETTINGS', '请设置有效的单轮积分上限与凭证有效期。');
     const credits = limits.credits ?? CONTINUOUS_SEGMENT_CREDITS;
     const context = this.credentialContext(extra.exhibition ? extra.exhibition.mirrorId ?? 'default' : undefined);
     if (!context.provider.configured) throw new ApiError('MISSING_API_KEY', '请先配置所选换装服务的密钥。', 503);
     const decart = context.provider.kind === 'decart';
+    if (decart && nativeXmax) throw new ApiError('PROVIDER_MODE_UNSUPPORTED', '当前镜端需要 XMAX 服务。', 409);
+    const model = nativeXmax ? xmaxNativeModel(context.region) : undefined;
+    const provider = this.forSessionModel(context.provider, model);
     if (decart && extra.exhibition?.mode !== 'clothx') throw new ApiError('PROVIDER_MODE_UNSUPPORTED', 'Decart 当前支持实时换装，请选择换装模式。', 409);
     const now = new Date().toISOString();
-    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: decart ? Number.MAX_SAFE_INTEGER : credits, ...(decart ? { providerId: 'decart' as const, model: DECART_MODEL, usageStatus: 'unavailable' as const } : {}),
+    const record: SessionRecord = { ...request, ...extra, id: randomUUID(), status: 'reserved', pointsLimit: decart ? Number.MAX_SAFE_INTEGER : credits, ...(decart ? { providerId: 'decart' as const, model: DECART_MODEL, usageStatus: 'unavailable' as const } : model ? { model } : {}),
       refImageUrl: reference, referenceAsset, referenceVersion: 0, consumedCredits: 0, resultAvailable: false, verification: 'none', createdAt: now, updatedAt: now,
       referenceScope: createHash('sha256').update(`${context.provider.kind === 'decart' ? 'decart:' : ''}${context.region}:${context.scope}`).digest('hex'),
       providerRegion: context.region, ...(context.key ? { providerKeyCipher: this.options.secrets.encrypt(context.key) } : {}) };
@@ -295,7 +305,7 @@ export class TryOnService {
         if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') { this.options.store.update(record.id, { status: 'stopped' }); throw new ApiError('SESSION_CANCELLED', '试穿已取消。', 409); }
         const releaseKey = decart ? randomUUID() : undefined;
         const seconds = Math.max(10, Math.min(3600, limits.expireSeconds));
-        const issued = decart ? { token: '', expiresAt: new Date(Date.now() + seconds * 1000).toISOString() } : await context.provider.issueKey(credits, limits.expireSeconds);
+        const issued = decart ? { token: '', expiresAt: new Date(Date.now() + seconds * 1000).toISOString() } : await provider.issueKey(credits, limits.expireSeconds);
         if (decart) this.options.store.update(record.id, { maxSessionDuration: seconds, clientReleaseHash: createHash('sha256').update(releaseKey!).digest('hex') });
         this.options.store.update(record.id, { ...(decart ? {} : { tokenCipher: this.options.secrets.encrypt(issued.token) }), expiresAt: issued.expiresAt });
         if (hooks?.cancelled?.() || this.options.store.get(record.id).status === 'stopping') {
@@ -307,7 +317,7 @@ export class TryOnService {
           throw new ApiError('SESSION_CANCELLED', '试穿已取消，临时凭证已停止。', 409);
         }
         const active = this.options.store.update(record.id, { status: 'active' });
-        return { ...this.public(active), token: issued.token, model: decart ? DECART_MODEL : 'x2.0', ...(releaseKey ? { releaseKey } : {}) };
+        return { ...this.public(active), token: issued.token, model: active.model ?? 'x2.0', ...(releaseKey ? { releaseKey } : {}) };
       } catch (error) {
         const code = error instanceof ApiError ? error.code : 'PROVIDER_UNKNOWN_ERROR';
         const current = this.options.store.get(record.id);

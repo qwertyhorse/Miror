@@ -4,8 +4,10 @@ import ai.xmax.sdk.render.trajectory.TrajectoryBinding
 import ai.xmax.sdk.render.trajectory.TrajectoryOverlayView
 import ai.xmax.sdk.render.trajectory.TrajectoryRegistry
 import ai.xmax.sdk.render.video.FrameReportingTextureView
+import ai.xmax.sdk.render.video.CameraRenderSurfaceView
 import ai.xmax.sdk.render.video.VideoRenderBinding
 import ai.xmax.sdk.render.video.VideoRenderRegistry
+import ai.xmax.sdk.render.video.VideoRenderSize
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -13,17 +15,21 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
+import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 
-/** 显示本地或远端实时视频轨道的 Android 容器。 */
+/**
+ * 显示本地或远端实时视频轨道的 Android 容器。
+ */
 public class XmaxVideoView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0,
 ) : FrameLayout(context, attrs, defStyleAttr) {
-    private var renderView: FrameReportingTextureView? = null
+    private var renderView: View? = null
+    private var renderingLocalCamera = false
     private val imageView = ImageView(context)
     private val trajectoryOverlayView = TrajectoryOverlayView(context)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -34,13 +40,17 @@ public class XmaxVideoView @JvmOverloads constructor(
     private var hasDisplayedFrame = false
     private var pendingFrameDisplay: Runnable? = null
 
-    /** Internal presentation signal; this is separate from RTC decode readiness. */
+    /**
+     * Internal presentation signal; this is separate from RTC decode readiness.
+     */
     internal var frameDisplayHandler: ((RealtimeVideoTrack) -> Unit)? = null
     internal var frameInvalidationHandler: ((RealtimeVideoTrack) -> Unit)? = null
     internal var isFrameDisplayEnabled = false
         private set
 
-    /** 当前显示的视频轨道。 */
+    /**
+     * 当前显示的视频轨道。
+     */
     public var track: RealtimeVideoTrack? = null
         set(value) {
             if (field === value) return
@@ -49,7 +59,9 @@ public class XmaxVideoView @JvmOverloads constructor(
             attachCurrentTrackIfNeeded()
         }
 
-    /** 视频内容在容器中的显示模式。 */
+    /**
+     * 视频内容在容器中的显示模式。
+     */
     public var videoContentMode: VideoContentMode = VideoContentMode.FILL
         set(value) {
             if (field == value) return
@@ -58,7 +70,33 @@ public class XmaxVideoView @JvmOverloads constructor(
             attachCurrentTrackIfNeeded()
         }
 
-    /** 是否允许在远端视频上绘制并发送轨迹交互。 */
+    /**
+     * Optional pixel limit for the rendering surface; 0 keeps the full view resolution.
+     * The surface scales to this view's bounds without changing capture or track geometry.
+     */
+    public var maximumRenderPixels: Int = 0
+        set(value) {
+            require(value >= 0) { "Maximum render pixels cannot be negative" }
+            if (field == value) return
+            field = value
+            (renderView as? CameraRenderSurfaceView)?.maximumRenderPixels = value
+            requestLayout()
+        }
+
+    /** Use a below-window SurfaceView for local camera preview only; disabled by default. */
+    public var useSurfaceViewForLocalCamera: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (renderingLocalCamera) {
+                detachCurrentTrack()
+                attachCurrentTrackIfNeeded()
+            }
+        }
+
+    /**
+     * 是否允许在远端视频上绘制并发送轨迹交互。
+     */
     public var isInteractionEnabled: Boolean = true
         set(value) {
             if (field == value) return
@@ -66,7 +104,9 @@ public class XmaxVideoView @JvmOverloads constructor(
             trajectoryOverlayView.setRequestedInteractionEnabled(value)
         }
 
-    /** 自定义轨迹视觉效果；设置为 null 时恢复 SDK 内置效果。 */
+    /**
+     * 自定义轨迹视觉效果；设置为 null 时恢复 SDK 内置效果。
+     */
     public var trajectoryRenderer: TrajectoryEffectRendering? = null
         set(value) {
             field = value
@@ -92,39 +132,45 @@ public class XmaxVideoView @JvmOverloads constructor(
 
     internal fun prepareNetworkVideoRendering(): android.view.TextureView {
         prepareRtcVideoRendering()
-        return checkNotNull(renderView)
+        return checkNotNull(renderView as? FrameReportingTextureView)
     }
 
-    internal fun prepareRtcVideoRendering() {
+    internal fun prepareLocalCameraRendering() = prepareVideoRendering(localCamera = true)
+
+    internal fun prepareRtcVideoRendering() = prepareVideoRendering(localCamera = false)
+
+    private fun prepareVideoRendering(localCamera: Boolean) {
         invalidateVideoPresentation()
         clearImageFrame()
         removeRtcRenderView()
+        renderingLocalCamera = localCamera
         // Each binding gets a fresh surface: buffered frames and late RTC callbacks
         // from a previous track cannot satisfy the new track's first-frame gate.
         val generation = renderGeneration
-        renderView = FrameReportingTextureView(context).also { textureView ->
+        val next = if (localCamera && useSurfaceViewForLocalCamera) {
+            CameraRenderSurfaceView(context).also { it.maximumRenderPixels = maximumRenderPixels }
+        } else FrameReportingTextureView(context).also { textureView ->
             textureView.onFrameDisplayed = { source ->
                 if (renderView === source && renderGeneration == generation) {
                     scheduleFrameDisplayed()
                 }
             }
-            addView(
-                textureView,
-                0,
-                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
-            )
         }
+        renderView = next
+        addView(next, 0, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT, Gravity.TOP or Gravity.LEFT))
         isFrameDisplayEnabled = true
     }
 
-    /** Notify the containing view before native teardown can empty the visible canvas. */
+    /**
+     * Notify the containing view before native teardown can empty the visible canvas.
+     */
     internal fun invalidateVideoPresentation() {
         renderGeneration += 1L
         isFrameDisplayEnabled = false
         hasDisplayedFrame = false
         pendingFrameDisplay?.let(mainHandler::removeCallbacks)
         pendingFrameDisplay = null
-        renderView?.onFrameDisplayed = null
+        (renderView as? FrameReportingTextureView)?.onFrameDisplayed = null
         track?.let { frameInvalidationHandler?.invoke(it) }
     }
 
@@ -187,6 +233,34 @@ public class XmaxVideoView @JvmOverloads constructor(
         super.onDetachedFromWindow()
     }
 
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        val texture = renderView as? FrameReportingTextureView ?: return
+        if (maximumRenderPixels == 0) return
+        val size = VideoRenderSize.limited(
+            (measuredWidth - paddingLeft - paddingRight).coerceAtLeast(0),
+            (measuredHeight - paddingTop - paddingBottom).coerceAtLeast(0),
+            maximumRenderPixels,
+        )
+        // Only the TextureView's real layout shrinks. Siblings retain the full bounds.
+        texture.measure(
+            MeasureSpec.makeMeasureSpec(size.width, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(size.height, MeasureSpec.EXACTLY),
+        )
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        (renderView as? FrameReportingTextureView)?.let { texture ->
+            val displayWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            val displayHeight = (height - paddingTop - paddingBottom).coerceAtLeast(0)
+            texture.pivotX = 0f
+            texture.pivotY = 0f
+            texture.scaleX = if (texture.width > 0) displayWidth.toFloat() / texture.width else 1f
+            texture.scaleY = if (texture.height > 0) displayHeight.toFloat() / texture.height else 1f
+        }
+    }
+
     override fun dispatchDraw(canvas: Canvas) {
         super.dispatchDraw(canvas)
         if (imageView.visibility == View.VISIBLE && displayedBitmap != null) {
@@ -239,11 +313,12 @@ public class XmaxVideoView @JvmOverloads constructor(
     }
 
     private fun removeRtcRenderView() {
-        renderView?.let { textureView ->
-            textureView.onFrameDisplayed = null
-            removeView(textureView)
+        renderView?.let { view ->
+            (view as? FrameReportingTextureView)?.onFrameDisplayed = null
+            removeView(view)
         }
         renderView = null
+        renderingLocalCamera = false
     }
 
     private fun scheduleFrameDisplayed() {

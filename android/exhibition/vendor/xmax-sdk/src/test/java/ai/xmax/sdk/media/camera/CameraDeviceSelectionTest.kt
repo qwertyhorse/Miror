@@ -167,14 +167,14 @@ class CameraDeviceSelectionTest {
                 override suspend fun ensureMicrophonePermission() = Unit
             },
             mediaService = mediaRules ?: object : MediaServicing {
-                override val model = RealtimeModel.X2_0
+                override val model = RealtimeModel.X2_1_1_PREVIEW_CN
                 override fun resolveModelInputSize(size: IntSize) = size
             },
         )
         val media = MediaController(rtc, camera)
     }
 
-    internal class FakeEngine : RtcPlatformEngine {
+    internal class FakeEngine : RtcPlatform {
         var devices = listOf(RealtimeCameraDevice("usb-2", "External camera", null))
         var enumerations = 0
         var selectedId: String? = null
@@ -245,10 +245,10 @@ class CameraDeviceSelectionTest {
         override fun setRemoteAudioVolume(streamId: String, volume: Int) = 0
         override fun setEventListener(listener: RtcEventListener?) = Unit
         override fun setQualityListener(listener: RtcQualityListener?) = Unit
-        override fun createRoom(roomId: String): RtcPlatformRoom? = error("Enumeration/preview must not create a room")
+        override fun createRoom(roomId: String): RtcRoom? = error("Enumeration/preview must not create a room")
     }
 
     private companion object {
-        val format = RealtimeVideoFormat(704, 1280, 24)
+        val format = RealtimeVideoFormat(1024, 1920, 24)
     }
 }

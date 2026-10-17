@@ -1,4 +1,5 @@
 import { LEASE_TTL_MS, initialLifecycle, admitRecovery, isStopReason, isExperienceLifecycle, type StopReason } from '../shared/exhibitionLifecycle.ts';
+import { exhibitionProviderRejection } from '../shared/exhibitionProviderFailure.ts';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -6,6 +7,7 @@ import { join } from 'node:path';
 import sharp, { type OutputInfo } from 'sharp';
 import { EXHIBITION_AUTO_SWITCH_DEFAULT_SECONDS, EXHIBITION_AUTO_SWITCH_MAX_SECONDS, EXHIBITION_AUTO_SWITCH_MIN_SECONDS, EXHIBITION_EXPERIENCE_MODES, EXHIBITION_FREE_PROMPT_MAX_LENGTH, EXHIBITION_LOOK_IDS, EXHIBITION_UI_SKIN_PRESETS, exhibitionPromptForLook, exhibitionReferenceImage, type ExhibitionImageInfo, type ExhibitionExperienceMode, type ExhibitionLook, type ExhibitionLookCopyInput, type ExhibitionPhase, type ExhibitionState, type ExhibitionUploadLimits, type ExhibitionLiveStatus, type ExhibitionUiSkin, type ExhibitionUiSkinPreset } from '../shared/exhibition.ts';
 import { ApiError, type SessionRecord } from './types.ts';
+import { XMAX_NATIVE_MODEL_FAMILY } from '../shared/xmax.ts';
 import type { TryOnService } from './service.ts';
 import { ExhibitionSkinStore } from './exhibitionSkin.ts';
 import { isExhibitionGestureSettings, resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
@@ -298,7 +300,7 @@ export class ExhibitionService {
   private reconcilingLive?: Promise<void>;
   private renewalPlan?: LiveRenewalPlan;
   private renewalReceipt?: LiveRenewalPlan & { nextGeneration: number };
-  private renewalHandoff?: { deviceId: string; sessionNumber: number; generationNumber: number; expiresAt: number };
+  private renewalHandoff?: { deviceId: string; sessionNumber: number; generationNumber: number; expiresAt: number; continuous: boolean };
   private readonly skinStore: ExhibitionSkinStore;
   // Uploaded asset IDs are immutable; retain only their digest, never all source bytes.
   private readonly referenceIdentities = new Map<string, { sha256: string; mime: string }>();
@@ -421,11 +423,23 @@ export class ExhibitionService {
     for (const item of state.materialVersions ?? []) { const history = histories.get(item.id) ?? []; history.push(item); histories.set(item.id, history); }
     const effective: ExhibitionLook[] = [];
     const provider = state.providerMode === 'xmax' ? this.liveService?.providerDescriptor(this.mirrorId).providerId : undefined;
+    // Reuse checks only within this synchronous projection. The next read must
+    // observe credential changes and reference expiry or replacement immediately.
+    const configuredProviders = new Map<string | undefined, boolean>();
+    const readyReferences = new Map<string, boolean>();
     const ready = (look: ExhibitionLook, target?: 'xmax' | 'decart') => {
       if (state.providerMode === 'demo' && !target) return true;
-      if (!this.liveService?.materialProviderConfigured(this.mirrorId, target)) return false;
-      if ((target ?? provider) === 'decart' && look.mode !== 'clothx') return false;
-      try { const identity = this.identityForLook(look); return !identity || !!this.liveService?.readyReferenceIdentity(this.mirrorId, identity, target); } catch { return false; }
+      const resolvedProvider = target ?? provider;
+      if (!configuredProviders.has(resolvedProvider)) configuredProviders.set(resolvedProvider, !!this.liveService?.materialProviderConfigured(this.mirrorId, target));
+      if (!configuredProviders.get(resolvedProvider)) return false;
+      if (resolvedProvider === 'decart' && look.mode !== 'clothx') return false;
+      try {
+        const identity = this.identityForLook(look);
+        if (!identity) return true;
+        const key = JSON.stringify([resolvedProvider, identity.sha256, identity.mime]);
+        if (!readyReferences.has(key)) readyReferences.set(key, !!this.liveService?.readyReferenceIdentity(this.mirrorId, identity, target));
+        return readyReferences.get(key)!;
+      } catch { return false; }
     };
     const retained: ExhibitionLook[] = [];
     const enabled = new Set(state.enabledLookIds);
@@ -648,6 +662,7 @@ export class ExhibitionService {
 
   async createLiveSession(input: unknown, hooks?: { cancelled?: () => boolean }) {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_SESSION', '请提供设备和服装信息。');
+    if (input.xmaxModelFamily !== undefined && input.xmaxModelFamily !== XMAX_NATIVE_MODEL_FAMILY) throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '当前镜端模型不受支持。', 426);
     const deviceId = shortText(input.deviceId, '设备 ID', 100);
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(deviceId)) throw new ApiError('EXHIBITION_INVALID_DEVICE', '设备 ID 无效。');
     this.tick(); await this.reconcileLive(); this.checkRevision(input.expectedRevision);
@@ -682,7 +697,7 @@ export class ExhibitionService {
     this.renewalHandoff = undefined;
     let reservedId: string | undefined;
     try {
-      const created = await service.createExhibition({ mirrorId: this.mirrorId, referenceMirrorId: this.sourceCatalog?.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: exhibitionReferenceImage(look) ?? '', referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits }, {
+      const created = await service.createExhibition({ mirrorId: this.mirrorId, referenceMirrorId: this.sourceCatalog?.mirrorId, lookId: look.id, deviceId, name: look.name, referenceAsset: exhibitionReferenceImage(look) ?? '', referenceKind: look.referenceKind, mode: state.experienceMode, prompt: exhibitionPromptForLook(look), sessionNumber: state.sessionNumber, generationNumber: state.generationNumber, sessionLimits, xmaxModelFamily: input.xmaxModelFamily }, {
         onReserved: id => {
           reservedId = id;
           const reserved = structuredClone(this.stored);
@@ -745,7 +760,8 @@ export class ExhibitionService {
     if (!isRecord(input) || !this.liveService) throw new ApiError('EXHIBITION_INVALID_SESSION', '续接请求无效。');
     this.tick();
     const state = this.stored.state;
-    if (state.live?.sessionId !== id || state.live.deviceId !== input.deviceId || state.sessionNumber !== input.sessionNumber || state.generationNumber !== input.generationNumber) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '续接请求与当前大屏体验不匹配。', 409);
+    if (state.live?.sessionId !== id || state.live.deviceId !== input.deviceId || state.sessionNumber !== input.sessionNumber) throw new ApiError('EXHIBITION_OWNER_MISMATCH', '续接请求与当前大屏体验不匹配。', 409);
+    if (state.generationNumber !== input.generationNumber) throw new ApiError('EXHIBITION_STALE_GENERATION', '体验状态已更新，请保留当前会话。', 409);
     if (this.renewalPlan && this.renewalPlanCurrent(this.renewalPlan)) return { renewalId: this.renewalPlan.id };
     const session = await this.liveService.get(id, false);
     // The await may race a manual stop, material switch or another preparing request.
@@ -786,7 +802,8 @@ export class ExhibitionService {
     draft.state.generationReadyAt = null; draft.state.autoSwitchAt = null; draft.pausedPhase = null; draft.pausedRemainingMs = 0;
     this.commit(draft, '旧凭证已停止，正在连接本轮下一段体验。', this.now());
     this.renewalReceipt = { ...plan, nextGeneration: draft.state.generationNumber };
-    this.renewalHandoff = { deviceId: plan.deviceId, sessionNumber: plan.sessionNumber, generationNumber: draft.state.generationNumber, expiresAt: this.now() + HEARTBEAT_TIMEOUT_MS };
+    this.renewalHandoff = { deviceId: plan.deviceId, sessionNumber: plan.sessionNumber, generationNumber: draft.state.generationNumber,
+      expiresAt: this.now() + HEARTBEAT_TIMEOUT_MS, continuous: this.sessionLimits().credits === null && session.exhibition?.continuous === true };
     this.renewalPlan = undefined;
     return this.get();
   }
@@ -794,7 +811,10 @@ export class ExhibitionService {
   async reportLiveError(input: unknown): Promise<ExhibitionState> {
     if (!isRecord(input)) throw new ApiError('EXHIBITION_INVALID_SESSION', '错误报告无效。');
     const deviceId = shortText(input.deviceId, '设备 ID', 100);
-    const reason: StopReason = isStopReason(input.reason) ? input.reason : 'provider_rejected';
+    // Older pages classified the SDK's explicit balance refusal as an RTC fault.
+    // Keep them out of automatic recovery without consulting local usage totals.
+    const reason: StopReason = exhibitionProviderRejection({ message: input.message }) === 'balance'
+      ? 'provider_rejected' : isStopReason(input.reason) ? input.reason : 'provider_rejected';
     const recovering = ['rtc_failed', 'credential_expired', 'segment_exhausted', 'lease_expired', 'command_unknown'].includes(reason);
     const record = typeof input.sessionId === 'string' ? await this.liveService?.get(input.sessionId, false) : undefined;
     // Cleanup may commit while the session read yields. Validate the current
@@ -816,26 +836,30 @@ export class ExhibitionService {
     const planned = (reason === 'credential_expired' && !!record?.expiresAt && Date.parse(record.expiresAt) <= this.now() + 20_000)
       || (reason === 'segment_exhausted' && !!record && record.consumedCredits >= record.pointsLimit);
     if (['credential_expired', 'segment_exhausted'].includes(reason) && !planned) throw new ApiError('EXHIBITION_RECOVERY_NOT_DUE', '当前凭证尚未达到续接条件。', 409);
-    const admitted = recovering && !!record && draft.state.experienceMode !== 'mox' && admitRecovery(lifecycle, this.now(), planned);
+    const continuous = this.sessionLimits().credits === null && record?.exhibition?.continuous === true;
+    const admitted = recovering && !!record && draft.state.experienceMode !== 'mox' && admitRecovery(lifecycle, this.now(), planned, continuous);
     lifecycle.connection = admitted ? 'recovering' : 'needs_assistance';
     if (admitted) {
-      draft.state.phase = 'generating'; lifecycle.retryAt = this.now() + (planned ? 0 : Math.min(4000, 1000 * lifecycle.consecutiveFailures));
-    } else { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; }
+      const delay = continuous ? Math.min(30_000, 1000 * 2 ** Math.min(5, lifecycle.consecutiveFailures - 1)) : Math.min(4000, 1000 * lifecycle.consecutiveFailures);
+      draft.state.phase = 'generating'; lifecycle.retryAt = this.now() + (planned ? 0 : delay);
+    } else { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; delete lifecycle.retryAt; }
     draft.state.generationReadyAt = null;
     if (draft.state.live) { draft.state.live.status = 'error'; draft.state.live.error = message; draft.state.live.stopReason = reason; }
     this.commit(draft, admitted ? `正在恢复连接：${message}` : `需要处理：${message}`, this.now());
-    if (!draft.state.live && admitted && record?.status === 'stopped') this.finishRecovery(deviceId);
+    if (!draft.state.live && admitted && record?.status === 'stopped') this.finishRecovery(deviceId, record);
     else await this.reconcileLive();
     return this.get();
   }
 
-  private finishRecovery(deviceId: string) {
+  private finishRecovery(deviceId: string, record: SessionRecord) {
     const draft = structuredClone(this.stored); const lifecycle = draft.state.lifecycle;
     if (lifecycle?.state !== 'active' || lifecycle.connection !== 'recovering') return;
     draft.state.live = null; draft.state.phase = 'generating'; draft.state.generationNumber++;
     draft.state.generationReadyAt = null; draft.state.autoSwitchAt = null;
     lifecycle.ownerDeviceId = deviceId;
-    this.renewalHandoff = { deviceId, sessionNumber: draft.state.sessionNumber, generationNumber: draft.state.generationNumber, expiresAt: this.now() + HEARTBEAT_TIMEOUT_MS };
+    this.renewalHandoff = { deviceId, sessionNumber: draft.state.sessionNumber, generationNumber: draft.state.generationNumber,
+      expiresAt: Math.max(this.now(), lifecycle.retryAt ?? 0) + HEARTBEAT_TIMEOUT_MS,
+      continuous: this.sessionLimits().credits === null && record.exhibition?.continuous === true };
     this.commit(draft, '旧连接已释放，正在恢复当前选择。', this.now());
   }
 
@@ -1005,7 +1029,7 @@ export class ExhibitionService {
       }
     }
     if (session.status === 'stopped' && this.stored.state.live?.sessionId === id) {
-      if (this.stored.state.lifecycle?.connection === 'recovering' && this.stored.state.lifecycle.state === 'active') { this.finishRecovery(live.deviceId); return; }
+      if (this.stored.state.lifecycle?.connection === 'recovering' && this.stored.state.lifecycle.state === 'active') { this.finishRecovery(live.deviceId, session); return; }
       const draft = structuredClone(this.stored); draft.state.live = null;
       if (!interrupted && session.exhibition?.sessionNumber === draft.state.sessionNumber && ['generating', 'showcase'].includes(draft.state.phase)) { draft.state.phase = 'paused'; draft.pausedPhase = 'generating'; draft.state.generationReadyAt = null; }
       this.commit(draft, 'XMAX 临时凭证已停止，设备占用已释放。', this.now());
@@ -1639,7 +1663,11 @@ export class ExhibitionService {
     this.assertPresent();
     if (this.renewalHandoff && (this.stored.state.phase !== 'generating' || this.stored.state.sessionNumber !== this.renewalHandoff.sessionNumber
       || this.stored.state.generationNumber !== this.renewalHandoff.generationNumber)) this.renewalHandoff = undefined;
-    if (this.renewalHandoff && this.now() >= this.renewalHandoff.expiresAt) {
+    // A continuous handoff reserves only the original screen's authority. No key is
+    // issued while it is absent; returning screens still pass ownership and release checks.
+    const continuousHandoff = this.renewalHandoff?.continuous && this.sessionLimits().credits === null
+      && this.stored.state.lifecycle?.state === 'active' && this.stored.state.lifecycle.ownerDeviceId === this.renewalHandoff.deviceId;
+    if (this.renewalHandoff && this.now() >= this.renewalHandoff.expiresAt && !continuousHandoff) {
       this.renewalHandoff = undefined;
       const expired = structuredClone(this.stored); expired.state.phase = 'paused'; expired.pausedPhase = 'generating';
       this.commit(expired, '大屏未及时续接，请手动继续。', this.now());
@@ -1682,9 +1710,15 @@ export class ExhibitionService {
       if (lifecycle.state === 'active' || lifecycle.state === 'paused') lifecycle.terminalRevision++;
       lifecycle.state = lifecycle.experienceId ? 'ended' : 'idle';
       lifecycle.connection = draft.state.live ? 'cleaning' : 'idle';
-    } else if (draft.state.phase === 'paused') lifecycle.state = lifecycle.reason === 'staff_pause' ? 'paused' : 'active';
+    } else if (draft.state.phase === 'paused') {
+      lifecycle.state = lifecycle.reason === 'staff_pause' ? 'paused' : 'active';
+      if (lifecycle.state === 'paused') {
+        lifecycle.connection = draft.state.live ? 'cleaning' : 'idle';
+        delete lifecycle.retryAt;
+      }
+    }
     else lifecycle.state = 'active';
-    if (draft.state.live?.status === 'running' && lifecycle.connection !== 'recovering') {
+    if (lifecycle.state === 'active' && draft.state.live?.status === 'running' && lifecycle.connection !== 'recovering') {
       lifecycle.connection = 'running'; lifecycle.healthySince ??= time;
     }
     if (!this.autoSwitchEligible(draft.state, time)) draft.state.autoSwitchAt = null;

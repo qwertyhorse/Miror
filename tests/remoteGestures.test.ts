@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RemoteGestureCoordinator } from '../server/remoteGestures.ts';
 import type { GestureInference, GestureInferenceResult } from '../server/gestureInference.ts';
 import { resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
-import type { RemoteGestureSnapshot } from '../shared/remoteGestures.ts';
+import type { RemoteGestureSnapshot, RemoteGestureI420Metadata } from '../shared/remoteGestures.ts';
 import { createNativeGestureRuntime } from '../src/exhibition/nativeGestureRuntime.ts';
 import { ExhibitionMirrorGestureDetector } from '../src/exhibition/mirrorGestureDetector.ts';
 
@@ -67,7 +67,7 @@ class FakeInference implements GestureInference {
   next: Promise<GestureInferenceResult> | null = null;
   active = 0;
   maximumActive = 0;
-  infer = vi.fn(async (jpeg: Buffer) => {
+  infer = vi.fn<GestureInference['infer']>(async (jpeg: Buffer) => {
     this.active++;
     this.maximumActive = Math.max(this.maximumActive, this.active);
     const pending = this.next;
@@ -624,5 +624,25 @@ describe('remote frame ordering and lifecycle', () => {
     await expect(f.coordinator.frame(s.id, { epoch: 0, seq: 0, timestamp: 0, blocked: false },
       Buffer.alloc(256 * 1024 + 1), settings, false)).rejects.toMatchObject({ code: 'GESTURE_INVALID' });
     expect(f.workers[0].infer).not.toHaveBeenCalled();
+  });
+
+  it('validates raw frames at the coordinator boundary and forwards full pixels without preprocessing', async () => {
+    const f = fixture(); const s = await f.open();
+    expect(s.state.frameFormat).toBe('i420-v1');
+    const frame: RemoteGestureI420Metadata = { format: 'i420-v1', width: 1920, height: 1080, rotation: 270, mirrored: true };
+    const pixels = Buffer.alloc(1920 * 1080 * 3 / 2, 128);
+    const metadata = { epoch: 0, seq: 0, timestamp: 0, blocked: false };
+    for (const invalid of [{ ...frame, width: 0 }, { ...frame, height: 4097 }, { ...frame, rotation: 45 },
+      { ...frame, width: 4096, height: 4096 }]) {
+      await expect(f.coordinator.frame(s.id, metadata, pixels, settings, false, () => true, invalid as RemoteGestureI420Metadata))
+        .rejects.toMatchObject({ code: 'GESTURE_INVALID' });
+    }
+    await expect(f.coordinator.frame(s.id, metadata, pixels.subarray(1), settings, false, () => true, frame))
+      .rejects.toMatchObject({ code: 'GESTURE_INVALID' });
+    expect(f.workers[0].infer).not.toHaveBeenCalled();
+    f.workers[0].infer.mockResolvedValueOnce(result());
+    await expect(f.coordinator.frame(s.id, metadata, pixels, settings, false, () => true, frame)).resolves.toMatchObject({ event: null });
+    expect(f.workers[0].infer.mock.calls[0][0]).toBe(pixels);
+    expect(f.workers[0].infer.mock.calls[0].slice(1)).toEqual([0, settings, frame]);
   });
 });

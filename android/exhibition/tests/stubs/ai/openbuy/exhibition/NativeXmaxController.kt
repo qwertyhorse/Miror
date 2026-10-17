@@ -16,11 +16,15 @@ internal class NativeXmaxController(private val events: MutableList<String>) {
     var connectedCaptureSelection: NativeCameraCaptureSelection? = null
     var generatedPrompt: String? = null
     var generatedReference: String? = null
+    var connectedModel: String? = null
+    var connectedRegion: String? = null
     suspend fun connect(token: String, region: String, model: String,
                         position: CameraPosition = CameraPosition.BACK, image: ByteArray? = null,
                         cameraDeviceId: String? = null, cameraRotationDegrees: Int = 0,
                         captureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic): String {
-        check(token == "tk-fixture" && region == "cn" && model == "x2.0")
+        check(token == "tk-fixture" && NativeXmaxModel.matches(model, region))
+        connectedModel = model
+        connectedRegion = region
         events.add("connect")
         connectedImage = image
         connectedPosition = position

@@ -3,6 +3,7 @@ import { act, createElement, type ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Kiosk } from '../src/exhibition/ExhibitionApp';
 import type { ExhibitionState } from '../shared/exhibition';
+import { initialLifecycle } from '../shared/exhibitionLifecycle';
 import type { ExhibitionLiveController } from '../src/exhibition/useExhibitionLive';
 import { createReactHost, flushReact } from './support/reactHost';
 
@@ -46,6 +47,67 @@ async function fixture(overrides: Partial<ComponentProps<typeof Kiosk>> = {}) {
 }
 
 describe('mirror manual stop controls', () => {
+  it('keeps automatic recovery on the active screen and closes the drawer when manually paused', async () => {
+    const f = await fixture();
+    f.state.phase = 'showcase'; await f.render();
+    await f.click('选择服装');
+    expect(f.button('收起素材选择')?.['aria-expanded']).toBe(true);
+    f.state.phase = 'generating';
+    f.state.lifecycle = { ...initialLifecycle(), state: 'active', connection: 'recovering', retryAt: Date.now() + 30_000 };
+    await f.render();
+    expect(f.button('开始体验')).toBeUndefined();
+    expect(host!.find(node => node.getReactProps().role === 'status' && node.textContent === '正在恢复连接')).toBeDefined();
+    // Old server snapshots can still carry the recovering marker during pause.
+    f.state.phase = 'paused'; await f.render();
+    expect(f.button('选择服装')?.['aria-expanded']).toBe(false);
+    expect(f.button('开始体验')?.disabled).toBe(false);
+    expect(host!.find(node => node.getReactProps().role === 'status' && node.textContent === '正在恢复连接')).toBeUndefined();
+    expect(f.live.retry).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('starts a paused experience through cleanup-aware retry and resume', async () => {
+    const f = await fixture();
+    f.state.phase = 'paused'; await f.render();
+    const ready = deferred<boolean>(); vi.mocked(f.live.retry).mockReturnValueOnce(ready.promise);
+    expect(f.button('继续体验')).toBeUndefined(); expect(f.button('停止生成')).toBeUndefined();
+    expect(f.button('开始体验')?.disabled).toBe(false);
+    await f.click('开始体验');
+    expect(f.live.retry).toHaveBeenCalledOnce(); expect(f.send).not.toHaveBeenCalled();
+    expect(f.button('等待摄像头…')?.disabled).toBe(true);
+    await f.click('等待摄像头…');
+    expect(f.live.retry).toHaveBeenCalledOnce();
+    await act(async () => { ready.resolve(true); }); await flushReact();
+    expect(f.send).toHaveBeenCalledExactlyOnceWith({ action: 'resume' });
+    expect(f.startCamera).not.toHaveBeenCalled();
+  });
+
+  it.each([false, 'changed'] as const)('does not resume after retry is %s', async outcome => {
+    const f = await fixture(); f.state.phase = 'paused'; await f.render();
+    const ready = deferred<boolean>(); vi.mocked(f.live.retry).mockReturnValueOnce(ready.promise);
+    await f.click('开始体验');
+    if (outcome === 'changed') { f.props.state = { ...f.state, phase: 'idle', sessionNumber: 2 }; await f.render(); }
+    await act(async () => { ready.resolve(outcome !== false); }); await flushReact();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps a paused start disabled until the old cloud session is released', async () => {
+    const f = await fixture(); f.state.phase = 'paused';
+    f.state.live = { status: 'stopping', sessionId: 'prior', deviceId: f.live.deviceId, generationNumber: 1, lookId: 'look', heartbeatAt: 1, updatedAt: 1 };
+    await f.render();
+    expect(f.button('正在清理…')?.disabled).toBe(true);
+    await f.click('正在清理…');
+    expect(f.live.retry).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
+    f.state.live = null; await f.render();
+    expect(f.button('开始体验')?.disabled).toBe(false);
+  });
+
+  it.each([{ canControl: false }, { passive: true }, { disabled: true }, { commandPending: true }])('blocks paused start without control: %j', async overrides => {
+    const f = await fixture(overrides); f.state.phase = 'paused'; await f.render();
+    expect(f.button('开始体验')?.disabled).toBe(true);
+    await f.click('开始体验');
+    expect(f.live.retry).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
+  });
+
   it('recovers an ended local experience without stopping again or starting generation', async () => {
     const f = await fixture();
     f.state.phase = 'select';

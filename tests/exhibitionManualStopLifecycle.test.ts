@@ -95,10 +95,13 @@ describe('manual stop lifecycle under asynchronous supplier work', () => {
     const f = fixture(); const pending = deferred<ExhibitionSdkSession>();
     f.deps.connect.mockReturnValueOnce(pending.promise);
     const starting = f.connection.start(); await flush();
-    await f.connection.stop();
+    let stopped = false;
+    const stopping = f.connection.stop().then(confirmed => { stopped = confirmed; return confirmed; }); await flush();
     expect(f.deps.stop).toHaveBeenCalledWith(f.local.id);
     expect(f.sdk.set).not.toHaveBeenCalled();
-    pending.resolve(f.sdk); await starting;
+    expect(stopped).toBe(false);
+    pending.resolve(f.sdk); await Promise.all([starting, stopping]);
+    expect(stopped).toBe(true);
     expect(f.sdk.disconnect).toHaveBeenCalledOnce(); expect(f.sdk.set).not.toHaveBeenCalled();
   });
 

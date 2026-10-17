@@ -50,7 +50,15 @@ fun main() = runBlocking {
         verify(!NativeMaterialCatalog.hasAlternative(catalogState), "Only selected material must not enable next/gesture")
         catalogState.put("selectedLookId", "off-shelf")
         verify(NativeMaterialCatalog.hasAlternative(catalogState), "One available successor must enable next/gesture for off-shelf active material")
+        verify(NativeMaterialCatalog.next(catalogState, 1) === current && NativeMaterialCatalog.next(catalogState, -1) === current,
+            "A single successor remains selectable from an off-shelf active input in either direction")
+        val last = JSONObject().put("id", "last")
+        catalogState.getJSONObject("catalog").getJSONArray("looks").put(last)
+        verify(NativeMaterialCatalog.next(catalogState, 1) === current && NativeMaterialCatalog.next(catalogState, -1) === last,
+            "Off-shelf input navigates from the matching catalog edge in each direction")
+        catalogState.getJSONObject("catalog").put("looks", org.json.JSONArray().put(current))
         catalogState.put("selectedLookId", "commute")
+        verify(NativeMaterialCatalog.next(catalogState, 1) == null, "A catalog with only the current input must not switch")
         verify(NativeMaterialCatalog.looks(catalogState).map { it.getString("id") } == listOf("commute"),
             "Native list must use backend catalog only")
         verify(NativeMaterialCatalog.selected(catalogState)?.optString("contentVersion") == "old", "Editing must retain the active input version")
@@ -97,6 +105,66 @@ fun main() = runBlocking {
         verify(cameraBinding.getBoolean("cameraReportAccepted") && cameraBinding.getJSONObject("cameraRequest").getString("action") == "open",
             "Poll returns diagnostic request and acknowledgement")
         handler.set { exchange ->
+            verify(exchange.requestURI.path == "/v1.1/api/exhibition/terminals/connect", "Display terminal endpoint")
+            val body = exchange.jsonBody()
+            verify(body.getString("terminalId") == terminal && body.getString("token") == token,
+                "Display mode preserves the bound physical terminal identity")
+            verify(!body.has("cameraCapabilities") && !body.has("cameraReport"),
+                "Display-only mode cannot advertise or report an Android camera")
+            exchange.reply(JSONObject().put("terminalId", terminal).put("mirrorId", "default"))
+        }
+        api.connectTerminal(cameraCapable = false)
+        val receiverId = "87654321-4321-4321-4321-cba987654321"
+        var displayPoll = 0
+        handler.set { exchange ->
+            verify(exchange.requestURI.path == "$mirrorPath/display/receiver/poll" && exchange.requestMethod == "POST",
+                "Receiver polling uses the mirror-scoped versioned endpoint")
+            val body = exchange.jsonBody()
+            verify(body.getString("terminalId") == terminal && body.getString("terminalToken") == token && !body.has("token"),
+                "Receiver polling authenticates the physical terminal, not desktop delegation")
+            verify(body.getString("receiverId") == receiverId, "Receiver process identity is preserved")
+            verify(body.getJSONArray("capabilities").toString() == "[\"page\",\"page-rendered\"]",
+                "Every receiver poll must advertise full-page display and rendered receipt support")
+            if (displayPoll++ == 0) verify(!body.has("sessionId") && body.getLong("after") == 0L,
+                "First receiver poll has no invented host session or cursor")
+            else verify(body.getString("sessionId") == session && body.getLong("after") == 19L,
+                "Subsequent receiver poll carries the acknowledged session cursor")
+            exchange.reply(JSONObject().put("session", JSONObject().put("id", session).put("deviceId", "computer-fixture"))
+                .put("messages", org.json.JSONArray()).put("epoch", 4).put("cursor", 19))
+        }
+        val displaySession = api.pollComputerDisplay("default", receiverId, null, 0)
+        verify(displaySession.getJSONObject("session").getString("id") == session && displaySession.getLong("epoch") == 4L
+            && displaySession.getLong("cursor") == 19L, "Receiver returns authoritative session, epoch and cursor")
+        api.pollComputerDisplay("default", receiverId, session, 19)
+        val answer = JSONObject().put("epoch", 4).put("type", "answer").put("sdp", "v=0\r\ns=fixture")
+        handler.set { exchange ->
+            verify(exchange.requestURI.path == "$mirrorPath/display/receiver/signal" && exchange.requestMethod == "POST",
+                "Receiver answer uses signaling only")
+            val body = exchange.jsonBody()
+            verify(body.getString("terminalId") == terminal && body.getString("terminalToken") == token,
+                "Receiver signal authenticates the physical terminal")
+            verify(body.getString("receiverId") == receiverId && body.getString("sessionId") == session,
+                "Receiver signal fences the process and host session")
+            verify(body.getString("kind") == "answer" && body.getJSONObject("payload").toString() == answer.toString(),
+                "Receiver preserves the answer epoch and SDP")
+            exchange.reply(JSONObject().put("accepted", true))
+        }
+        verify(api.signalComputerDisplay("default", receiverId, session, "answer", answer).getBoolean("accepted"),
+            "Receiver signal acknowledgement")
+        val rendered = JSONObject().put("epoch", 4).put("presentationId", 12)
+        handler.set { exchange ->
+            val body = exchange.jsonBody()
+            verify(exchange.requestURI.path == "$mirrorPath/display/receiver/signal" &&
+                body.getString("kind") == "rendered" && body.getJSONObject("payload").toString() == rendered.toString(),
+                "Rendered receipt preserves its peer epoch and page presentation batch")
+            verify(body.getString("terminalId") == terminal && body.getString("terminalToken") == token &&
+                body.getString("receiverId") == receiverId && body.getString("sessionId") == session,
+                "Rendered receipt uses the existing authenticated receiver identity")
+            exchange.reply(JSONObject().put("accepted", true))
+        }
+        verify(api.signalComputerDisplay("default", receiverId, session, "rendered", rendered).getBoolean("accepted"),
+            "Rendered page receipt acknowledgement")
+        handler.set { exchange ->
             verify(exchange.requestURI.path == mirrorPath && exchange.requestMethod == "GET", "State endpoint")
             exchange.reply(JSONObject().put("revision", 7))
         }
@@ -126,6 +194,7 @@ fun main() = runBlocking {
             verify(body.getString("terminalId") == terminal && body.getString("terminalToken") == token, "Allocation owner credentials")
             verify(body.getLong("generationNumber") == 9L && body.getLong("expectedRevision") == 7L, "Allocation generation")
             verify(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute", "Allocation identity")
+            verify(body.getString("xmaxModelFamily") == "x2.1.1-preview", "Native Agora model negotiation")
             verify(body.getString("contentVersion") == "fixture-version", "Allocation pins the selected material version")
             exchange.reply(JSONObject().put("id", session).put("token", "tk-fixture"), 201)
         }

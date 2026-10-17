@@ -3,16 +3,23 @@ import type { ExhibitionMirrors } from './exhibitionMirrors.ts';
 import type { ExhibitionService } from './exhibition.ts';
 import type { RemoteGestureCoordinator } from './remoteGestures.ts';
 import { resolveExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
+import { REMOTE_GESTURE_I420_CONTENT_TYPE, REMOTE_GESTURE_MAX_FRAME_BYTES,
+  REMOTE_GESTURE_MAX_RAW_FRAME_BYTES, remoteGestureI420ByteLength,
+  type RemoteGestureI420Metadata } from '../shared/remoteGestures.ts';
 import { ApiError } from './types.ts';
 
-const MAX_FRAME_BYTES = 262_144;
 const uploads = new WeakMap<RemoteGestureCoordinator, Set<string>>();
 
-async function readBytes(request: IncomingMessage, limit: number): Promise<Buffer> {
+async function readBytes(request: IncomingMessage, limit: number, expectedLength?: number): Promise<Buffer> {
   const length = request.headers['content-length'];
   if (length && (!/^\d+$/.test(length) || Number(length) > limit)) {
     request.resume();
     throw new ApiError('GESTURE_FRAME_TOO_LARGE', '手势画面过大。', 413);
+  }
+  const invalidLength = () => new ApiError('GESTURE_INVALID_IMAGE', '手势画面长度无效。', 400);
+  if (length && expectedLength !== undefined && Number(length) !== expectedLength) {
+    request.resume();
+    throw invalidLength();
   }
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -34,9 +41,10 @@ async function readBytes(request: IncomingMessage, limit: number): Promise<Buffe
     function data(chunk: Buffer) {
       size += chunk.length;
       if (size > limit) finish(new ApiError('GESTURE_FRAME_TOO_LARGE', '手势画面过大。', 413));
+      else if (expectedLength !== undefined && size > expectedLength) finish(invalidLength());
       else chunks.push(chunk);
     }
-    function end() { finish(); }
+    function end() { finish(expectedLength !== undefined && size !== expectedLength ? invalidLength() : undefined); }
     function aborted() { finish(new ApiError('GESTURE_UPLOAD_CANCELLED', '手势连接已取消。', 409)); }
     function failed() { finish(new ApiError('GESTURE_UPLOAD_FAILED', '手势画面未收到。', 400)); }
     request.on('data', data).once('end', end).once('aborted', aborted).once('error', failed);
@@ -58,7 +66,7 @@ function reply(response: ServerResponse, value: unknown) {
   response.end(JSON.stringify(value));
 }
 
-/** Dedicated bounded JPEG ingress. Frames never enter catalog metadata or persistent storage. */
+/** Dedicated bounded image ingress. Frames never enter catalog metadata or persistent storage. */
 export async function remoteGestureRequest(request: IncomingMessage, response: ServerResponse, input: {
   mirrorId: string; path: string; mirrors: ExhibitionMirrors; current: ExhibitionService;
   coordinator: RemoteGestureCoordinator; assertCurrent: () => void;
@@ -84,7 +92,8 @@ export async function remoteGestureRequest(request: IncomingMessage, response: S
     const token = request.headers['x-openbuy-terminal-token'];
     const owner = authenticate(terminalId, token);
     const id = assertSession(request.headers['x-openbuy-gesture-session'], owner);
-    if (request.headers['content-type']?.split(';')[0].trim() !== 'image/jpeg')
+    const contentType = request.headers['content-type']?.split(';')[0].trim();
+    if (contentType !== 'image/jpeg' && contentType !== REMOTE_GESTURE_I420_CONTENT_TYPE)
       throw new ApiError('GESTURE_INVALID_IMAGE', '手势画面格式无效。', 415);
     const integer = (name: string) => {
       const value = request.headers[`x-openbuy-gesture-${name}`];
@@ -95,15 +104,26 @@ export async function remoteGestureRequest(request: IncomingMessage, response: S
     const blocked = request.headers['x-openbuy-gesture-blocked'];
     if (blocked !== 'true' && blocked !== 'false') throw new ApiError('GESTURE_INVALID_INPUT', '手势状态无效。', 400);
     const metadata = { epoch: integer('epoch'), seq: integer('seq'), timestamp: integer('time'), blocked: blocked === 'true' };
+    let rawFrame: RemoteGestureI420Metadata | undefined;
+    let expectedLength: number | undefined;
+    if (contentType === REMOTE_GESTURE_I420_CONTENT_TYPE) {
+      const mirrored = request.headers['x-openbuy-gesture-mirrored'];
+      if (mirrored !== 'true' && mirrored !== 'false') throw new ApiError('GESTURE_INVALID_IMAGE', '手势画面镜像无效。', 400);
+      rawFrame = { format: 'i420-v1', width: integer('width'), height: integer('height'),
+        rotation: integer('rotation') as RemoteGestureI420Metadata['rotation'], mirrored: mirrored === 'true' };
+      const length = remoteGestureI420ByteLength(rawFrame);
+      if (length === null) throw new ApiError('GESTURE_INVALID_IMAGE', '手势画面尺寸或方向无效。', 400);
+      expectedLength = length;
+    }
     let reading = uploads.get(coordinator);
     if (!reading) { reading = new Set(); uploads.set(coordinator, reading); }
     if (reading.has(id)) { request.resume(); throw new ApiError('GESTURE_BUSY', '手势帧已丢弃。', 429); }
     reading.add(id);
     try {
-      const jpeg = await readBytes(request, MAX_FRAME_BYTES);
+      const image = await readBytes(request, rawFrame ? REMOTE_GESTURE_MAX_RAW_FRAME_BYTES : REMOTE_GESTURE_MAX_FRAME_BYTES, expectedLength);
       authenticate(terminalId, token);
       assertSession(id, owner);
-      if (jpeg.length < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8)
+      if (!rawFrame && (image.length < 4 || image[0] !== 0xff || image[1] !== 0xd8))
         throw new ApiError('GESTURE_INVALID_IMAGE', '手势画面格式无效。', 400);
       const state = current.get();
       const runtimeLookIds = (value: ReturnType<ExhibitionService['get']>) =>
@@ -120,10 +140,10 @@ export async function remoteGestureRequest(request: IncomingMessage, response: S
       const before = scope(state);
       const serverBlocked = state.providerMode !== 'xmax' || state.experienceMode === 'mox'
         || !runtimeLookIds(state).some(id => id !== state.selectedLookId) || !['idle', 'select', 'showcase'].includes(state.phase) || state.live?.localEnded === true;
-      const result = await coordinator.frame(id, metadata, jpeg, resolveExhibitionGestureSettings(state.settings.gestureRecognition), serverBlocked, () => {
+      const result = await coordinator.frame(id, metadata, image, resolveExhibitionGestureSettings(state.settings.gestureRecognition), serverBlocked, () => {
         try { authenticate(terminalId, token); assertSession(id, owner); return !response.destroyed && before === scope(current.get()); }
         catch { return false; }
-      });
+      }, rawFrame);
       authenticate(terminalId, token);
       assertSession(id, owner);
       if (!response.destroyed) reply(response, result);

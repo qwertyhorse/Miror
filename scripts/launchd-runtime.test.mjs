@@ -16,8 +16,13 @@ test('managed runtime survives loss of Desktop source and retains saved data and
   const source = resolve(home, 'Desktop/独立会展');
   const options = { home };
   try {
-    for (const name of ['dist', 'server', 'shared', 'scripts', 'seed', 'node_modules/tsx/dist', '.data/lan-tls']) await mkdir(resolve(source, name), { recursive: true });
+    for (const name of ['dist/assets/exhibition-gestures', 'dist/assets/body-scan', 'server', 'src/exhibition', 'shared', 'scripts', 'runtime/gesture', 'seed', 'node_modules/tsx/dist', '.data/lan-tls']) await mkdir(resolve(source, name), { recursive: true });
     for (const name of ['package.json', 'package-lock.json']) await writeFile(resolve(source, name), '{"type":"module"}');
+    await writeFile(resolve(source, 'tsconfig.json'), '{"compilerOptions":{"module":"ESNext"}}');
+    await writeFile(resolve(source, 'src/exhibition/mirrorGestureDetector.ts'), 'export class ExhibitionMirrorGestureDetector {}');
+    await writeFile(resolve(source, 'dist/assets/exhibition-gestures/hand_landmarker.task'), 'fixture-hand-model');
+    await writeFile(resolve(source, 'dist/assets/body-scan/pose_landmarker_full.task'), 'fixture-pose-model');
+    await writeFile(resolve(source, 'runtime/gesture/requirements.txt'), 'fixture-runtime-requirements');
     await writeFile(resolve(source, '.env'), 'XMAX_API_KEY=initial-fixture\nOPENBUY_DATA_DIR=.data\n');
     await writeFile(resolve(source, '.env.example'), 'XMAX_API_KEY=\n');
     await writeFile(resolve(source, '.data/exhibition.json'), '{"revision":1}');
@@ -37,6 +42,10 @@ test('managed runtime survives loss of Desktop source and retains saved data and
       try {
         const response = await fetch('http://127.0.0.1:' + server.address().port + '/v1.1/exhibition/control');
         console.log(JSON.stringify({ code: response.status, page: await response.text(), node: process.execPath, cwd: process.cwd(), dependency,
+          detector: await readFile('src/exhibition/mirrorGestureDetector.ts', 'utf8'), tsconfig: await readFile('tsconfig.json', 'utf8'),
+          handModel: await readFile('public/assets/exhibition-gestures/hand_landmarker.task', 'utf8'),
+          poseModel: await readFile('public/assets/body-scan/pose_landmarker_full.task', 'utf8'),
+          requirements: await readFile('runtime/gesture/requirements.txt', 'utf8'),
           environment: await readFile('.env', 'utf8'), data: await readFile('.data/exhibition.json', 'utf8') }));
       } finally { await new Promise(done => server.close(done)); }
     `);
@@ -48,6 +57,8 @@ test('managed runtime survives loss of Desktop source and retains saved data and
     assert.equal(await readlink(resolve(runtime.app, '.data')), '../data');
     assert.equal(await realpath(resolve(runtime.app, '.env')), await realpath(runtime.environment));
     assert.equal(await realpath(resolve(runtime.app, '.data')), await realpath(runtime.data));
+    assert.equal(await readlink(resolve(runtime.app, 'public')), 'dist');
+    assert.equal(await realpath(resolve(runtime.app, 'public')), await realpath(resolve(runtime.app, 'dist')));
     assert.equal(await readFile(resolve(runtime.data, 'lan-tls/root-ca.key'), 'utf8'), 'fixture-ca-key');
 
     // Routine restarts retain the published code, even when the source differs.
@@ -78,6 +89,11 @@ test('managed runtime survives loss of Desktop source and retains saved data and
     assert.equal(actual.node, await realpath(runtime.node));
     assert.equal(actual.cwd, await realpath(runtime.app));
     assert.equal(actual.dependency, 42, 'dependency symlinks must not refer back to source');
+    assert.equal(actual.detector, 'export class ExhibitionMirrorGestureDetector {}', 'server gesture imports must remain in the published app');
+    assert.equal(actual.tsconfig, '{"compilerOptions":{"module":"ESNext"}}');
+    assert.equal(actual.handModel, 'fixture-hand-model', 'the hand inference model must resolve through public after source removal');
+    assert.equal(actual.poseModel, 'fixture-pose-model', 'the pose inference model must resolve through public after source removal');
+    assert.equal(actual.requirements, 'fixture-runtime-requirements');
     assert.equal(actual.environment, 'XMAX_API_KEY=saved-runtime-fixture\n');
     assert.equal(actual.data, '{"revision":8}');
   } finally { await rm(temporary, { recursive: true, force: true }); }

@@ -1,6 +1,6 @@
 package ai.openbuy.exhibition
 
-/** Only controls the analysis copy, never RTC capture or XMAX encoding. */
+/** FPS bounds Android sampling; inputLongEdge only identifies the computer-side resize setting. */
 internal data class NativeGestureSampling(val maxFps: Int, val inputLongEdge: Int) {
     val intervalMs: Long get() = (1_000L + maxFps - 1) / maxFps
 

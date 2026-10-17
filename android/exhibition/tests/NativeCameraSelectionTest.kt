@@ -5,7 +5,8 @@ fun main() {
     var assertions = 0
     fun verify(condition: Boolean, message: String) { check(condition) { message }; assertions++ }
     fun device(id: String, facing: NativeCameraFacing) = NativeCameraDevice(id, facing,
-        sizes = listOf(NativeCameraSize(1280, 720)), fpsRanges = listOf(NativeCameraFpsRange(15, 30)))
+        sizes = listOf(NativeCameraSize(1280, 720)), fpsRanges = listOf(NativeCameraFpsRange(15, 30)),
+        minimumFrameDurationsNs = mapOf(NativeCameraSize(1280, 720) to 33_333_333L))
     val back = device("0", NativeCameraFacing.BACK)
     val front = device("1", NativeCameraFacing.FRONT)
     val external = device("100", NativeCameraFacing.EXTERNAL)
@@ -62,7 +63,21 @@ fun main() {
     verify(merged.devices.first().facing == NativeCameraFacing.EXTERNAL, "Exact-ID Camera2 match enriches unknown RTC facing")
     verify(merged.devices.first().name == "USB Camera", "RTC device name is preserved")
     verify(merged.devices.first().sizes == external.sizes && merged.devices.first().fpsRanges == external.fpsRanges, "Only exact matching metadata is added")
+    verify(merged.devices.first().minimumFrameDurationsNs == external.minimumFrameDurationsNs,
+        "Exact-ID Camera2 output durations reach the selectable RTC camera")
     verify(merged.devices.last().facing == NativeCameraFacing.UNKNOWN && merged.devices.last().sizes.isEmpty(), "Unmatched RTC camera is not guessed to be external")
+    verify(merged.devices.last().minimumFrameDurationsNs.isEmpty(), "Unmatched RTC cameras never inherit another camera's rate limits")
+    val hd = NativeCameraSize(1280, 720)
+    val fullHd = NativeCameraSize(1920, 1080)
+    val rtcDurations = rtcUnknown.copy(minimumFrameDurationsNs = mapOf(fullHd to 66_666_667L))
+    verify(system.mergeRtcDevices(listOf(rtcDurations)).devices.single().minimumFrameDurationsNs ==
+        mapOf(hd to 33_333_333L, fullHd to 66_666_667L), "Partial RTC durations retain matching system metadata")
+    verify(system.mergeRtcDevices(listOf(rtcUnknown.copy(minimumFrameDurationsNs = mapOf(hd to 50_000_000L))))
+        .devices.single().minimumFrameDurationsNs[hd] == 50_000_000L, "Explicit RTC metadata remains authoritative on a matching size")
+    verify(system.mergeRtcDevices(listOf(rtcDurations.copy(id = "100 "))).devices.single().minimumFrameDurationsNs ==
+        rtcDurations.minimumFrameDurationsNs, "Opaque camera IDs are not normalized while enriching frame durations")
+    verify(system.systemDevices.first { it.id == "100" }.minimumFrameDurationsNs == mapOf(hd to 33_333_333L),
+        "Metadata enrichment does not mutate the original system snapshot")
     verify(system.mergeRtcDevices(listOf(NativeCameraDevice("100 ", NativeCameraFacing.UNKNOWN))).devices.single().sizes.isEmpty(), "Whitespace in opaque ID is never normalized for matching")
     verify(system.mergeRtcDevices(listOf(NativeCameraDevice("100", NativeCameraFacing.FRONT))).devices.single().facing == NativeCameraFacing.FRONT, "Known RTC facing is authoritative")
     verify(system.mergeRtcDevices(emptyList()).devices.isEmpty(), "Camera2 devices absent from RTC remain unavailable")

@@ -13,12 +13,15 @@ import ai.xmax.sdk.XmaxLogger
 import ai.xmax.sdk.foundation.rtc.RoomJoinConfiguration
 import ai.xmax.sdk.foundation.rtc.RtcManaging
 import ai.xmax.sdk.service.realtime.RealtimeSessionConnection
+import ai.xmax.sdk.stream.encoding.EncodingBitratePolicy
 import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
-/** 管理 RTC 房间生命周期、心跳和实时生成信令。 */
+/**
+ * 管理 RTC 房间生命周期、心跳和实时生成信令。
+ */
 internal class RoomController(
     private val rtcManager: RtcManaging,
     private val heartbeat: RoomHeartbeat = RoomHeartbeat(rtcManager),
@@ -58,6 +61,7 @@ internal class RoomController(
                     roomId = connection.roomId,
                     userId = connection.userId,
                     token = connection.token,
+                    appId = connection.appId,
                 ),
             )
             timing?.mark(RealtimeTiming.Stage.ROOM_END)
@@ -117,21 +121,52 @@ internal class RoomController(
         taskId: String,
         videoFormat: RealtimeVideoFormat,
         context: RealtimeContext,
+        faceRestoration: Boolean,
+        targetVideoFormat: RealtimeVideoFormat?,
+        paddingContain: Boolean,
     ) {
+        val (minimum, maximum) = downlinkBitrates(targetVideoFormat ?: videoFormat)
         send(
             RoomEvent.start(
                 userId = requireUserId(),
                 taskId = taskId,
                 videoFormat = videoFormat,
                 context = context,
+                minimumBitrate = minimum,
+                maximumBitrate = maximum,
+                faceRestoration = faceRestoration,
+                targetVideoFormat = targetVideoFormat,
+                paddingContain = paddingContain,
             ),
         )
+    }
+
+    override fun changeTargetSize(taskId: String, targetVideoFormat: RealtimeVideoFormat, ensureActive: () -> Unit) {
+        ensureActive()
+        if (taskId.isBlank()) {
+            throw XmaxError(XmaxErrorCode.INVALID_CONFIGURATION, "Realtime generation task ID cannot be empty")
+        }
+
+        val (minimum, maximum) = downlinkBitrates(targetVideoFormat)
+        val message = RoomEvent.changeTargetSize(requireUserId(), taskId, targetVideoFormat, minimum, maximum)
+        ensureActive()
+        send(message)
+    }
+
+    /**
+     * 下行最低码率固定为 100 Kbps；最高码率按回传尺寸和 24 fps 计算，限制在 100～10000 Kbps。
+     */
+    private fun downlinkBitrates(videoFormat: RealtimeVideoFormat): Pair<Int, Int> {
+        val (_, maximum) = EncodingBitratePolicy.resolve(videoFormat.width, videoFormat.height, fps = 24)
+        return 100 to maximum.coerceIn(100, 10_000)
     }
 
     override fun changeGenerationCondition(
         taskId: String,
         videoFormat: RealtimeVideoFormat,
         context: RealtimeContext,
+        faceRestoration: Boolean,
+        paddingContain: Boolean,
     ) {
         send(
             RoomEvent.changeCondition(
@@ -139,6 +174,8 @@ internal class RoomController(
                 taskId = taskId,
                 videoFormat = videoFormat,
                 context = context,
+                faceRestoration = faceRestoration,
+                paddingContain = paddingContain,
             ),
         )
     }

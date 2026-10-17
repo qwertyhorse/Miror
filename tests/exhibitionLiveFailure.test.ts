@@ -1,14 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { exhibitionLiveFailure, safeExhibitionErrorMessage } from '../src/exhibition/liveFailure';
+import { exhibitionLiveFailure, exhibitionProviderRejection, safeExhibitionErrorMessage } from '../src/exhibition/liveFailure';
 
 const fallback = '换装服务连接失败，请由工作人员重试。';
 
 describe('exhibition live failure', () => {
   it.each([
+    { code: 'SESSION_ERROR', message: 'POINTS_INSUFFICIENT', details: { failure_stage: 'rtc' } },
+    { code: 'API_ERROR', message: '用户积分余额不足', details: { failure_stage: 'rtc_connect' } },
+    { code: 'API_ERROR', message: 'Insufficient credits', details: { business_code: 46007, http_status: 200 } },
+    { code: 'SESSION_ERROR', details: { server_close_reason: 'POINTS_INSUFFICIENT' } },
+    { code: 'SESSION_ERROR', details: { reason_code: 'INSUFFICIENT_BALANCE' } },
+  ])('stops recovery and explains an explicit supplier balance refusal: %j', cause => {
+    expect(exhibitionProviderRejection(cause)).toBe('balance');
+    expect(exhibitionLiveFailure(cause, fallback).message).toBe('XMAX 积分不足，请联系工作人员。');
+  });
+
+  it.each([
+    { code: 'API_ERROR', message: 'balance lookup timed out', details: { business_code: 46007, http_status: 500 } },
+    { code: 'WEB_RTC_ERROR', details: { reason_code: 'rtc_reconnect_timeout' } },
+    { code: 'API_ERROR', message: '系统异常', details: { business_code: 500 } },
+    { consumedCredits: 3000, pointsLimit: 3000 },
+  ])('does not infer a supplier balance refusal from generic errors or local usage: %j', cause => {
+    expect(exhibitionProviderRejection(cause)).toBeNull();
+    expect(exhibitionLiveFailure(cause, fallback).message).not.toContain('积分不足');
+  });
+
+  it('recognizes raw SDK authorization status without claiming that it means insufficient balance', () => {
+    const cause = { code: 'API_ERROR', httpStatus: 403, apiCode: 1234 };
+    expect(exhibitionProviderRejection(cause)).toBe('request');
+    expect(exhibitionLiveFailure(cause, fallback).message).toBe(fallback);
+  });
+
+  it.each([
     ['remote_first_frame_timeout', '生成画面等待超时，请检查镜端网络后重试。'],
     ['local_outbound_zero_sent_frame_rate', '摄像头画面未能上传，请检查镜端网络后重试。'],
     ['local_outbound_not_ready', '摄像头画面未能上传，请检查镜端网络后重试。'],
-    ['local_publish_failed', '摄像头画面未能上传，请检查镜端网络后重试。'],
+    ['local_publish_failed', '视频推流启动失败，请重新连接。'],
     ['local_outbound_track_muted', '摄像头画面未能上传，请检查镜端网络后重试。'],
     ['local_outbound_track_ended', '摄像头已断开，请重新开启。'],
     ['rtc_reconnect_timeout', '实时视频连接失败，请检查镜端网络后重试。'],

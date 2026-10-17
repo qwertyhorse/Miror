@@ -6,6 +6,9 @@ import type { ExhibitionService } from './exhibition.ts';
 import type { ExhibitionMirrors } from './exhibitionMirrors.ts';
 import { RemoteGestureCoordinator, RemoteGestureError } from './remoteGestures.ts';
 import { remoteGestureRequest } from './remoteGestureHttp.ts';
+import { ComputerDisplayBroker } from './computerDisplay.ts';
+import { computerDisplayRequest } from './computerDisplayHttp.ts';
+import { BROWSER_TEST_TTL_MS } from './browserTests.ts';
 
 const BROWSER_TEST_ID = /^test-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const BROWSER_TEST_COOKIE = 'miror_browser_test';
@@ -15,7 +18,7 @@ function browserTestToken(request: IncomingMessage): string {
   return values.length === 1 ? values[0].slice(BROWSER_TEST_COOKIE.length + 1) : '';
 }
 function browserTestCookie(id: string, token: string, expired = false): string {
-  return `${BROWSER_TEST_COOKIE}=${token}; Path=/v1.1/api/exhibition/mirrors/${id}; Max-Age=${expired ? 0 : 3600}; HttpOnly; Secure; SameSite=Strict`;
+  return `${BROWSER_TEST_COOKIE}=${token}; Path=/v1.1/api/exhibition/mirrors/${id}; Max-Age=${expired ? 0 : Math.ceil(BROWSER_TEST_TTL_MS / 1_000)}; HttpOnly; Secure; SameSite=Strict`;
 }
 function browserTestRouteAllowed(method: string, path: string): boolean {
   if (['GET', 'HEAD'].includes(method) && (/^\/assets\/[^/]+(?:\/(?:display|reference)\/[^/]+)?$/.test(path) || /^\/skin\/[a-f0-9-]{36}$/.test(path))) return true;
@@ -44,9 +47,13 @@ async function body(request: IncomingMessage, maximumBytes = 16_384): Promise<Re
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ApiError('INVALID_JSON', '请提供有效的 JSON 对象。');
   return value as Record<string, unknown>;
 }
-export function createApiServer(service: TryOnService, allowedOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:4173', 'http://localhost:4173'], _unusedKeySettings?: unknown, exhibition?: ExhibitionService | ExhibitionMirrors, gestures?: RemoteGestureCoordinator) {
+export function createApiServer(service: TryOnService, allowedOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:4173', 'http://localhost:4173'], _unusedKeySettings?: unknown, exhibition?: ExhibitionService | ExhibitionMirrors, gestures?: RemoteGestureCoordinator, display?: ComputerDisplayBroker) {
   exhibition?.attachLiveService(service);
   const mirrors = exhibition && 'getMirror' in exhibition ? exhibition : undefined;
+  const computerDisplay = mirrors ? display ?? new ComputerDisplayBroker({ binding: mirrorId => {
+    mirrors.getMirror(mirrorId);
+    return mirrors.devices.binding(mirrorId);
+  } }) : undefined;
   const defaultExhibition = () => mirrors ? mirrors.getMirror() : exhibition as ExhibitionService | undefined;
   let waitingForChanges = 0;
   const server = createServer(async (request, response) => {
@@ -90,6 +97,7 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         const currentService = context?.service ?? service;
         if (!current) throw new ApiError('EXHIBITION_MIRROR_NOT_FOUND', '未找到这面试衣镜。', 404);
         if (browserTest && !browserTestRouteAllowed(request.method ?? '', path)) throw new ApiError('BROWSER_TEST_OPERATION_FORBIDDEN', '浏览器测试不支持此操作。', 403);
+        if (context) response.setHeader('Set-Cookie', browserTestCookie(mirrorId, testToken));
         const assertCurrent = () => {
           if (browserTest) mirrors!.browserTests.resolve(mirrorId, testToken);
           else if (mirrors) mirrors.getMirror(mirrorId);
@@ -100,6 +108,11 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           assertCurrent();
           return input;
         };
+        if (!browserTest && mirrorRoute && path.startsWith('/display/')) {
+          if (!mirrors || !computerDisplay) throw new ApiError('DISPLAY_UNAVAILABLE', '电脑显示暂不可用。', 503);
+          await computerDisplayRequest(request, response, { mirrorId, path, mirrors, current, broker: computerDisplay, readBody });
+          return;
+        }
         if (!browserTest && mirrorRoute && path.startsWith('/gestures/')) {
           if (!mirrors || !gestures) throw new ApiError('GESTURE_UNAVAILABLE', 'Linux 手势识别暂不可用。', 503);
           await remoteGestureRequest(request, response, { mirrorId, path, mirrors, current, coordinator: gestures, assertCurrent });
@@ -113,7 +126,11 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           response.setHeader('Set-Cookie', browserTestCookie(created.mirror.id, created.token));
           return json(response, 201, { mirror: created.mirror, expiresAt: created.expiresAt });
         }
-        if (mirrorRoute && !path && request.method === 'DELETE') return json(response, 200, mirrors!.remove(mirrorId, await readBody()));
+        if (mirrorRoute && !path && request.method === 'DELETE') {
+          const removed = mirrors!.remove(mirrorId, await readBody());
+          computerDisplay?.invalidate(mirrorId);
+          return json(response, 200, removed);
+        }
         if (mirrorRoute && path === '/provider-settings' && !browserTest) {
           if (request.method === 'GET') return json(response, 200, currentService.providerSettings(mirrorId));
           if (request.method === 'PUT') {
@@ -148,9 +165,14 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
         if (mirrorRoute && !path && request.method === 'PATCH') return json(response, 200, mirrors!.rename(mirrorId, await readBody()));
         if (mirrorRoute && path === '/copy' && request.method === 'POST') return json(response, 200, await mirrors!.copy(mirrorId, await readBody()));
         if (mirrorRoute && path === '/looks/copy' && request.method === 'POST') return json(response, 200, await mirrors!.copyLook(mirrorId, await readBody()));
-        if (mirrorRoute && path === '/binding' && request.method === 'POST') return json(response, 200, await mirrors!.bindDevice(mirrorId, await readBody()));
+        if (mirrorRoute && path === '/binding' && request.method === 'POST') {
+          const binding = await mirrors!.bindDevice(mirrorId, await readBody());
+          computerDisplay?.invalidate(mirrorId);
+          return json(response, 200, binding);
+        }
         if (mirrorRoute && path === '/binding' && request.method === 'DELETE') {
           await mirrors!.unbindDevice(mirrorId, await readBody());
+          computerDisplay?.invalidate(mirrorId);
           return json(response, 200, { binding: null });
         }
         if (mirrorRoute && path === '/camera' && request.method === 'GET') return json(response, 200, mirrors!.cameraStatus(mirrorId));
@@ -210,13 +232,26 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
           if (request.headers['x-miror-protocol'] !== '2') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请更新镜端后开始体验。', 426);
           if (current.liveStatus().providerId === 'decart' && request.headers['x-miror-realtime'] !== 'decart-v1') throw new ApiError('EXHIBITION_CLIENT_UPGRADE_REQUIRED', '请升级镜端以使用 Decart。', 426);
           const input = await readBody(); let localId: string | undefined;
+          let desktopOwner = false;
+          const desktopStillOwns = () => {
+            if (!desktopOwner) return true;
+            try { return computerDisplay?.assertDesktopOwner(mirrorId, input) === true; } catch { return false; }
+          };
           if (!browserTest) {
-            mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
+            desktopOwner = computerDisplay?.assertDesktopOwner(mirrorId, input) ?? false;
+            if (!desktopOwner) {
+              if (computerDisplay?.hasHost(mirrorId)) throw new ApiError('DISPLAY_HOST_ACTIVE', '当前由电脑提供画面，请从电脑开始体验。', 409);
+              mirrors?.devices.assertOwner(mirrorId, { terminalId: input.terminalId as string | undefined, terminalToken: input.terminalToken as string | undefined });
+            }
             mirrors?.devices.assertCameraClosed(mirrorId);
           }
           response.once('close', () => { if (!response.writableEnded && localId) void currentService.stop(localId).then(() => current.reconcileLive()).catch(() => undefined); });
-          const created = await current.createLiveSession(input, { cancelled: () => response.destroyed }); localId = created.id;
+          const created = await current.createLiveSession(input, { cancelled: () => response.destroyed || !desktopStillOwns() }); localId = created.id;
           if (response.destroyed) { await currentService.stop(created.id); await current.reconcileLive(); return; }
+          if (!desktopStillOwns()) {
+            await currentService.stop(created.id); await current.reconcileLive();
+            throw new ApiError('DISPLAY_UNAUTHORIZED', '电脑显示身份已失效。', 403);
+          }
           return json(response, 201, created);
         }
         const liveRenewal = /^\/live\/session\/([a-f0-9-]{36})\/renewal(?:\/(commit))?$/.exec(path);
@@ -284,8 +319,8 @@ export function createApiServer(service: TryOnService, allowedOrigins = ['http:/
       json(response, safe.statusCode, { error: { code: safe.code, message: safe.message }, code: safe.code, message: safe.message });
     }
   });
-  const exhibitionWatchdog = exhibition ? setInterval(() => { void exhibition.sweepLive().catch(() => undefined); }, 1_000) : undefined;
+  const exhibitionWatchdog = exhibition ? setInterval(() => { computerDisplay?.sweep(); void exhibition.sweepLive().catch(() => undefined); }, 1_000) : undefined;
   exhibitionWatchdog?.unref();
-  server.on('close', () => { if (exhibitionWatchdog) clearInterval(exhibitionWatchdog); void gestures?.closeAll(); });
+  server.on('close', () => { if (exhibitionWatchdog) clearInterval(exhibitionWatchdog); computerDisplay?.closeAll(); void gestures?.closeAll(); });
   return server;
 }

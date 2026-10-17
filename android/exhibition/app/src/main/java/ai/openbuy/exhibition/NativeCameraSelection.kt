@@ -17,6 +17,8 @@ internal data class NativeCameraDevice(
     val name: String = "",
     val sizes: List<NativeCameraSize> = emptyList(),
     val fpsRanges: List<NativeCameraFpsRange> = emptyList(),
+    val unavailableSizes: Set<NativeCameraSize> = emptySet(),
+    val minimumFrameDurationsNs: Map<NativeCameraSize, Long> = emptyMap(),
 ) {
     val label: String get() {
         val shortName = name.takeUnless { it.startsWith("Camera ") && it.contains("Facing") }.orEmpty().trim().replace(Regex("\\s+"), " ").take(28).takeIf { it.isNotEmpty() && it != id }
@@ -40,6 +42,8 @@ internal data class NativeCameraSnapshot(
                 facing = if (rtc.facing == NativeCameraFacing.UNKNOWN) system.facing else rtc.facing,
                 sizes = rtc.sizes.ifEmpty { system.sizes },
                 fpsRanges = rtc.fpsRanges.ifEmpty { system.fpsRanges },
+                unavailableSizes = rtc.unavailableSizes + system.unavailableSizes,
+                minimumFrameDurationsNs = system.minimumFrameDurationsNs + rtc.minimumFrameDurationsNs,
             )
         }
         return copy(devices = NativeCameraSelection.ordered(merged), rtcEnumerated = true)

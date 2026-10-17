@@ -1,20 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExhibitionLiveConnection, type ExhibitionLiveDeps } from '../src/exhibition/useExhibitionLive';
 import type { XmaxRegion } from '../shared/xmax';
+import type { RealtimeConnectOptions } from '../src/exhibition/xmaxSdkContract';
+import { xmaxSessionFixture } from './support/xmaxSessionFixture';
 
 const sdkMocks = vi.hoisted(() => {
   const sdk = { getSessionUid: vi.fn(() => 'provider-fixture'), set: vi.fn(async () => {}), disconnect: vi.fn(async () => {}),
     stopGeneration: vi.fn(async () => {}), stopLocalStream: vi.fn(async () => {}) };
   const makeRegion = (region: string) => {
     const uploadAndCheckImage = vi.fn(async () => ({ url: `https://${region}.fixture.test/reference.png` }));
-    const connect = vi.fn(async (_source: MediaStream | File, _options: Parameters<ExhibitionLiveDeps['connect']>[2]) => sdk);
+    const connect = vi.fn(async (_source: MediaStream | File, options: Parameters<ExhibitionLiveDeps['connect']>[2] & Pick<RealtimeConnectOptions, 'onStateChange'>) => xmaxSessionFixture(sdk, options));
     return { uploadAndCheckImage, connect, models: { realtime: vi.fn((name: string) => ({ name })) },
       createXmaxClient: vi.fn((_options: { apiKey: string; locale: string; telemetry: boolean }) => ({ files: { uploadAndCheckImage }, realtime: { connect, connectMedia: connect } })) };
   };
   return { sdk, cn: makeRegion('cn'), global: makeRegion('global') };
 });
-vi.mock('@xmaxai/sdk', () => ({ createXmaxClient: sdkMocks.cn.createXmaxClient, models: sdkMocks.cn.models }));
-vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: sdkMocks.global.createXmaxClient, models: sdkMocks.global.models }));
+vi.mock('../src/exhibition/xmaxWebSdk', () => ({ createExhibitionSdk: (region: 'cn' | 'global') => ({
+  createXmaxClient: sdkMocks[region].createXmaxClient, models: sdkMocks[region].models,
+}) }));
 
 type LocalSession = Parameters<ExhibitionLiveDeps['connect']>[1];
 const connections: ExhibitionLiveConnection[] = [];
@@ -25,8 +28,8 @@ afterEach(async () => {
 });
 
 function fixture(providerRegion?: XmaxRegion, boundRegion = providerRegion, prefetchImages?: string[]) {
-  const originalTrack = { readyState: 'live', stop: vi.fn() };
-  const clonedTrack = { readyState: 'live', stop: vi.fn(), onended: null };
+  const originalTrack = { readyState: 'live', stop: vi.fn(), getSettings: () => ({ frameRate: Infinity }) };
+  const clonedTrack = { readyState: 'live', stop: vi.fn(), onended: null, getSettings: () => ({ width: 2160, height: 3840, frameRate: Infinity }) };
   const stream = { getVideoTracks: () => [originalTrack], getTracks: () => [originalTrack] } as unknown as MediaStream;
   const cloned = { getVideoTracks: () => [clonedTrack], getTracks: () => [clonedTrack] } as unknown as MediaStream;
   const created: LocalSession = {
@@ -62,6 +65,10 @@ describe('exhibition session SDK region', () => {
     expect(sdkMocks[region].uploadAndCheckImage).not.toHaveBeenCalled();
     expect(sdkMocks[region].createXmaxClient).toHaveBeenCalledTimes(1);
     expect(sdkMocks[region].connect).toHaveBeenCalledOnce();
+    const sdkInput = sdkMocks[region].connect.mock.calls[0][0] as MediaStream;
+    expect(sdkInput).toBe(f.cloned);
+    expect(sdkInput.getVideoTracks()[0].getSettings()).toEqual({ width: 2160, height: 3840, frameRate: 30 });
+    expect(f.originalTrack.getSettings().frameRate).toBe(Infinity);
     expect(f.deps.create).toHaveBeenCalledOnce();
   });
 

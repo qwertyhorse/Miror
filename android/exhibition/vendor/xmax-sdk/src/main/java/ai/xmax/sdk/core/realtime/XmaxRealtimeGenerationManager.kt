@@ -14,16 +14,28 @@ import java.util.UUID
 internal class XmaxRealtimeGenerationManager(
     private val interactionController: InteractionControlling,
     private val streamController: StreamControlling,
-    /** 可注入固定标识以测试生命周期；生产环境每次 start 分配一个新任务标识。 */
+    /**
+     * 可注入固定标识以测试生命周期；生产环境每次 start 分配一个新任务标识。
+     */
     private val taskIdGenerator: () -> String = ::createTaskId,
 ) {
     private val stateLock = Any()
     private var currentContext: RealtimeContext? = null
+    private var currentFaceRestoration = false
 
-    /** 在途切流可持有同一个条件对象，保证重连回滚后仍能完成最新替换意图。 */
+    /**
+     * 在途切流可持有同一个条件对象，保证重连回滚后仍能完成最新替换意图。
+     */
     val cachedContext: RealtimeContext? get() = synchronized(stateLock) { currentContext }
 
-    /** 首次生成必须提供条件；已缓存条件可供后续重启复用。 */
+    /**
+     * 自动重启生成时保留上次成功请求的人脸还原设置。
+     */
+    val cachedFaceRestoration: Boolean get() = synchronized(stateLock) { currentFaceRestoration }
+
+    /**
+     * 首次生成必须提供条件；已缓存条件可供后续重启复用。
+     */
     fun validateContext(context: RealtimeContext?) {
         if (context == null && synchronized(stateLock) { currentContext } == null) {
             throw XmaxError(
@@ -40,6 +52,10 @@ internal class XmaxRealtimeGenerationManager(
     suspend fun start(
         videoFormat: RealtimeVideoFormat,
         context: RealtimeContext?,
+        faceRestoration: Boolean = false,
+        targetVideoFormat: RealtimeVideoFormat? = null,
+        generationVideoFormat: RealtimeVideoFormat = videoFormat,
+        paddingContain: Boolean = false,
         ensureCurrent: () -> Unit,
     ): String {
         val resolvedContext = context ?: synchronized(stateLock) { currentContext }
@@ -50,14 +66,20 @@ internal class XmaxRealtimeGenerationManager(
         val taskId = taskIdGenerator()
         val confirmation = streamController.beginGeneration(
             taskId,
-            videoFormat,
+            generationVideoFormat,
             resolvedContext,
+            faceRestoration,
+            targetVideoFormat,
+            paddingContain,
         )
         try {
             confirmation.await()
             ensureCurrent()
-            interactionController.startInteraction(taskId, videoFormat)
-            synchronized(stateLock) { currentContext = resolvedContext }
+            interactionController.startInteraction(taskId, videoFormat, useDisplayedSize = paddingContain)
+            synchronized(stateLock) {
+                currentContext = resolvedContext
+                currentFaceRestoration = faceRestoration
+            }
             return taskId
         } catch (error: Throwable) {
             confirmation.cancel()
@@ -66,21 +88,35 @@ internal class XmaxRealtimeGenerationManager(
         }
     }
 
-    /** 更新现有任务，复用 taskId；传 null 只刷新交互格式，不发送条件更新信令。 */
+    /**
+     * 更新现有任务，复用 taskId；条件为空时复用缓存，仍发送本次人脸还原设置。
+     */
     suspend fun update(
         taskId: String,
         videoFormat: RealtimeVideoFormat,
         context: RealtimeContext?,
+        faceRestoration: Boolean = false,
+        generationVideoFormat: RealtimeVideoFormat = videoFormat,
+        paddingContain: Boolean = false,
         ensureCurrent: () -> Unit,
     ) {
-        interactionController.startInteraction(taskId, videoFormat)
-        if (context == null) return
-        streamController.updateGeneration(taskId, videoFormat, context)
+        val resolvedContext = context ?: synchronized(stateLock) { currentContext }
+            ?: throw XmaxError(
+                XmaxErrorCode.INVALID_CONFIGURATION,
+                "A realtime context is required for the first generation",
+            )
+        streamController.updateGeneration(taskId, generationVideoFormat, resolvedContext, faceRestoration, paddingContain)
         ensureCurrent()
-        synchronized(stateLock) { currentContext = context }
+        interactionController.startInteraction(taskId, videoFormat, useDisplayedSize = paddingContain)
+        synchronized(stateLock) {
+            currentContext = resolvedContext
+            currentFaceRestoration = faceRestoration
+        }
     }
 
-    /** 停止交互和指定任务，保留上次成功条件以便重新生成；独立释放步骤均会尝试。 */
+    /**
+     * 停止交互和指定任务，保留上次成功条件以便重新生成；独立释放步骤均会尝试。
+     */
     suspend fun stop(taskId: String) {
         cleanupResources(
             { interactionController.stopInteraction() },
@@ -88,14 +124,21 @@ internal class XmaxRealtimeGenerationManager(
         )
     }
 
-    /** 连接重置时清空条件缓存并停止任务；空 taskId 由 Stream 解释为停止当前任务。 */
+    /**
+     * 连接重置时清空条件缓存并停止任务；空 taskId 由 Stream 解释为停止当前任务。
+     */
     suspend fun reset(taskId: String = "") {
-        synchronized(stateLock) { currentContext = null }
+        synchronized(stateLock) {
+            currentContext = null
+            currentFaceRestoration = false
+        }
         stop(taskId)
     }
 
     internal companion object {
-        /** UUID 原始 16 字节使用无填充的 Base64URL 编码，并通过查询参数标记平台。 */
+        /**
+         * UUID 原始 16 字节使用无填充的 Base64URL 编码，并通过查询参数标记平台。
+         */
         fun createTaskId(): String {
             val uuid = UUID.randomUUID()
             val bytes = ByteBuffer.allocate(16)

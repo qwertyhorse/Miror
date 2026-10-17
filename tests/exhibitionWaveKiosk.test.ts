@@ -198,8 +198,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     expect(control().getReactProps()['data-detection']).toBe('waiting');
     capture.captureStatus = 'active';
     await f.update({ phase: 'paused' });
-    expect(control().textContent).toBe('手势已暂停');
-    expect(control().getReactProps()['data-detection']).toBe('paused');
+    expect(control()).toBeUndefined();
     expect(f.send).not.toHaveBeenCalled();
   });
 
@@ -283,7 +282,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it('accepts a hand-only control target and asks for a palm when hands are ambiguous', async () => {
+  it('accepts a hand-only control target and keeps palm guidance for legacy hand ambiguity', async () => {
     capture.controlSource = 'hand';
     const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;
@@ -297,7 +296,7 @@ describe('a revealed palm or wave advances material without beginning an experie
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it('updates ambiguity feedback without queuing an action from a rendered status', async () => {
+  it('keeps palm guidance for legacy operator ambiguity without queuing an action from a rendered status', async () => {
     capture.operatorStatus = 'ambiguous'; capture.handDetected = true;
     const f = await fixture({ phase: 'showcase' });
     const control = () => host!.find(node => node.nodeName === 'button' && node.getReactProps()['aria-label'] === '关闭手势换装')!;

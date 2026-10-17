@@ -43,17 +43,23 @@ The private worker accepts these as --model and --pose-model, respectively.
 
 Runtime contract
 
-createGestureInference() resolves only after both models are created and warm. infer()
-accepts a complete JPEG of at most 256 KiB and dimensions no larger than 960 by
-960. The Android Linux mode follows the configured input long edge (480, 720 or
-960; default 720) and maximum frame rate. Older 480-pixel frames remain supported;
-the server does not upscale frames. Pillow validates the JPEG header before
-pixel allocation and rejects corrupt,
-truncated, non-JPEG and oversized frames. Timestamps must increase. Both native
-and server inference use the same three hand-confidence settings; a changed
-configuration replaces only the hand model and its tracking context. Pose
-tracking and its monotonic VIDEO clock continue without resetting. Pose and
-hand inference use the same decoded frame and timestamp.
+createGestureInference() resolves only after both models are created and warm.
+Android 0.6.13 sends packed I420 frames (Y, U, V) without Android-side resizing,
+RGB conversion or JPEG encoding. The open response advertises frameFormat:
+i420-v1. Dimensions are bounded to 4096 per side and 3840 * 2160 total pixels;
+body length must exactly match width * height + 2 * ceil(width/2) * ceil(height/2).
+The HTTP body limit is 16 MiB. Rotation (0/90/180/270) and mirroring are validated.
+The computer corrects orientation and reduces to the configured long edge
+(480, 720 or 960; default 720) before inference, without enlarging smaller frames.
+Legacy clients may still send complete JPEG frames of at most 256 KiB and
+960 by 960 pixels. New Android clients require raw-frame capability and do not
+silently fall back to JPEG. Raw 1080p payloads are about 3.1 MB per frame;
+network transfer and frame copies still consume Android resources.
+
+Timestamps must increase. Both native and server inference use the same three
+hand-confidence settings; a changed configuration replaces only the hand model
+and its tracking context. Pose tracking and its monotonic VIDEO clock continue
+without resetting. Pose and hand inference use the same decoded frame and timestamp.
 
 There is one in-flight frame per worker. Another frame is rejected immediately
 with INFERENCE_BUSY, never queued or replayed. Startup is bounded to 15 seconds;
@@ -61,7 +67,8 @@ inference to 5 seconds. A timeout, process exit or protocol error closes the
 instance; the session coordinator must create a new context. close() is idempotent,
 rejects outstanding work, sends SIGTERM and escalates to SIGKILL after 500 ms.
 
-JPEG base64 exists only on private child-process stdin. Responses contain hand
+Raw I420 is sent to the private worker through a small JSON header followed by
+binary bytes; legacy JPEG base64 remains supported. Responses contain hand
 landmarks, pose landmarks (33 per person, including finite visibility) and
 timings. The server validates the two-hand and two-pose limits. Frames are never
 written to disk or logs, and native

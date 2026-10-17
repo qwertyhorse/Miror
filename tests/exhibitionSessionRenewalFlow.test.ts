@@ -78,6 +78,10 @@ function fixture(expireSeconds = 120, decart = false) {
       statesAfterStopRoute.push(exhibition.get()); return clientData(record);
     }),
     heartbeat: vi.fn(async (id, deviceId) => exhibition.heartbeat({ sessionId: id, deviceId })),
+    updateCondition: vi.fn(async (id, input) => clientData(await exhibition.updateLiveCondition(id, {
+      ...input, bindingId: exhibition.readyReference(input.lookId, true)!.bindingId,
+    }))),
+    conditionApplied: vi.fn(async (id, input) => exhibition.liveConditionApplied(id, input)),
     reportError: vi.fn(async input => exhibition.reportLiveError(input)),
     prepareRenewal: vi.fn(async (id, input) => exhibition.prepareLiveRenewal(id, input)),
     commitRenewal: vi.fn(async (id, input) => exhibition.commitLiveRenewal(id, input)),
@@ -94,11 +98,14 @@ function fixture(expireSeconds = 120, decart = false) {
     }), now: () => performance.now(),
   } satisfies ExhibitionLiveDeps;
   const events = { status: vi.fn(), stream: vi.fn(), refresh: vi.fn(), updateError: vi.fn() };
-  const connection = () => {
+  const currentInput = (): Input => {
     const state = exhibition.get(); const look = state.looks.find(value => value.id === state.selectedLookId)!;
-    const controller = new ExhibitionLiveConnection({ mirrorId: exhibition.mirrorId, deviceId: owner, sessionNumber: state.sessionNumber,
+    return { mirrorId: exhibition.mirrorId, deviceId: owner, sessionNumber: state.sessionNumber,
       generationNumber: state.generationNumber, expectedRevision: state.revision, lookId: look.id, image: look.image,
-      mode: state.experienceMode, prompt: look.prompt, referenceKind: look.referenceKind, stream }, events, deps);
+      mode: state.experienceMode, prompt: look.prompt, referenceKind: look.referenceKind, stream };
+  };
+  const connection = () => {
+    const controller = new ExhibitionLiveConnection(currentInput(), events, deps);
     connections.push(controller); return controller;
   };
   const ready = async (controller: ExhibitionLiveConnection) => {
@@ -108,10 +115,55 @@ function fixture(expireSeconds = 120, decart = false) {
     callbacks.get(controller.sessionId!)!.onRemoteStream(output); controller.reportRenderedFrame(output); await flush();
   };
   return { exhibition, service, store, keys, issue, deactivate, activeKeysAtIssue, decartFetch, deps, sdks, statesAfterStopRoute,
-    originalStop, events, connection, ready, callbacks };
+    originalStop, events, connection, ready, callbacks, currentInput };
 }
 
 describe('continuous exhibition renewal across the real services and client lifecycle', () => {
+  it.each(['before-request', 'during-lookup'] as const)('keeps an accepted outfit and its RTC when renewal races %s', async boundary => {
+    const f = fixture(); const first = f.connection(); await f.ready(first);
+    const firstId = first.sessionId!;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    if (boundary === 'before-request') {
+      f.deps.prepareRenewal.mockImplementationOnce(async (id, input) => {
+        await pending;
+        return f.exhibition.prepareLiveRenewal(id, input);
+      });
+    } else {
+      const get = f.service.get.bind(f.service);
+      vi.spyOn(f.service, 'get').mockImplementationOnce(async (...args) => {
+        const record = await get(...args);
+        await pending;
+        return record;
+      });
+    }
+    await vi.advanceTimersByTimeAsync(102_000);
+    expect(f.deps.prepareRenewal).toHaveBeenCalledOnce();
+    const selected = f.exhibition.command({ action: 'next' });
+    expect(selected.live?.sessionId).toBe(firstId);
+    const input = f.currentInput();
+    // This is the hook's decision that previously retired the healthy connection.
+    expect(first.canReuse(input)).toBe(true);
+    const updating = first.update(input);
+    await flush();
+    expect(f.deps.updateCondition).not.toHaveBeenCalled();
+    release();
+    expect(await updating).toBe(true);
+    expect(f.exhibition.get()).toMatchObject({ phase: 'showcase', selectedLookId: selected.selectedLookId,
+      displayedLookId: selected.selectedLookId, live: { sessionId: firstId, status: 'running' } });
+    expect(f.store.get(firstId).status).toBe('active');
+    expect(f.sdks[0].disconnect).not.toHaveBeenCalled();
+    expect(f.events.stream).not.toHaveBeenCalledWith(null);
+    expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.issue).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.deps.prepareRenewal).toHaveBeenCalledTimes(2);
+    expect(f.deps.prepareRenewal).toHaveBeenLastCalledWith(firstId, expect.objectContaining({ generationNumber: input.generationNumber }), expect.any(AbortSignal));
+    expect(f.deps.commitRenewal).toHaveBeenCalledOnce();
+    expect(f.store.get(firstId).status).toBe('stopped');
+    expect(f.exhibition.get()).toMatchObject({ phase: 'generating', selectedLookId: selected.selectedLookId, live: null });
+  });
+
   it('keeps the stop-route plan, starts the next bounded segment for the same owner, then stays ended after manual stop', async () => {
     const f = fixture(); const first = f.connection(); await f.ready(first);
     const firstId = first.sessionId!; const running = f.exhibition.get();
@@ -165,13 +217,71 @@ describe('continuous exhibition renewal across the real services and client life
     expect(f.deps.reportError).not.toHaveBeenCalled();
   });
 
-  it('pauses an unexpected provider disconnect without treating it as a planned continuation', async () => {
+  it.each(['running-session-error', 'connect-api-error'] as const)('waits for manual resume after XMAX balance rejection at %s', async boundary => {
+    const f = fixture(3600); const first = f.connection();
+    if (boundary === 'connect-api-error') {
+      f.deps.connect.mockRejectedValueOnce({ code: 'API_ERROR', message: '用户积分余额不足', details: { failure_stage: 'rtc_connect' } });
+      await first.start();
+    } else {
+      await f.ready(first);
+      f.callbacks.get(first.sessionId!)!.onError('POINTS_INSUFFICIENT', {
+        code: 'SESSION_ERROR', message: 'POINTS_INSUFFICIENT', details: { failure_stage: 'rtc' },
+      });
+    }
+    await flush(); await first.stop(); await f.exhibition.sweepLive();
+    const firstId = f.store.list()[0].id;
+    const rejected = f.exhibition.get();
+    expect(f.deps.reportError).toHaveBeenCalledOnce();
+    expect(f.deps.reportError).toHaveBeenCalledWith(expect.objectContaining({ sessionId: firstId, reason: 'provider_rejected' }));
+    expect(rejected).toMatchObject({ phase: 'paused', live: null,
+      lifecycle: { connection: 'needs_assistance', reason: 'provider_rejected', recoveryAttempts: [], consecutiveFailures: 0 } });
+    expect(f.store.get(firstId).status).toBe('stopped'); expect(f.deactivate).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(120_001); await f.exhibition.sweepLive();
+    expect(f.exhibition.get()).toEqual(rejected);
+    expect(f.issue).toHaveBeenCalledOnce(); expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.deps.prepareRenewal).not.toHaveBeenCalled(); expect(f.deps.commitRenewal).not.toHaveBeenCalled();
+
+    f.exhibition.command({ action: 'resume' }); f.events.status.mockClear();
+    const resumed = f.connection(); await f.ready(resumed);
+    expect(resumed.sessionId).not.toBe(firstId);
+    expect(f.exhibition.get()).toMatchObject({ phase: 'showcase', generationNumber: rejected.generationNumber + 1,
+      live: { sessionId: resumed.sessionId, status: 'running' } });
+    expect(f.issue).toHaveBeenCalledTimes(2); expect(f.activeKeysAtIssue).toEqual([0, 0]);
+    expect(f.deps.reportError).toHaveBeenCalledOnce(); expect(f.originalStop).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '换装服务连接失败 reason=rtc_failed; client_stage=connect_sdk; code=API_ERROR; failure_stage=rtc_connect; message=用户积分余额不足',
+    '换装服务连接失败 reason=rtc_failed; client_stage=wait_first_frame; code=SESSION_ERROR; failure_stage=rtc; message=POINTS_INSUFFICIENT',
+  ])('corrects a stale client rtc_failed balance report without scheduling recovery: %s', async message => {
+    const f = fixture(3600); const first = f.connection(); await f.ready(first);
+    const firstId = first.sessionId!; const running = f.exhibition.get();
+    expect(f.store.get(firstId).status).toBe('active');
+    const rejected = await f.exhibition.reportLiveError({ deviceId: owner, sessionId: firstId,
+      lookId: running.selectedLookId, sessionNumber: running.sessionNumber, generationNumber: running.generationNumber,
+      reason: 'rtc_failed', message });
+    expect(rejected).toMatchObject({ phase: 'paused', live: null, generationNumber: running.generationNumber,
+      lifecycle: { connection: 'needs_assistance', reason: 'provider_rejected', recoveryAttempts: [], consecutiveFailures: 0 } });
+    expect(rejected.lifecycle?.retryAt).toBeUndefined();
+    expect(f.store.get(firstId).status).toBe('stopped'); expect(f.deactivate).toHaveBeenCalledOnce();
+    // The old client's failure path also stops its transport; server classification
+    // must leave no generating state that could cause that page to create a new key.
+    await first.stop(); await f.exhibition.reconcileLive();
+    await vi.advanceTimersByTimeAsync(120_001); await f.exhibition.sweepLive();
+    expect(f.exhibition.get()).toEqual(rejected);
+    expect(f.issue).toHaveBeenCalledOnce(); expect(f.deps.create).toHaveBeenCalledOnce();
+    expect(f.deps.prepareRenewal).not.toHaveBeenCalled(); expect(f.deps.commitRenewal).not.toHaveBeenCalled();
+    expect(f.originalStop).not.toHaveBeenCalled();
+  });
+
+  it('routes an unexpected provider disconnect through recovery without treating it as a planned continuation', async () => {
     const f = fixture(); const first = f.connection(); await f.ready(first);
     const firstId = first.sessionId!;
     f.keys.values().next().value!.status = 'inactive';
     f.callbacks.get(firstId)!.onDisconnect('server_error'); await flush();
     await f.exhibition.reconcileLive(); await vi.advanceTimersByTimeAsync(120_000);
-    expect(f.exhibition.get()).toMatchObject({ phase: 'paused', live: null });
+    expect(f.exhibition.get()).toMatchObject({ phase: 'generating', live: null,
+      lifecycle: { connection: 'recovering', reason: 'rtc_failed' } });
     expect(f.deps.prepareRenewal).not.toHaveBeenCalled(); expect(f.deps.commitRenewal).not.toHaveBeenCalled();
     expect(f.issue).toHaveBeenCalledOnce(); expect(f.store.get(firstId).status).toBe('stopped');
   });

@@ -12,7 +12,7 @@ import org.junit.Test
 
 class CameraCaptureFormatTest {
     private val fourK = RealtimeCameraCaptureFormat(3840, 2160, 30)
-    private val outputFormat = RealtimeVideoFormat(704, 1280, 24)
+    private val outputFormat = RealtimeVideoFormat(1024, 1920, 24)
 
     @Test fun fourKCaptureIsNotPrescaledAndRotatedModelEncoderAndRequestsStayConsistent() = runBlocking {
         for (rotation in listOf(0, 90, 180, 270)) {
@@ -25,14 +25,13 @@ class CameraCaptureFormatTest {
             assertEquals(RealtimeCameraCaptureInfo(3840, 2160, rotation), fixture.media.cameraCaptureInfo())
             val prepared = checkNotNull(fixture.media.prepareConnectionVideoFormat())
             val quarterTurn = rotation == 90 || rotation == 270
-            // X2.0 scales 4K to the 1,280,000-pixel limit, then floors each side to 32:
-            // about 1508.49 x 848.53 becomes 1504 x 832 (1,251,328 pixels).
-            val expectedWidth = if (quarterTurn) 832 else 1504
-            val expectedHeight = if (quarterTurn) 1504 else 832
+            // Capture stays at 4K while generation uses a supported X2.1.1 bucket.
+            val expectedWidth = if (quarterTurn) 1024 else 1920
+            val expectedHeight = if (quarterTurn) 1920 else 1024
             assertEquals(expectedWidth, prepared.width)
             assertEquals(expectedHeight, prepared.height)
             assertEquals(24, prepared.fps)
-            assertTrue(prepared.width * prepared.height in 600_000..1_280_000)
+            assertEquals(1024 * 1920, prepared.width * prepared.height)
             assertEquals(0, prepared.width % 32)
             assertEquals(0, prepared.height % 32)
 
@@ -41,7 +40,7 @@ class CameraCaptureFormatTest {
             assertEquals(expectedHeight, fixture.engine.encoding?.height)
             assertEquals(24, fixture.engine.encoding?.frameRate)
             for (event in listOf(
-                RoomEvent.start("user", "task", prepared, RealtimeContext("first")),
+                RoomEvent.start("user", "task", prepared, RealtimeContext("first"), 0, 1700),
                 RoomEvent.changeCondition("user", "task", prepared, RealtimeContext("next")),
             )) {
                 val size = JSONObject(event).getJSONObject("params").getJSONArray("size")
@@ -53,21 +52,21 @@ class CameraCaptureFormatTest {
 
     @Test fun captureInfoReportsActualDriverFallbackRatherThanTheFourKRequest() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture(MediaService())
-        fixture.engine.firstGeometry = CameraFrameGeometry(1280, 720, 90)
+        fixture.engine.firstGeometry = CameraFrameGeometry(1920, 720, 90)
         fixture.media.createLocalCameraStream(outputFormat, CameraPosition.BACK, captureFormat = fourK)
         assertEquals(listOf(fourK), fixture.engine.captures)
-        assertEquals(RealtimeCameraCaptureInfo(1280, 720, 90), fixture.media.cameraCaptureInfo())
+        assertEquals(RealtimeCameraCaptureInfo(1920, 720, 90), fixture.media.cameraCaptureInfo())
         val prepared = checkNotNull(fixture.media.prepareConnectionVideoFormat())
-        assertEquals(704, prepared.width)
-        assertEquals(1280, prepared.height)
+        assertEquals(1024, prepared.width)
+        assertEquals(1920, prepared.height)
         fixture.media.stopLocalStream()
     }
 
     @Test fun missingCaptureOverrideKeepsLegacyModelAdjustedCaptureAndFps() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture(MediaService())
-        val stream = fixture.media.createLocalCameraStream(RealtimeVideoFormat(3840, 2160, 24), CameraPosition.BACK)
-        assertEquals(listOf(RealtimeCameraCaptureFormat(1504, 832, 24)), fixture.engine.captures)
-        assertEquals(RealtimeVideoFormat(1504, 832, 24), stream.videoTrack?.videoFormat)
+        val stream = fixture.media.createLocalCameraStream(RealtimeVideoFormat(1920, 1024, 24), CameraPosition.BACK)
+        assertEquals(listOf(RealtimeCameraCaptureFormat(1920, 1024, 24)), fixture.engine.captures)
+        assertEquals(RealtimeVideoFormat(1920, 1024, 24), stream.videoTrack?.videoFormat)
         fixture.media.stopLocalStream()
     }
 
@@ -112,8 +111,8 @@ class CameraCaptureFormatTest {
         oldListener(CameraFrameGeometry(3840, 2160, 90), true)
         assertNull(fixture.media.cameraCaptureInfo())
         val currentListener = checkNotNull(fixture.engine.geometryListener)
-        currentListener(CameraFrameGeometry(1280, 704, 0), true)
-        assertEquals(RealtimeCameraCaptureInfo(1280, 704, 0), fixture.media.cameraCaptureInfo())
+        currentListener(CameraFrameGeometry(1920, 1024, 0), true)
+        assertEquals(RealtimeCameraCaptureInfo(1920, 1024, 0), fixture.media.cameraCaptureInfo())
         fixture.rtc.useExternalVideoSource()
         currentListener(CameraFrameGeometry(3840, 2160, 90), false)
         assertNull(fixture.media.cameraCaptureInfo())

@@ -31,7 +31,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 
-/** 每轮生成使用同一条后处理帧链路提供首帧门控、持续显示和接入方帧回调。 */
+/**
+ * 每轮生成使用同一条后处理帧链路提供首帧门控、持续显示和接入方帧回调。
+ */
 internal class RenderController(
     private val rtcManager: RtcManaging,
     private val remoteFrameReadyTimeoutMillis: Long = REMOTE_FRAME_READY_TIMEOUT_MILLIS,
@@ -44,6 +46,7 @@ internal class RenderController(
     private var generation: RemoteGeneration? = null
     private var remoteView: WeakReference<XmaxVideoView>? = null
     private var remoteContentMode = VideoContentMode.FILL
+    private var remoteTrack: RealtimeVideoTrack? = null
 
     @MainThread
     override fun setRemoteStream(stream: RemoteStream?) = operationLock.withLock {
@@ -67,11 +70,15 @@ internal class RenderController(
                 failure?.let { throw it }
             }
             if (next != null) {
-                // A matching SEI selects the stream. Even the same stream needs a new
-                // registration: an earlier generation's decoded-frame flag is insufficient.
+                // 目标机器人发布确认后注册本轮帧监听；同一流也不能复用上一轮首帧标记。
                 rtcManager.setRemoteVideoFrameListener(next.stream, object : RtcRemoteVideoSink {
                     override fun onFirstFrame(width: Int, height: Int) = handleRemoteVideoFrame(next, width, height)
-                    override fun onFrame(frame: RtcRemoteVideoFrame) = frameDispatcher.dispatch(next, frame)
+                    override fun onFrame(frame: RtcRemoteVideoFrame) {
+                        operationLock.withLock {
+                            if (generation === next) updateDisplayedFormat(frame.displayWidth, frame.displayHeight)
+                        }
+                        frameDispatcher.dispatch(next, frame)
+                    }
                     override fun onError(error: XmaxError): Unit = operationLock.withLock {
                         if (generation !== next) return
                         frameDispatcher.setGeneration(null)
@@ -89,6 +96,7 @@ internal class RenderController(
         track: RealtimeVideoTrack,
         interactionListener: (InteractionFrame) -> Unit,
     ) {
+        operationLock.withLock { remoteTrack = track }
         VideoRenderRegistry.register(
             track,
             VideoRenderBinding(
@@ -132,6 +140,7 @@ internal class RenderController(
             } finally {
                 remoteView = null
                 remoteContentMode = VideoContentMode.FILL
+                remoteTrack = null
             }
         }
     }
@@ -155,6 +164,7 @@ internal class RenderController(
     private fun handleRemoteVideoFrame(current: RemoteGeneration, width: Int, height: Int): Unit = operationLock.withLock {
         if (generation !== current || current.ready.isCompleted || width <= 0 || height <= 0) return
         try {
+            updateDisplayedFormat(width, height)
             remoteView?.get()?.let { view ->
                 bindRemoteView(current, view)
             }
@@ -173,6 +183,20 @@ internal class RenderController(
         // first-presentation callback when the application keeps the same track assigned.
         view.prepareRtcVideoRendering()
         rtcManager.bindRemoteVideo(current.stream, view.rtcRenderView, remoteContentMode)
+    }
+
+    /**
+     * 以实际接收画面尺寸更新轨道及触控区域，避免使用尚未生效的请求尺寸。
+     */
+    private fun updateDisplayedFormat(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        val track = remoteTrack ?: return
+        val previous = track.videoFormat ?: return
+        if (previous.width == width && previous.height == height) return
+
+        val format = previous.copy(width = width, height = height)
+        track.updateVideoFormat(format)
+        TrajectoryRegistry.binding(track)?.update(format)
     }
 
     private class RemoteGeneration(val stream: RemoteStream) {

@@ -1,11 +1,8 @@
 package ai.openbuy.exhibition
 
-import android.graphics.Bitmap
 import android.os.SystemClock
 import kotlinx.coroutines.*
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import kotlin.math.roundToInt
 
 /** Samples only the existing RTC camera. There is one owned frame, no upload or action queue. */
 internal class NativeRemoteGestures(
@@ -14,11 +11,11 @@ internal class NativeRemoteGestures(
     private val onError: (String) -> Unit,
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val callbackDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
-    private val encode: (NativeCameraFrame, Int) -> ByteArray = ::encodeGestureJpeg,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + callbackDispatcher)
     private val lock = Any()
     private var closed = false
+    private var incompatible = false
     private var active = false
     private var blocked = true
     private var resetKey = ""
@@ -62,9 +59,9 @@ internal class NativeRemoteGestures(
 
     /** A control may be superseded while HTTP is running. Epoch fencing makes either arrival order safe. */
     private fun synchronizeSession() {
-        if (synchronized(lock) { closed || !active || (ready && !needsReset && syncedEpoch == epoch) } || syncJob?.isActive == true) return
+        if (synchronized(lock) { closed || incompatible || !active || (ready && !needsReset && syncedEpoch == epoch) } || syncJob?.isActive == true) return
         syncJob = scope.launch {
-            while (isActive && !synchronized(lock) { closed || !active }) {
+            while (isActive && !synchronized(lock) { closed || incompatible || !active }) {
                 val pause = synchronized(lock) { retryAt - clock() }
                 if (pause > 0) delay(pause)
                 try {
@@ -72,6 +69,12 @@ internal class NativeRemoteGestures(
                         val opened = transport.open()
                         val id = opened.optString("sessionId")
                         check(id.isNotEmpty() && id.length <= 128) { "Invalid gesture session" }
+                        if (opened.optString("frameFormat") != "i420-v1") {
+                            synchronized(lock) { incompatible = true; ready = false }
+                            runCatching { transport.close(id) }
+                            onError(UPGRADE_REQUIRED)
+                            return@launch
+                        }
                         val accepted = synchronized(lock) {
                             if (closed || !active) false else {
                                 sessionId = id
@@ -106,33 +109,55 @@ internal class NativeRemoteGestures(
         }
     }
 
+    /** Checked before the SDK copies pixels; a busy/unready peer must not consume camera work. */
+    fun canAcceptFrame(): Boolean = synchronized(lock) {
+        !closed && !incompatible && active && ready && syncedEpoch == epoch && sessionId != null && !frameOwned &&
+            (lastTimestamp == Long.MIN_VALUE || clock() - lastTimestamp >= sampling.intervalMs)
+    }
+
+    /** Pin the consumer and configuration before the SDK starts copying a frame. */
+    fun frameReceiver(): ((NativeGestureFrame) -> Unit)? = synchronized(lock) {
+        if (!canAcceptFrame()) null else {
+            val ownerEpoch = epoch
+            val receiver: (NativeGestureFrame) -> Unit = { frame -> submit(frame, ownerEpoch) }
+            receiver
+        }
+    }
+
     /** Takes ownership in every branch; called directly by the camera's bounded sampling callback. */
-    fun submit(frame: NativeCameraFrame) {
+    fun submit(frame: NativeGestureFrame, expectedEpoch: Long? = null) {
         var changedGeneration = false
         val metadata = synchronized(lock) {
             val now = clock()
-            if (closed || !active || !ready || sessionId == null || frameOwned || !frame.isCurrent() ||
+            if (closed || incompatible || !active || !ready || syncedEpoch != epoch ||
+                (expectedEpoch != null && expectedEpoch != epoch) || sessionId == null || frameOwned || !frame.isCurrent() ||
                 now - frame.timestampMs !in 0 until MAX_AGE_MS || frame.generation < sourceGeneration ||
                 (lastTimestamp != Long.MIN_VALUE && frame.timestampMs - lastTimestamp < sampling.intervalMs)) null
             else {
+                if (sourceGeneration == Long.MIN_VALUE) sourceGeneration = frame.generation
                 if (frame.generation != sourceGeneration) {
                     sourceGeneration = frame.generation
                     epoch++
+                    needsReset = true
+                    ready = false
                     changedGeneration = true
+                    return@synchronized null
                 }
                 frameOwned = true
                 lastTimestamp = frame.timestampMs
-                NativeGestureUpload(requireNotNull(sessionId), epoch, seq++, frame.timestampMs, blocked) to sampling
+                NativeGestureUpload(requireNotNull(sessionId), epoch, seq++, frame.timestampMs, blocked)
             }
         }
-        if (metadata == null) { frame.close(); return }
-        val (upload, capturedSampling) = metadata
+        if (metadata == null) {
+            frame.close()
+            if (changedGeneration) scope.launch { synchronizeSession() }
+            return
+        }
+        val upload = metadata
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
                 if (!isCurrent(upload, frame)) return@launch
-                val jpeg = encode(frame, capturedSampling.inputLongEdge)
-                if (!isCurrent(upload, frame)) return@launch
-                val response = transport.frame(upload, jpeg)
+                val response = transport.frame(upload, frame)
                 withContext(callbackDispatcher) {
                     if (!isCurrent(upload, frame) || response.optString("sessionId") != upload.sessionId ||
                         response.optLong("epoch", -1) != upload.epoch || response.optLong("seq", -1) != upload.seq ||
@@ -159,10 +184,9 @@ internal class NativeRemoteGestures(
             if (closed || epoch != upload.epoch || !active) job.cancel()
         }
         job.start()
-        if (changedGeneration) scope.launch { synchronizeSession() }
     }
 
-    private fun isCurrent(metadata: NativeGestureUpload, frame: NativeCameraFrame, checkAge: Boolean = true) =
+    private fun isCurrent(metadata: NativeGestureUpload, frame: NativeGestureFrame, checkAge: Boolean = true) =
         synchronized(lock) {
             !closed && active && ready && metadata.sessionId == sessionId && metadata.epoch == epoch &&
                 frame.generation == sourceGeneration && frame.isCurrent() &&
@@ -204,27 +228,9 @@ internal class NativeRemoteGestures(
     }
 
     companion object {
+        const val UPGRADE_REQUIRED = "请更新电脑后台以支持原始手势视频帧。"
         const val MAX_AGE_MS = 800L
         private val DROP_FRAME_CODES = setOf("GESTURE_BUSY", "GESTURE_STALE", "GESTURE_WARMING", "GESTURE_FRAME_EXPIRED",
             "GESTURE_UPLOAD_TIMEOUT", "GESTURE_UPLOAD_CANCELLED")
     }
-}
-
-/** Rotation already belongs to the RTC sampler; Linux applies the same landmark mirroring as local mode. */
-internal fun encodeGestureJpeg(frame: NativeCameraFrame, inputLongEdge: Int = 720): ByteArray {
-    val original = frame.bitmap
-    val longEdge = NativeGestureSampling.linux(inputLongEdge = inputLongEdge).inputLongEdge
-    val scale = minOf(1.0, longEdge.toDouble() / maxOf(original.width, original.height))
-    val bitmap = if (scale < 1.0) Bitmap.createScaledBitmap(original,
-        (original.width * scale).roundToInt().coerceAtLeast(1),
-        (original.height * scale).roundToInt().coerceAtLeast(1), true) else original
-    try {
-        val output = ByteArrayOutputStream(32 * 1024)
-        for (quality in 82 downTo 2 step 10) {
-            output.reset()
-            check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)) { "Gesture JPEG failed" }
-            if (output.size() <= 256 * 1024) return output.toByteArray()
-        }
-        error("Gesture JPEG too large")
-    } finally { if (bitmap !== original) bitmap.recycle() }
 }

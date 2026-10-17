@@ -1,4 +1,4 @@
-import type { RealtimeRoomEventPayload } from '@xmaxai/sdk-global';
+import type { RealtimeRoomEventPayload } from './exhibition/xmaxSdkContract';
 
 export interface SdkSession {
   getSessionUid(): string | null;

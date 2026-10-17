@@ -17,7 +17,9 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
 
-/** 采集多指触摸、驱动轨迹效果并按固定频率提交交互帧。 */
+/**
+ * 采集多指触摸、驱动轨迹效果并按固定频率提交交互帧。
+ */
 internal class TrajectoryOverlayView(context: Context) : FrameLayout(context) {
     private val activeTouches = mutableMapOf<Int, ActiveTouch>()
     private var binding: TrajectoryBinding? = null
@@ -163,6 +165,7 @@ internal class TrajectoryOverlayView(context: Context) : FrameLayout(context) {
                 points = activeTouches.values.map { PointF(it.location.x, it.location.y) },
                 viewportSize = SizeF(width.toFloat(), height.toFloat()),
                 contentMode = videoContentMode,
+                displayedVideoFormat = videoFormat,
             ),
         )
     }
@@ -177,7 +180,11 @@ internal class TrajectoryOverlayView(context: Context) : FrameLayout(context) {
     }
 
     private fun updateInteractionState() {
-        isEnabled = requestedInteractionEnabled && binding != null && interactionFrame() != null
+        // Visibility must not depend on measured bounds: a previously GONE overlay
+        // needs a layout pass before interactionFrame() can become available again.
+        val visible = requestedInteractionEnabled && binding != null
+        visibility = if (visible) View.VISIBLE else View.GONE
+        isEnabled = visible && interactionFrame() != null
         isClickable = isEnabled
     }
 

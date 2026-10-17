@@ -1,0 +1,1731 @@
+package ai.xmax.sdk
+
+import ai.xmax.sdk.foundation.rtc.RemoteStream
+import ai.xmax.sdk.media.MediaControlling
+import ai.xmax.sdk.media.interaction.InteractionFrame
+import ai.xmax.sdk.render.RenderControlling
+import ai.xmax.sdk.render.RenderController
+import ai.xmax.sdk.stream.room.RtcManagingStub
+import ai.xmax.sdk.service.realtime.*
+import ai.xmax.sdk.stream.StreamControlling
+import ai.xmax.sdk.stream.encoding.EncodingBitratePolicy
+import ai.xmax.sdk.stream.quality.QualityController
+import ai.xmax.sdk.stream.quality.QualityHistory
+import ai.xmax.sdk.foundation.rtc.RtcQualityLevel
+import android.graphics.Bitmap
+import android.net.Uri
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.test.*
+import org.junit.Assert.*
+import org.junit.Test
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class XmaxRealtimeManagerTest {
+    @Test
+    fun `local image and video keep input baseline while generation uses a separate model canvas`() = runTest {
+        val cases = listOf(RealtimeVideoFormat(1280, 720, 24), RealtimeVideoFormat(720, 1280, 30))
+            .flatMap { input -> listOf(input to true, input to false) }
+        for ((input, isVideo) in cases) {
+            val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+            val local = f.manager.createLocalImageStream(byteArrayOf(1), input)
+            f.media.isLocalVideo = isVideo
+            f.media.isLocalImage = !isVideo
+            f.stream.confirmation.complete(Unit)
+            f.manager.startGeneration(local, RealtimeContext("first"))
+            val taskId = f.manager.currentState.taskId
+            val canvas = if (input.width > input.height) input.copy(width = 1920, height = 1024) else input.copy(width = 1024, height = 1920)
+            val l2 = if (input.width > input.height) RealtimeVideoFormat(1024, 576, 24) else RealtimeVideoFormat(576, 1024, 24)
+            assertEquals(input, local.videoTrack?.videoFormat)
+            assertEquals(canvas, f.stream.startedFormats.single())
+            assertEquals(listOf(true), f.stream.startedPadding)
+            assertEquals(l2, f.stream.encoderFormats.last())
+            assertEquals(l2, f.stream.startedTargets.single())
+            assertTrue(f.media.interactionUsesDisplayedSize)
+            assertEquals(input, f.media.interactionFormat)
+            repeat(3) {
+                advanceTimeBy(1000)
+                f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.BAD, RealtimeNetworkQualityLevel.BAD))
+                runCurrent()
+            }
+            val l3 = if (input.width > input.height) RealtimeVideoFormat(832, 468, 24) else RealtimeVideoFormat(468, 832, 24)
+            assertEquals(l3, f.stream.encoderFormats.last())
+            assertEquals(l3, f.stream.downlinkUpdates.single())
+            f.manager.startGeneration(RealtimeContext("second"))
+            assertEquals(taskId, f.manager.currentState.taskId)
+            assertEquals(listOf(canvas), f.stream.updatedFormats)
+            assertEquals(listOf(true), f.stream.updatedPadding)
+            assertEquals(input, local.videoTrack?.videoFormat)
+            assertTrue(f.manager.selectQualityDebugLevel(true, 1))
+            assertEquals(input.copy(fps = 24), f.stream.downlinkUpdates.last())
+            assertEquals(canvas, f.stream.startedFormats.single())
+            f.manager.close()
+        }
+    }
+
+    @Test
+    fun `camera and server video retain their existing generation protocol`() = runTest {
+        for (network in listOf(false, true)) {
+            val f = Fixture(StandardTestDispatcher(testScheduler))
+            val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+            if (network) f.media.networkVideoReference = RealtimeReferenceVideo("https://example.test/video.mp4")
+            f.stream.confirmation.complete(Unit)
+            f.manager.startGeneration(local, RealtimeContext("first"))
+            f.manager.startGeneration(RealtimeContext("second"))
+            assertEquals(listOf(false), f.stream.startedPadding)
+            assertEquals(listOf(false), f.stream.updatedPadding)
+            assertEquals(listOf(format), f.stream.startedFormats)
+            assertEquals(listOf(format), f.stream.updatedFormats)
+            assertFalse(f.media.interactionUsesDisplayedSize)
+            f.manager.close()
+        }
+    }
+
+    @Test
+    fun `selected downlink continues adapting while uplink adapts independently`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        assertTrue(f.manager.selectQualityDebugLevel(true, 1))
+        advanceTimeBy(4000)
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.BAD, RealtimeNetworkQualityLevel.BAD))
+            runCurrent()
+        }
+        assertEquals(listOf(format, RealtimeVideoFormat(562, 1024, 24)), f.stream.downlinkUpdates)
+        assertEquals(RealtimeVideoFormat(456, 832, 24), f.stream.encoderFormats.last())
+        assertEquals(2, f.manager.qualityDebugDirection(true)?.level)
+        f.manager.close()
+    }
+
+    @Test
+    fun `selected uplink continues automatic upgrades and downgrades`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertFalse(f.manager.selectQualityDebugLevel(false, 5))
+        assertNull(f.manager.qualityDebugDirection(false))
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        val taskId = f.manager.currentState.taskId
+        assertTrue(f.manager.selectQualityDebugLevel(false, 5))
+        assertEquals(5, f.manager.qualityDebugDirection(false)?.level)
+        assertEquals(RealtimeVideoFormat(352, 640, 16), f.stream.encoderFormats.last())
+        advanceTimeBy(4000)
+        repeat(5) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.GOOD, RealtimeNetworkQualityLevel.POOR))
+            runCurrent()
+        }
+        assertEquals(4, f.manager.qualityDebugDirection(false)?.level)
+        assertEquals(RealtimeVideoFormat(352, 640, 20), f.stream.encoderFormats.last())
+        assertTrue(f.stream.downlinkUpdates.isEmpty())
+        advanceTimeBy(4000)
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.BAD, RealtimeNetworkQualityLevel.POOR))
+            runCurrent()
+        }
+        assertEquals(5, f.manager.qualityDebugDirection(false)?.level)
+        assertEquals(RealtimeVideoFormat(352, 640, 16), f.stream.encoderFormats.last())
+        assertEquals(taskId, f.manager.currentState.taskId)
+        assertEquals(format, local.videoTrack?.videoFormat)
+        f.manager.close()
+    }
+
+    @Test
+    fun `selected tiers are restored after disconnect`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        assertTrue(f.manager.selectQualityDebugLevel(false, 5))
+        assertTrue(f.manager.selectQualityDebugLevel(true, 5))
+        assertEquals(RealtimeVideoFormat(352, 640, 24), f.stream.downlinkUpdates.last())
+        f.manager.startGeneration(RealtimeContext("second"))
+        assertEquals(4, f.manager.qualityDebugDirection(true)?.level)
+        f.manager.disconnect()
+        assertNull(f.manager.qualityDebugDirection(true))
+        f.manager.startGeneration(local, RealtimeContext("again"))
+        assertEquals(5, f.manager.qualityDebugDirection(false)?.level)
+        assertEquals(4, f.manager.qualityDebugDirection(true)?.level)
+        assertEquals(RealtimeVideoFormat(352, 640, 16), f.stream.encoderFormats.last())
+        assertEquals(RealtimeVideoFormat(352, 640, 24), f.stream.startedTargets.last())
+        f.manager.close()
+    }
+
+    @Test
+    fun `selected tiers survive manager recreation and expire after one hour`() = runTest {
+        var now = 1_000L
+        val entries = mutableMapOf<String, QualityHistory.Entry>()
+        fun history() = QualityHistory(readValue = { entries[it] }, writeValue = { key, entry -> entries[key] = entry }, now = { now })
+        val first = Fixture(StandardTestDispatcher(testScheduler), qualityHistory = history())
+        val firstLocal = first.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        first.stream.confirmation.complete(Unit)
+        first.manager.startGeneration(firstLocal, RealtimeContext("first"))
+        assertTrue(first.manager.selectQualityDebugLevel(false, 4))
+        assertTrue(first.manager.selectQualityDebugLevel(true, 5))
+        first.manager.close()
+
+        val second = Fixture(StandardTestDispatcher(testScheduler), qualityHistory = history())
+        val local = second.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        second.stream.confirmation.complete(Unit)
+        second.manager.startGeneration(local, RealtimeContext("restored"))
+        assertEquals(4, second.manager.qualityDebugDirection(false)?.level)
+        assertEquals(4, second.manager.qualityDebugDirection(true)?.level)
+        second.manager.disconnect()
+        now += 60 * 60 * 1000L
+        second.manager.startGeneration(local, RealtimeContext("expired"))
+        assertEquals(2, second.manager.qualityDebugDirection(false)?.level)
+        assertEquals(2, second.manager.qualityDebugDirection(true)?.level)
+        assertEquals(RealtimeVideoFormat(562, 1024, 24), second.stream.encoderFormats.last())
+        assertEquals(RealtimeVideoFormat(562, 1024, 24), second.stream.startedTargets.last())
+        second.manager.close()
+    }
+
+    @Test
+    fun `failed manual signal preserves selected tier and active generation`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        assertTrue(f.manager.selectQualityDebugLevel(true, 3))
+        f.stream.downlinkError = IllegalStateException("signal failed")
+        try {
+            f.manager.selectQualityDebugLevel(true, 5)
+            fail("Expected signal failure")
+        } catch (_: XmaxError) {
+            assertEquals(3, f.manager.qualityDebugDirection(true)?.level)
+            assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+            assertTrue(f.session.closed.isEmpty())
+        }
+        f.stream.downlinkError = null
+        f.manager.disconnect()
+        f.manager.startGeneration(local, RealtimeContext("again"))
+        assertEquals(3, f.manager.qualityDebugDirection(true)?.level)
+        f.manager.close()
+    }
+
+    @Test
+    fun `foreground generation updates preempt manual quality requests`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        f.stream.downlinkBarrier = CompletableDeferred()
+        val selection = async { f.manager.selectQualityDebugLevel(true, 5) }
+        runCurrent()
+        f.manager.startGeneration(RealtimeContext("second"))
+        assertFalse(selection.await())
+        assertEquals(2, f.manager.qualityDebugDirection(true)?.level)
+        assertTrue(f.stream.downlinkUpdates.isEmpty())
+        assertEquals(listOf("second"), f.stream.updatedPrompts)
+        f.stream.downlinkBarrier = null
+        f.manager.disconnect()
+        f.manager.startGeneration(local, RealtimeContext("again"))
+        assertEquals(2, f.manager.qualityDebugDirection(true)?.level)
+        f.manager.close()
+    }
+
+    @Test
+    fun `adaptive uplink and downlink use original baselines without public listeners`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val input = RealtimeVideoFormat(1024, 1920, 30)
+        val local = f.manager.createLocalCameraStream(input, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        val taskId = f.manager.currentState.taskId
+        assertEquals(input, local.videoTrack?.videoFormat)
+        assertEquals(input, f.stream.startedFormats.single())
+        assertEquals(RealtimeVideoFormat(818, 1536, 24), f.stream.encoderFormats.last())
+        assertEquals(RealtimeVideoFormat(818, 1536, 24), f.stream.startedTargets.single())
+        assertNull(f.stream.registeredNetworkQualityListener)
+
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.BAD, RealtimeNetworkQualityLevel.POOR))
+            runCurrent()
+        }
+        assertEquals(RealtimeVideoFormat(664, 1248, 24), f.stream.encoderFormats.last())
+        assertTrue(f.stream.downlinkUpdates.isEmpty())
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.POOR, RealtimeNetworkQualityLevel.BAD))
+            runCurrent()
+        }
+        assertEquals(listOf(RealtimeVideoFormat(664, 1248, 24)), f.stream.downlinkUpdates)
+        assertEquals(input, local.videoTrack?.videoFormat)
+        assertEquals(taskId, f.manager.currentState.taskId)
+        f.manager.startGeneration(RealtimeContext("second"))
+        assertEquals(listOf("second"), f.stream.updatedPrompts)
+        assertEquals(1, f.stream.startedFormats.size)
+        assertEquals(taskId, f.manager.currentState.taskId)
+        f.manager.close()
+        assertNull(f.stream.adaptiveListener)
+    }
+
+    @Test
+    fun `queued samples are invalidated by foreground actions and disconnect`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        val listener = checkNotNull(f.stream.adaptiveListener)
+        val poor = RealtimeNetworkQuality(RealtimeNetworkQualityLevel.BAD, RealtimeNetworkQualityLevel.BAD)
+        repeat(2) {
+            advanceTimeBy(1000)
+            listener(poor)
+            runCurrent()
+        }
+        val configurations = f.stream.encoderFormats.size
+        advanceTimeBy(1000)
+        listener(poor)
+        val update = async(start = CoroutineStart.UNDISPATCHED) { f.manager.startGeneration(RealtimeContext("second")) }
+        update.await()
+        runCurrent()
+        assertEquals(configurations, f.stream.encoderFormats.size)
+        assertTrue(f.stream.downlinkUpdates.isEmpty())
+        advanceTimeBy(1000)
+        listener(poor)
+        val stop = async(start = CoroutineStart.UNDISPATCHED) { f.manager.disconnect() }
+        stop.await()
+        runCurrent()
+        repeat(3) {
+            advanceTimeBy(1000)
+            listener(poor)
+            runCurrent()
+        }
+        assertTrue(f.stream.downlinkUpdates.isEmpty())
+        assertEquals(configurations, f.stream.encoderFormats.size)
+    }
+
+    @Test
+    fun `reference update preempts suspended adaptive signal without disconnect`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        val taskId = f.manager.currentState.taskId
+        f.stream.downlinkBarrier = CompletableDeferred()
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.POOR, RealtimeNetworkQualityLevel.BAD))
+            runCurrent()
+        }
+        f.manager.startGeneration(RealtimeContext("second"))
+        f.stream.downlinkBarrier?.complete(Unit)
+        runCurrent()
+        assertTrue(f.stream.downlinkUpdates.isEmpty())
+        assertEquals(listOf("second"), f.stream.updatedPrompts)
+        assertEquals(taskId, f.manager.currentState.taskId)
+        assertTrue(f.session.closed.isEmpty())
+        f.manager.close()
+    }
+
+    @Test
+    fun `failed downlink adjustment preserves generation and stored tier`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        f.stream.downlinkError = IllegalStateException("signal failed")
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.POOR, RealtimeNetworkQualityLevel.BAD))
+            runCurrent()
+        }
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertTrue(f.session.closed.isEmpty())
+        f.manager.disconnect()
+        f.manager.startGeneration(local, RealtimeContext("retry"))
+        assertEquals(f.stream.startedTargets.first(), f.stream.startedTargets.last())
+        f.manager.close()
+    }
+
+    @Test
+    fun `network video adapts downlink only and reuses successful history`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler), qualityNow = { testScheduler.currentTime })
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.media.networkVideoReference = RealtimeReferenceVideo("https://example.test/video.mp4")
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        repeat(3) {
+            advanceTimeBy(1000)
+            f.stream.adaptiveListener?.invoke(RealtimeNetworkQuality(RealtimeNetworkQualityLevel.BAD, RealtimeNetworkQualityLevel.BAD))
+            runCurrent()
+        }
+        assertTrue(f.stream.encoderFormats.isEmpty())
+        assertEquals(listOf(RealtimeVideoFormat(456, 832, 24)), f.stream.downlinkUpdates)
+        f.manager.disconnect()
+        f.manager.startGeneration(local, RealtimeContext("again"))
+        assertEquals(f.stream.downlinkUpdates.single(), f.stream.startedTargets.last())
+        assertEquals(format, f.stream.startedFormats.last())
+        f.manager.close()
+    }
+
+    @Test fun `listener updates do not wait for camera creation`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val gate = CompletableDeferred<Unit>()
+        f.media.cameraStartBarrier = gate
+        val camera = async { f.manager.createLocalCameraStream(format, CameraPosition.FRONT) }
+        runCurrent()
+        val local = UplinkVideoStatisticsListener { }
+        val remote = DownlinkVideoStatisticsListener { }
+        val network = RealtimeNetworkQualityListener { }
+        val performance = RealtimePerformanceAlarmListener { }
+        val registration = async(start = CoroutineStart.UNDISPATCHED) {
+            f.manager.setUplinkVideoStatisticsListener(local)
+            f.manager.setDownlinkVideoStatisticsListener(remote)
+            f.manager.setNetworkQualityListener(network)
+            f.manager.setPerformanceAlarmListener(performance)
+        }
+        try {
+            assertTrue(registration.isCompleted)
+            assertFalse(registration.isCancelled)
+            assertFalse(camera.isCompleted)
+            assertSame(local, f.stream.registeredUplinkStatisticsListener)
+            assertSame(remote, f.stream.registeredDownlinkStatisticsListener)
+            assertSame(network, f.stream.registeredNetworkQualityListener)
+            assertSame(performance, f.stream.registeredPerformanceAlarmListener)
+        } finally {
+            gate.complete(Unit)
+        }
+        registration.await()
+        camera.await()
+        f.manager.close()
+    }
+
+    @Test fun `listener updates during close only apply to the next runtime`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.setUplinkVideoStatisticsListener { }
+        f.manager.setDownlinkVideoStatisticsListener { }
+        val gate = CompletableDeferred<Unit>()
+        f.media.stopBarrier = gate
+        val closing = async { f.manager.close() }
+        runCurrent()
+        assertFalse(closing.isCompleted)
+        val remote = DownlinkVideoStatisticsListener { }
+        val network = RealtimeNetworkQualityListener { }
+        val performance = RealtimePerformanceAlarmListener { }
+        val registration = async(start = CoroutineStart.UNDISPATCHED) {
+            f.manager.setUplinkVideoStatisticsListener(null)
+            f.manager.setDownlinkVideoStatisticsListener(remote)
+            f.manager.setNetworkQualityListener(network)
+            f.manager.setPerformanceAlarmListener(performance)
+        }
+        try {
+            assertTrue(registration.isCompleted)
+            assertFalse(registration.isCancelled)
+            assertNull(f.stream.registeredUplinkStatisticsListener)
+            assertNull(f.stream.registeredDownlinkStatisticsListener)
+            assertNull(f.stream.registeredNetworkQualityListener)
+            assertNull(f.stream.registeredPerformanceAlarmListener)
+        } finally {
+            gate.complete(Unit)
+        }
+        registration.await()
+        closing.await()
+        f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertNull(f.stream.registeredUplinkStatisticsListener)
+        assertSame(remote, f.stream.registeredDownlinkStatisticsListener)
+        assertSame(network, f.stream.registeredNetworkQualityListener)
+        assertSame(performance, f.stream.registeredPerformanceAlarmListener)
+
+        f.manager.setDownlinkVideoStatisticsListener(null)
+        f.manager.setNetworkQualityListener(null)
+        f.manager.setPerformanceAlarmListener(null)
+        f.manager.close()
+        f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertNull(f.stream.registeredUplinkStatisticsListener)
+        assertNull(f.stream.registeredDownlinkStatisticsListener)
+        assertNull(f.stream.registeredNetworkQualityListener)
+        assertNull(f.stream.registeredPerformanceAlarmListener)
+        f.manager.close()
+    }
+
+    @Test fun `listener registration and clearing never initialize components`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        var creations = 0
+        val manager = XmaxRealtimeManager(RealtimeConfiguration(), { _, _, _ ->
+            creations++
+            error("Listener registration must not create components")
+        }, RealtimeCallbacks(dispatcher), dispatcher)
+        manager.setUplinkVideoStatisticsListener { }
+        manager.setDownlinkVideoStatisticsListener { }
+        manager.setNetworkQualityListener { }
+        manager.setPerformanceAlarmListener { }
+        manager.close()
+        manager.setUplinkVideoStatisticsListener(null)
+        manager.setDownlinkVideoStatisticsListener(null)
+        manager.setNetworkQualityListener(null)
+        manager.setPerformanceAlarmListener(null)
+        assertEquals(0, creations)
+    }
+
+    /**
+     * 模拟 XLab 的两个并行 Effect：监听注册无需与媒体初始化共用页面的串行门。
+     * 相机重建不应结束监听 Effect；只有页面退出才注销监听并释放媒体。
+     */
+    @Test fun `independent page registration survives concurrent camera initialization and recreation`() = runTest {
+        for (listenersFirst in listOf(true, false)) {
+            val f = Fixture(StandardTestDispatcher(testScheduler))
+            val operationMutex = Mutex()
+            val localListener = UplinkVideoStatisticsListener { }
+            val remoteListener = DownlinkVideoStatisticsListener { }
+            var previewReady = false
+            var cleanupCount = 0
+
+            fun registerListeners() = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    f.manager.setUplinkVideoStatisticsListener(localListener)
+                    f.manager.setDownlinkVideoStatisticsListener(remoteListener)
+                    f.manager.setNetworkQualityListener { }
+                    f.manager.setStateListener {
+                        previewReady = it.connectionState == RealtimeConnectionState.READY
+                    }
+                    awaitCancellation()
+                } finally {
+                    withContext(NonCancellable) {
+                        operationMutex.withLock {
+                            cleanupCount++
+                            f.manager.setStateListener(null)
+                            f.manager.setUplinkVideoStatisticsListener(null)
+                            f.manager.setDownlinkVideoStatisticsListener(null)
+                            f.manager.setNetworkQualityListener(null)
+                            f.manager.close()
+                        }
+                    }
+                }
+            }
+
+            fun prepareCamera() = launch(start = CoroutineStart.UNDISPATCHED) {
+                operationMutex.withLock {
+                    f.manager.close()
+                    f.manager.setLocalAudioVolume(0.45f)
+                    f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+                }
+            }
+
+            val listeners: Job
+            val camera: Job
+            if (listenersFirst) {
+                listeners = registerListeners()
+                camera = prepareCamera()
+            } else {
+                camera = prepareCamera()
+                listeners = registerListeners()
+            }
+            camera.join()
+            runCurrent()
+            assertTrue(listeners.isActive)
+            assertTrue(previewReady)
+            assertNotNull(f.media.currentTrack)
+            assertEquals(0, cleanupCount)
+
+            prepareCamera().join()
+            runCurrent()
+            assertTrue(listeners.isActive)
+            assertTrue(previewReady)
+            assertSame(localListener, f.stream.registeredUplinkStatisticsListener)
+            assertSame(remoteListener, f.stream.registeredDownlinkStatisticsListener)
+            assertEquals(0, cleanupCount)
+
+            listeners.cancelAndJoin()
+            assertEquals(1, cleanupCount)
+            assertNull(f.media.currentTrack)
+            assertNull(f.stream.registeredUplinkStatisticsListener)
+            assertNull(f.stream.registeredDownlinkStatisticsListener)
+        }
+    }
+
+    @Test fun `network generation completes through real connection signal and frame readiness pipeline`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val media = MediaStub()
+        val rtc = RtcManagingStub()
+        val session = SessionStub()
+        val firstFrame = CompletableDeferred<Unit>()
+        val render = object : RenderControlling by RenderStub() {
+            override suspend fun waitUntilRemoteFrameReady() { firstFrame.await() }
+        }
+        val stream = ai.xmax.sdk.stream.StreamController(
+            rtcManager = rtc,
+            qualityController = QualityController(rtc, callbackScope = backgroundScope),
+            roomController = ai.xmax.sdk.stream.room.RoomController(rtc,
+                ai.xmax.sdk.stream.room.RoomHeartbeat(rtc, sleeper = { awaitCancellation() }, scope = backgroundScope)),
+            generationScope = backgroundScope, renderDispatcher = dispatcher,
+        )
+        val manager = XmaxRealtimeManager(RealtimeConfiguration(), { _, _, _ ->
+            RealtimeComponents(media, stream, render,
+                XmaxRealtimeConnectionManager(session, media, render, stream),
+                XmaxRealtimeGenerationManager(media, stream))
+        }, RealtimeCallbacks(dispatcher), dispatcher, qualityNow = { testScheduler.currentTime })
+        val local = manager.createLocalImageStream(byteArrayOf(1), RealtimeVideoFormat(704, 1280, 24))
+        media.networkVideoReference = RealtimeReferenceVideo("https://example.test/driver.mp4")
+        manager.setRemoteAudioVolume(1f)
+        var completions = 0
+        media.networkVideoFinishHandler = {
+            assertEquals(RealtimeConnectionState.GENERATING, manager.currentState.connectionState)
+            completions++
+        }
+        val start = async { manager.startGeneration(local, RealtimeContext("style", "reference-image"), faceRestoration = true) }
+        runCurrent()
+        val signal = rtc.roomMessages.map { org.json.JSONObject(it) }.single { it.optString("event") == "start" }
+        assertEquals(media.networkVideoReference!!.path, signal.getJSONObject("params").getString("ref_video_path"))
+        assertTrue(signal.getJSONObject("params").getBoolean("face_replace"))
+        assertEquals("[704,1280]", signal.getJSONObject("params").getJSONArray("size").toString())
+        assertEquals("[562,1024]", signal.getJSONObject("params").getJSONArray("target_size").toString())
+        assertEquals(100, signal.getJSONObject("params").getInt("min_bitrate"))
+        assertEquals(EncodingBitratePolicy.resolve(562, 1024, 24).second,
+            signal.getJSONObject("params").getInt("max_bitrate"))
+        val taskId = signal.getString("uid")
+        rtc.emitRemoteVideoPublished("bot", true, roomId = "room-1")
+        rtc.emitSeiMessage(RemoteStream("room-1", "bot"), taskId)
+        runCurrent()
+        stream.onUserMessageReceived(RemoteStream("room-1", "bot"), """{"event":"video_stopped","uid":"$taskId"}""")
+        runCurrent()
+        assertFalse(start.isCompleted)
+        assertEquals(0, completions)
+        assertFalse(rtc.calls.any { it is ai.xmax.sdk.stream.room.RtcManagingCall.SubscribeRemoteAudio })
+        firstFrame.complete(Unit)
+        assertNotNull(start.await().videoTrack)
+        runCurrent()
+        assertEquals(1, completions)
+        assertFalse(rtc.calls.contains(ai.xmax.sdk.stream.room.RtcManagingCall.PublishLocalVideo))
+        assertTrue(rtc.calls.contains(ai.xmax.sdk.stream.room.RtcManagingCall.SubscribeRemoteAudio("bot", true)))
+        assertTrue(rtc.calls.contains(ai.xmax.sdk.stream.room.RtcManagingCall.SetRemoteAudioVolume(100, "bot")))
+        assertFalse(rtc.calls.contains(ai.xmax.sdk.stream.room.RtcManagingCall.PublishLocalAudio))
+        repeat(3) {
+            advanceTimeBy(1000)
+            rtc.emitNetworkQuality(RtcQualityLevel.UNKNOWN, RtcQualityLevel.BAD)
+            runCurrent()
+        }
+        val resize = rtc.roomMessages.map { org.json.JSONObject(it) }.single { it.optString("event") == "change_target_size" }
+        assertEquals(taskId, resize.getString("uid"))
+        assertEquals("[456,832]", resize.getJSONObject("params").getJSONArray("target_size").toString())
+        assertFalse(resize.getJSONObject("params").has("size"))
+        assertEquals(100, resize.getJSONObject("params").getInt("min_bitrate"))
+        assertEquals(EncodingBitratePolicy.resolve(456, 832, 24).second,
+            resize.getJSONObject("params").getInt("max_bitrate"))
+        manager.startGeneration(null)
+        manager.startGeneration(local, RealtimeContext("new style"), faceRestoration = true)
+        val updates = rtc.roomMessages.map { org.json.JSONObject(it) }.filter { it.optString("event") == "change_condition" }
+        assertEquals(listOf(false, true), updates.map { it.getJSONObject("params").getBoolean("face_replace") })
+        assertEquals(listOf("style", "new style"), updates.map { it.getJSONObject("params").getString("prompt") })
+        assertTrue(updates.all { it.getString("uid") == taskId })
+        manager.close()
+        assertTrue(rtc.calls.contains(ai.xmax.sdk.stream.room.RtcManagingCall.SubscribeRemoteAudio("bot", false)))
+        assertNull(media.currentTrack)
+        assertEquals(listOf("session-1"), session.closed)
+        assertTrue(rtc.calls.contains(ai.xmax.sdk.stream.room.RtcManagingCall.LeaveRoom))
+    }
+
+    @Test fun `network metadata is injected and remote audio plays without local publication`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalImageStream(byteArrayOf(1), RealtimeVideoFormat(704, 1280, 24))
+        val reference = RealtimeReferenceVideo("https://example.test/driver.mp4")
+        // MediaStub 提供网络源快照，避免在 JVM 测试中依赖 Android Uri 和播放器。
+        f.media.networkVideoReference = reference
+        var completions = 0
+        val onFinish: () -> Unit = { completions++ }
+        f.media.networkVideoFinishHandler = onFinish
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("style", "reference-image"))
+        assertEquals(listOf(false), f.stream.localPublicationSelections)
+        assertEquals(1, f.stream.audioActivationCount)
+        assertEquals(RealtimeContext("style", "reference-image", reference), f.stream.startedContexts.single())
+        assertNotNull(f.stream.networkFinishHandler)
+        f.stream.networkFinishHandler!!.invoke()
+        assertEquals(1, completions)
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        f.manager.startGeneration(null)
+        assertEquals(reference, f.stream.startedContexts.last().referenceVideo)
+        f.manager.close()
+        assertNull(f.media.currentTrack)
+        assertTrue(f.session.closed.isNotEmpty())
+        f.stream.networkFinishHandler!!.invoke()
+        assertEquals(1, completions)
+    }
+
+    /**
+     * 同规格切流保留房间，使用已有参考图和提示词创建新任务。
+     */
+    @Test fun `external replacement resumes cached context without reconnecting`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val first = f.manager.createExternalVideoStream(ExternalSource())
+        f.stream.confirmation.complete(Unit)
+        val context = RealtimeContext("style", "https://example.test/reference.jpg")
+        val remote = f.manager.startGeneration(first, context, faceRestoration = true)
+        val oldTask = f.manager.currentState.taskId
+        val replacement = f.manager.replaceExternalVideoStream {
+            assertNull(f.manager.currentState.taskId)
+            assertNull(f.media.currentTrack)
+            ExternalSource()
+        }
+        assertNotSame(first.videoTrack, replacement.localStream.videoTrack)
+        assertSame(remote.videoTrack, replacement.remoteStream?.videoTrack)
+        assertNotEquals(oldTask, f.manager.currentState.taskId)
+        assertEquals(listOf(context, context), f.stream.startedContexts)
+        assertEquals(listOf(true, true), f.stream.startedFaceRestorations)
+        assertEquals(1, f.session.count)
+        assertTrue(f.session.closed.isEmpty())
+        f.manager.close()
+    }
+
+    /**
+     * 仅预览或只连接未生成时，替换不能自行创建生成任务。
+     */
+    @Test fun `external preview replacement never starts generation`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.manager.createExternalVideoStream(ExternalSource())
+        val preview = f.manager.replaceExternalVideoStream { ExternalSource() }
+        assertNull(preview.remoteStream)
+        assertEquals(0, f.session.count)
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        f.manager.connect(preview.localStream)
+        val connected = f.manager.replaceExternalVideoStream { ExternalSource() }
+        assertNull(connected.remoteStream)
+        assertTrue(f.stream.startedContexts.isEmpty())
+        assertEquals(RealtimeConnectionState.CONNECTED, f.manager.currentState.connectionState)
+        assertEquals(1, f.session.count)
+        f.manager.close()
+    }
+
+    /**
+     * 首次生成未确认时从在途请求继承条件，不误用尚未写入的成功缓存。
+     */
+    @Test fun `external replacement supersedes pending generation and retains requested context`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createExternalVideoStream(ExternalSource())
+        val pending = async { f.manager.startGeneration(local, RealtimeContext("pending", "reference"), faceRestoration = true) }
+        runCurrent()
+        f.stream.confirmation = CompletableDeferred(Unit)
+        val result = f.manager.replaceExternalVideoStream { ExternalSource() }
+        pending.join()
+        assertTrue(pending.isCancelled)
+        assertNotNull(result.remoteStream)
+        assertEquals(listOf("pending", "pending"), f.stream.startedPrompts)
+        assertEquals(listOf(true, true), f.stream.startedFaceRestorations)
+        assertEquals(1, f.session.count)
+        assertTrue(f.session.closed.isEmpty())
+        f.manager.close()
+    }
+
+    /**
+     * 连会话还没建好时也能接续生成意图，旧会话回滚结束后才切新输入。
+     */
+    @Test fun `external replacement during connection startup resumes after rollback`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createExternalVideoStream(ExternalSource())
+        val barrier = CompletableDeferred<Unit>()
+        f.session.createBarrier = barrier
+        f.stream.confirmation.complete(Unit)
+        val pending = async { f.manager.startGeneration(local, RealtimeContext("pending")) }
+        runCurrent()
+        val replacement = async { f.manager.replaceExternalVideoStream { ExternalSource() } }
+        runCurrent()
+        barrier.complete(Unit)
+        assertNotNull(replacement.await().remoteStream)
+        pending.join()
+        assertTrue(pending.isCancelled)
+        assertEquals(listOf("pending"), f.stream.startedPrompts)
+        assertEquals(listOf("session-1"), f.session.closed)
+        f.manager.close()
+    }
+
+    /**
+     * A 准备中连续选择 B、C，只允许最终输入恢复生成，期间不退出原房间。
+     */
+    @Test fun `rapid external replacements prepare only latest waiting source`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createExternalVideoStream(ExternalSource())
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("cached"))
+        val barrier = CompletableDeferred<Unit>()
+        val prepared = mutableListOf<String>()
+        val first = async {
+            f.manager.replaceExternalVideoStream {
+                prepared += "A"
+                withContext(NonCancellable) { barrier.await() }
+                ExternalSource()
+            }
+        }
+        runCurrent()
+        val second = async(start = CoroutineStart.UNDISPATCHED) {
+            f.manager.replaceExternalVideoStream { prepared += "B"; ExternalSource() }
+        }
+        val third = async(start = CoroutineStart.UNDISPATCHED) {
+            f.manager.replaceExternalVideoStream { prepared += "C"; ExternalSource() }
+        }
+        runCurrent()
+        barrier.complete(Unit)
+        assertNotNull(third.await().remoteStream)
+        first.join(); second.join()
+        assertTrue(first.isCancelled)
+        assertTrue(second.isCancelled)
+        assertEquals(listOf("A", "C"), prepared)
+        assertEquals(listOf("cached", "cached"), f.stream.startedPrompts)
+        assertEquals(1, f.session.count)
+        assertTrue(f.session.closed.isEmpty())
+        f.manager.close()
+    }
+
+    /**
+     * 切流过程中退出页面，迟到的准备结果不能重建输入或恢复任务。
+     */
+    @Test fun `close cancels external replacement and prevents auto resume`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createExternalVideoStream(ExternalSource())
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("cached"))
+        val barrier = CompletableDeferred<Unit>()
+        val replacement = async {
+            f.manager.replaceExternalVideoStream {
+                withContext(NonCancellable) { barrier.await() }
+                ExternalSource()
+            }
+        }
+        runCurrent()
+        val closing = async { f.manager.close() }
+        runCurrent()
+        barrier.complete(Unit)
+        closing.await(); replacement.join()
+        assertTrue(replacement.isCancelled)
+        assertNull(f.media.currentTrack)
+        assertEquals(RealtimeConnectionState.IDLE, f.manager.currentState.connectionState)
+        assertEquals(listOf("cached"), f.stream.startedPrompts)
+    }
+
+    /**
+     * 尺寸或音轨配置变化才重连；恢复仍使用 SDK 原有条件。
+     */
+    @Test fun `changed external input configuration reconnects with cached context`() = runTest {
+        for (source in listOf(ExternalSource(format.copy(width = 1280, height = 704)), ExternalSource(audio = true))) {
+            val f = Fixture(StandardTestDispatcher(testScheduler))
+            val local = f.manager.createExternalVideoStream(ExternalSource())
+            f.stream.confirmation.complete(Unit)
+            f.manager.startGeneration(local, RealtimeContext("cached"))
+            val result = f.manager.replaceExternalVideoStream { source }
+            assertNotNull(result.remoteStream)
+            assertEquals(2, f.session.count)
+            assertEquals(listOf("session-1"), f.session.closed)
+            assertEquals(listOf("cached", "cached"), f.stream.startedPrompts)
+            assertEquals(source.hasAudio, f.stream.localAudioSelections.last())
+            f.manager.close()
+        }
+    }
+
+    /**
+     * 规格变化重连中再次翻页，回滚清理不能抹掉最终切流需要的条件。
+     */
+    @Test fun `replacement during format reconnect retains original context`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createExternalVideoStream(ExternalSource())
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("cached"))
+        val barrier = CompletableDeferred<Unit>()
+        f.session.createBarrier = barrier
+        val first = async {
+            f.manager.replaceExternalVideoStream { ExternalSource(format.copy(width = 1280, height = 704)) }
+        }
+        runCurrent()
+        assertEquals(RealtimeConnectionState.CONNECTING, f.manager.currentState.connectionState)
+        val latest = async { f.manager.replaceExternalVideoStream { ExternalSource() } }
+        runCurrent()
+        barrier.complete(Unit)
+        assertNotNull(latest.await().remoteStream)
+        first.join()
+        assertTrue(first.isCancelled)
+        assertEquals(listOf("cached", "cached"), f.stream.startedPrompts)
+        f.manager.close()
+    }
+
+    /**
+     * 回调失败清理连接；原任务不复活，下一次显式重试仍可建立输入。
+     */
+    @Test fun `failed preparation does not revive old generation and allows retry`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createExternalVideoStream(ExternalSource())
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("cached"))
+        assertTrue(runCatching {
+            f.manager.replaceExternalVideoStream { error("bad media") }
+        }.isFailure)
+        assertEquals(listOf("cached"), f.stream.startedPrompts)
+        assertNull(f.manager.currentState.taskId)
+        val retried = f.manager.replaceExternalVideoStream { ExternalSource() }
+        assertNull(retried.remoteStream)
+        assertTrue(f.media.owns(retried.localStream))
+        f.manager.close()
+    }
+
+    private class ExternalSource(
+        override val videoFormat: RealtimeVideoFormat = format,
+        private val audio: Boolean = false,
+    ) : RealtimeExternalVideoSource {
+        override val hasAudio get() = audio
+        override suspend fun start(sink: RealtimeExternalFrameSink) = Unit
+        override suspend fun stop() = Unit
+        override fun attachPreview(container: android.widget.FrameLayout, contentMode: VideoContentMode) = Unit
+        override fun detachPreview(container: android.widget.FrameLayout) = Unit
+        override fun setPreviewAudio(volume: Float, muted: Boolean) = Unit
+    }
+
+    @Test fun `generation replacement during session creation starts only latest context`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.listen()
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        val release = CompletableDeferred<Unit>()
+        f.session.createBarrier = release
+        f.stream.confirmation = CompletableDeferred(Unit)
+        val first = async { f.manager.startGeneration(local, RealtimeContext("A")) }
+        runCurrent()
+        val second = async(start = CoroutineStart.UNDISPATCHED) { f.manager.startGeneration(local, RealtimeContext("B")) }
+        val third = async(start = CoroutineStart.UNDISPATCHED) { f.manager.startGeneration(local, RealtimeContext("C")) }
+        runCurrent()
+        release.complete(Unit)
+        third.await(); first.join(); second.join()
+        assertTrue(first.isCancelled)
+        assertTrue(second.isCancelled)
+        assertEquals(listOf("C"), f.stream.startedPrompts)
+        assertEquals(listOf("session-1"), f.session.closed)
+        assertEquals("session-2", f.manager.currentState.sessionId)
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        runCurrent()
+        assertTrue(f.errors.isEmpty())
+        f.manager.close()
+    }
+
+    @Test fun `both generation overloads share replacement and preserve established connection`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.listen()
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(local)
+        val first = async { f.manager.startGeneration(local, RealtimeContext("A")) }
+        runCurrent()
+        f.stream.confirmation = CompletableDeferred(Unit)
+        f.manager.startGeneration(RealtimeContext("B"))
+        first.join()
+        assertTrue(first.isCancelled)
+        assertEquals(listOf("A", "B"), f.stream.startedPrompts)
+        assertEquals(1, f.session.count)
+        assertTrue(f.session.closed.isEmpty())
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        runCurrent()
+        assertTrue(f.errors.isEmpty())
+        f.manager.close()
+    }
+
+    @Test fun `overlapping context updates keep existing task and apply latest context`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.listen()
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation = CompletableDeferred(Unit)
+        f.manager.startGeneration(local, RealtimeContext("initial"))
+        val taskId = f.manager.currentState.taskId
+        val release = CompletableDeferred<Unit>()
+        f.stream.updateBarrier = release
+        val first = async { f.manager.startGeneration(RealtimeContext("A")) }
+        runCurrent()
+        val second = async(start = CoroutineStart.UNDISPATCHED) { f.manager.startGeneration(RealtimeContext("B")) }
+        val third = async(start = CoroutineStart.UNDISPATCHED) { f.manager.startGeneration(local, RealtimeContext("C")) }
+        runCurrent()
+        release.complete(Unit)
+        third.await(); first.join(); second.join()
+        assertEquals(listOf("A", "C"), f.stream.updatedPrompts)
+        assertTrue(first.isCancelled)
+        assertTrue(second.isCancelled)
+        assertEquals(taskId, f.manager.currentState.taskId)
+        assertEquals(1, f.session.count)
+        runCurrent()
+        assertTrue(f.errors.isEmpty())
+        f.manager.close()
+    }
+
+    @Test fun `late superseded update cannot replace cached generation context`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation = CompletableDeferred(Unit)
+        f.manager.startGeneration(local, RealtimeContext("initial"))
+        val release = CompletableDeferred<Unit>()
+        f.stream.updateBarrier = release
+        val old = async { f.manager.startGeneration(RealtimeContext("superseded"), faceRestoration = false) }
+        runCurrent()
+        val latest = async { f.manager.startGeneration(local, null, faceRestoration = true) }
+        runCurrent()
+        release.complete(Unit)
+        latest.await(); old.join()
+        assertTrue(old.isCancelled)
+        f.manager.switchCamera()
+        assertEquals(listOf("initial", "initial"), f.stream.startedPrompts)
+        assertEquals(listOf(false, true), f.stream.startedFaceRestorations)
+        f.manager.close()
+    }
+
+    @Test fun `camera enters ready only after preview callback`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.media.reportPreviewReadyOnCreate = false
+
+        f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertEquals(RealtimeConnectionState.PREPARING, f.manager.currentState.connectionState)
+
+        f.media.registeredCameraPreviewReadyListener?.onCameraPreviewReady()
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        f.manager.close()
+    }
+
+    @Test fun `camera microphone starts on connect stops on disconnect and restarts on reconnect`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(
+            format,
+            CameraPosition.FRONT,
+            useMicrophone = true,
+        )
+        assertEquals(0, f.media.microphoneStartCount)
+
+        f.manager.connect(local)
+        assertEquals(1, f.media.microphoneStartCount)
+        assertEquals(listOf(true), f.stream.localAudioSelections)
+
+        f.manager.disconnect()
+        assertEquals(1, f.media.microphoneStopCount)
+        assertSame(local.videoTrack, f.media.currentTrack)
+
+        f.manager.connect(local)
+        assertEquals(2, f.media.microphoneStartCount)
+        assertEquals(listOf(true, true), f.stream.localAudioSelections)
+        f.manager.close()
+        assertEquals(2, f.media.microphoneStopCount)
+    }
+
+    @Test fun `audio preferences survive close and are restored before a new local stream starts`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val frameDispatchers = mutableListOf<ai.xmax.sdk.render.video.RealtimeVideoFrameDispatcher>()
+        val mediaInstances = mutableListOf<MediaStub>()
+        val streamInstances = mutableListOf<StreamStub>()
+        val manager = XmaxRealtimeManager(RealtimeConfiguration(), { _, _, frames ->
+            frameDispatchers += frames
+            val media = MediaStub().also(mediaInstances::add)
+            val stream = StreamStub().also(streamInstances::add)
+            val render = RenderStub()
+            RealtimeComponents(media, stream, render,
+                XmaxRealtimeConnectionManager(SessionStub(), media, render, stream),
+                XmaxRealtimeGenerationManager(media, stream))
+        }, RealtimeCallbacks(dispatcher), dispatcher)
+
+        assertEquals(0.45f, manager.localAudioVolume)
+        assertEquals(1f, manager.remoteAudioVolume)
+        manager.setLocalAudioVolume(0f)
+        manager.setRemoteAudioVolume(0f)
+        assertEquals(0f, manager.localAudioVolume)
+        assertEquals(0f, manager.remoteAudioVolume)
+        manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        manager.close()
+        manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertSame(frameDispatchers.first(), frameDispatchers.last())
+        assertEquals(2, mediaInstances.size)
+        assertEquals(0f, mediaInstances.last().volumeAtStart)
+        assertEquals(0f, streamInstances.last().volume)
+
+        manager.setLocalAudioVolume(0.2f)
+        manager.setRemoteAudioVolume(0.606f)
+        assertEquals(0.2f, manager.localAudioVolume)
+        assertEquals(0.61f, manager.remoteAudioVolume)
+        mediaInstances.last().volumeError = XmaxError(XmaxErrorCode.MEDIA_ERROR, "volume failed")
+        streamInstances.last().volumeError = XmaxError(XmaxErrorCode.RTC_ERROR, "volume failed")
+        assertTrue(runCatching { manager.setLocalAudioVolume(0.8f) }.isFailure)
+        assertTrue(runCatching { manager.setRemoteAudioVolume(0.9f) }.isFailure)
+        assertTrue(runCatching { manager.setLocalAudioVolume(Float.NaN) }.isFailure)
+        assertEquals(0.2f, manager.localAudioVolume)
+        assertEquals(0.61f, manager.remoteAudioVolume)
+        manager.close()
+        manager.setNetworkQualityListener(null)
+        assertEquals(2, mediaInstances.size)
+        assertEquals(0.61f, manager.remoteAudioVolume)
+        manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertEquals(3, mediaInstances.size)
+        assertEquals(0.2f, mediaInstances.last().volumeAtStart)
+        assertEquals(0f, streamInstances.last().volume)
+        manager.close()
+    }
+
+    @Test fun `new camera and image streams reset remote volume to zero`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.manager.setRemoteAudioVolume(0.35f)
+        f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertEquals(0f, f.stream.volume)
+        assertEquals(0f, f.manager.remoteAudioVolume)
+        f.manager.stopLocalCameraStream()
+
+        f.manager.setRemoteAudioVolume(0.35f)
+        f.manager.createLocalImageStream(byteArrayOf(1))
+        assertEquals(0f, f.stream.volume)
+        assertEquals(0f, f.manager.remoteAudioVolume)
+        f.manager.close()
+    }
+
+    @Test fun `failed media creation preserves remote volume`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.manager.setRemoteAudioVolume(0.35f)
+        val failure = XmaxError(XmaxErrorCode.MEDIA_ERROR, "capture failed")
+        f.media.createError = failure
+
+        val thrown = runCatching {
+            f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        }.exceptionOrNull() as XmaxError
+        assertEquals(failure.code, thrown.code)
+        assertEquals(0.35f, f.stream.volume)
+        assertEquals(0.35f, f.manager.remoteAudioVolume)
+        f.manager.close()
+    }
+
+    @Test fun `public listeners survive close and runtime recreation`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val callbacks = RealtimeCallbacks(dispatcher)
+        val mediaInstances = mutableListOf<MediaStub>()
+        val streamInstances = mutableListOf<StreamStub>()
+        val manager = XmaxRealtimeManager(RealtimeConfiguration(), { _, _, _ ->
+            val media = MediaStub().also(mediaInstances::add)
+            val stream = StreamStub().also(streamInstances::add)
+            val render = RenderStub()
+            RealtimeComponents(media, stream, render,
+                XmaxRealtimeConnectionManager(SessionStub(), media, render, stream),
+                XmaxRealtimeGenerationManager(media, stream))
+        }, callbacks, dispatcher)
+        val networkListener = RealtimeNetworkQualityListener { _ -> }
+        val performanceListener = RealtimePerformanceAlarmListener { _ -> }
+        val uplinkStatisticsListener = UplinkVideoStatisticsListener { _ -> }
+        val downlinkStatisticsListener = DownlinkVideoStatisticsListener { _ -> }
+        val states = mutableListOf<RealtimeConnectionState>()
+        val errors = mutableListOf<XmaxError>()
+
+        manager.setStateListener { state ->
+            states += state.connectionState
+            (state.reason as? RealtimeReason.Failure)?.let { errors += it.error }
+        }
+        manager.setNetworkQualityListener(networkListener)
+        manager.setPerformanceAlarmListener(performanceListener)
+        manager.setUplinkVideoStatisticsListener(uplinkStatisticsListener)
+        manager.setDownlinkVideoStatisticsListener(downlinkStatisticsListener)
+        assertTrue(mediaInstances.isEmpty())
+        manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        manager.close()
+        runCurrent()
+
+        assertEquals(RealtimeConnectionState.IDLE, states.last())
+        runCurrent()
+        assertTrue(errors.isEmpty())
+
+        manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        assertEquals(2, mediaInstances.size)
+        assertNotNull(mediaInstances.last().registeredCameraPreviewReadyListener)
+        assertSame(networkListener, streamInstances.last().registeredNetworkQualityListener)
+        assertSame(performanceListener, streamInstances.last().registeredPerformanceAlarmListener)
+        assertSame(uplinkStatisticsListener, streamInstances.last().registeredUplinkStatisticsListener)
+        assertSame(downlinkStatisticsListener, streamInstances.last().registeredDownlinkStatisticsListener)
+        assertNull(streamInstances.first().registeredUplinkStatisticsListener)
+        assertNull(streamInstances.first().registeredDownlinkStatisticsListener)
+        manager.close()
+    }
+
+    @Test fun `generation mutes preview before connection and cancellation restores it after rollback`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        val release = CompletableDeferred<Unit>()
+        f.session.createBarrier = release
+        val start = async { f.manager.startGeneration(local, RealtimeContext("video")) }
+        runCurrent()
+        assertEquals(RealtimeConnectionState.CONNECTING, f.manager.currentState.connectionState)
+        assertTrue(f.media.muted)
+
+        start.cancel()
+        runCurrent()
+        assertFalse(start.isCompleted)
+        release.complete(Unit)
+        start.join()
+        assertFalse(f.media.muted)
+        assertSame(local.videoTrack, f.media.currentTrack)
+        assertEquals(listOf("session-1"), f.session.closed)
+        f.manager.close()
+    }
+
+    @Test fun `generation connection failure restores preview regardless of error code`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.session.createError = XmaxError(XmaxErrorCode.INVALID_API_KEY, "missing key")
+        assertTrue(runCatching { f.manager.startGeneration(local, RealtimeContext("video")) }.isFailure)
+        assertEquals(true, f.media.muteChanges.first())
+        assertEquals(false, f.media.muteChanges.last())
+        assertFalse(f.media.muted)
+        assertSame(local.videoTrack, f.media.currentTrack)
+        f.manager.close()
+    }
+
+    @Test fun `close preempts session creation and old rollback cannot clear a new session`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        val release = CompletableDeferred<Unit>()
+        f.session.createBarrier = release
+        val start = async { f.manager.connect(local) }
+        runCurrent()
+        val close = async { f.manager.close() }
+        runCurrent()
+        assertFalse(close.isCompleted)
+        release.complete(Unit)
+        close.await(); start.join()
+        assertEquals(listOf("session-1"), f.session.closed)
+        assertNull(f.media.currentTrack)
+        assertTrue(f.errors.isEmpty())
+        f.session.createBarrier = null
+        val newLocal = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(newLocal)
+        assertEquals("session-2", f.manager.currentState.sessionId)
+        runCurrent()
+        assertEquals(RealtimeConnectionState.CONNECTED, f.manager.currentState.connectionState)
+        f.manager.close()
+    }
+
+    @Test fun `disconnect while awaiting SEI releases connection retains preview and permits restart`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(local)
+        val start = async { f.manager.startGeneration(RealtimeContext("first")) }
+        runCurrent()
+        f.manager.disconnect(); start.join()
+        assertTrue(start.isCancelled)
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        assertEquals(RealtimeReason.Normal, f.manager.currentState.reason)
+        assertSame(local.videoTrack, f.media.currentTrack)
+        assertFalse(f.media.muted)
+        assertEquals(listOf("session-1"), f.session.closed)
+        assertTrue(f.errors.isEmpty())
+        f.stream.confirmation = CompletableDeferred(Unit)
+        f.manager.startGeneration(local, RealtimeContext("retry"))
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertEquals(2, f.session.count)
+        f.manager.close()
+    }
+
+    @Test fun `terminal heartbeat failure runs cleanup outside failing job and reports once`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val f = Fixture(dispatcher)
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.listen()
+        f.manager.connect(local)
+        val error = XmaxError(XmaxErrorCode.SESSION_ERROR, "expired")
+        f.session.heartbeatJob = backgroundScope.launch(dispatcher) { f.session.failure!!("session-1", error) }
+        runCurrent()
+        assertEquals(listOf("session-1"), f.session.closed)
+        assertEquals(listOf(error), f.errors)
+        assertSame(local.videoTrack, f.media.currentTrack)
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        assertEquals(RealtimeReason.Failure(error), f.manager.currentState.reason)
+        f.session.failure!!("session-1", error)
+        runCurrent()
+        assertEquals(1, f.errors.size)
+        f.manager.close()
+    }
+
+    @Test fun `connection failure throws and callbacks but update failure preserves generation`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.listen()
+        val fatal = XmaxError(XmaxErrorCode.NETWORK_ERROR, "offline")
+        f.session.createError = fatal
+        val thrown = runCatching { f.manager.connect(local) }.exceptionOrNull()
+        runCurrent()
+        assertSame(fatal, thrown)
+        assertEquals(listOf(fatal), f.errors)
+        f.session.createError = null
+        f.stream.confirmation = CompletableDeferred(Unit)
+        f.manager.startGeneration(local, RealtimeContext("start"))
+        f.stream.updateError = XmaxError(XmaxErrorCode.RTC_ERROR, "condition rejected")
+        val updateError = runCatching { f.manager.startGeneration(RealtimeContext("change")) }.exceptionOrNull() as XmaxError
+        runCurrent()
+        assertEquals(XmaxErrorCode.RTC_ERROR, updateError.code)
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertEquals(1, f.errors.size)
+        f.manager.close()
+    }
+
+    @Test fun `invalid setting is local while connection failure is reported`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        f.listen()
+        val invalid = runCatching { f.manager.setLocalAudioVolume(Float.NaN) }.exceptionOrNull() as XmaxError
+        assertEquals(XmaxErrorCode.INVALID_CONFIGURATION, invalid.code)
+        val connectionError = XmaxError(XmaxErrorCode.INVALID_API_KEY, "empty key")
+        f.session.createError = connectionError
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        runCatching { f.manager.connect(local) }
+        runCurrent()
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        assertEquals(listOf(connectionError), f.errors)
+        assertEquals(RealtimeReason.Failure(connectionError), f.manager.currentState.reason)
+        f.manager.close()
+    }
+
+    @Test fun `fatal generation error releases connection and permits reconnect`() = runTest {
+        val f = Fixture(StandardTestDispatcher(testScheduler))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.listen()
+        f.manager.connect(local)
+        val failure = XmaxError(XmaxErrorCode.TIMEOUT, "SEI timed out")
+        f.stream.confirmation.completeExceptionally(failure)
+        assertSame(failure, runCatching { f.manager.startGeneration(RealtimeContext("first")) }.exceptionOrNull())
+        runCurrent()
+        assertEquals(listOf(failure), f.errors)
+        assertEquals(listOf("session-1"), f.session.closed)
+        assertEquals("session-1", f.manager.currentState.sessionId)
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        assertEquals(RealtimeReason.Failure(failure), f.manager.currentState.reason)
+        f.stream.confirmation = CompletableDeferred(Unit)
+        f.manager.startGeneration(local, RealtimeContext("retry"))
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertEquals(2, f.session.count)
+        f.manager.close()
+    }
+
+    @Test fun `generating requires a new frame after SEI on every start including reused connections`() = runTest {
+        val rtc = RtcManagingStub()
+        val render = RenderController(rtc, renderDispatcher = StandardTestDispatcher(testScheduler))
+        val f = Fixture(StandardTestDispatcher(testScheduler), render)
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(local)
+        val remote = RemoteStream("room-1", "bot")
+        val start = async { f.manager.startGeneration(RealtimeContext("first")) }
+        runCurrent()
+        assertEquals(RealtimeConnectionState.CONNECTED, f.manager.currentState.connectionState)
+        // StreamController selects the stream before resolving its matching-SEI confirmation.
+        render.setRemoteStream(remote)
+        val oldFrame = rtc.captureRemoteVideoFrameListener(remote)!!
+        f.stream.confirmation.complete(Unit)
+        runCurrent()
+        assertFalse(start.isCompleted)
+        assertEquals(0, f.stream.audioActivationCount)
+        assertEquals(RealtimeConnectionState.CONNECTED, f.manager.currentState.connectionState)
+        rtc.emitRemoteVideoFrame(remote, 704, 1280)
+        start.await()
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertEquals(1, f.stream.audioActivationCount)
+
+        f.manager.disconnect()
+        f.stream.confirmation = CompletableDeferred()
+        val restart = async { f.manager.startGeneration(local, RealtimeContext("second")) }
+        runCurrent()
+        render.setRemoteStream(remote)
+        f.stream.confirmation.complete(Unit)
+        oldFrame(704, 1280)
+        runCurrent()
+        assertFalse(restart.isCompleted)
+        assertEquals(RealtimeConnectionState.CONNECTED, f.manager.currentState.connectionState)
+        assertEquals(1, f.stream.audioActivationCount)
+        rtc.emitRemoteVideoFrame(remote, 704, 1280)
+        restart.await()
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertEquals(2, f.stream.audioActivationCount)
+        assertEquals(2, f.session.count)
+        f.manager.close()
+    }
+
+    @Test fun `disconnect during first frame wait invalidates receiver and does not emit fatal error`() = runTest {
+        val rtc = RtcManagingStub()
+        val render = RenderController(rtc, renderDispatcher = StandardTestDispatcher(testScheduler))
+        val f = Fixture(StandardTestDispatcher(testScheduler), render)
+        f.listen()
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(local)
+        val start = async { f.manager.startGeneration(RealtimeContext("first")) }
+        runCurrent()
+        val remote = RemoteStream("room-1", "bot")
+        render.setRemoteStream(remote)
+        val oldFrame = rtc.captureRemoteVideoFrameListener(remote)!!
+        f.stream.confirmation.complete(Unit)
+        runCurrent()
+        f.manager.disconnect()
+        start.join()
+        oldFrame(704, 1280)
+        runCurrent()
+        assertTrue(start.isCancelled)
+        assertNull(rtc.captureRemoteVideoFrameListener(remote))
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        assertEquals(0, f.stream.audioActivationCount)
+        assertTrue(f.errors.isEmpty())
+        f.manager.close()
+    }
+
+    @Test fun `frame timeout reports failure and permits a fresh connection`() = runTest {
+        val rtc = RtcManagingStub()
+        val render = RenderController(rtc, remoteFrameReadyTimeoutMillis = 1_000, renderDispatcher = StandardTestDispatcher(testScheduler))
+        val f = Fixture(StandardTestDispatcher(testScheduler), render)
+        f.listen()
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(local)
+        val remote = RemoteStream("room-1", "bot")
+        val start = async { runCatching { f.manager.startGeneration(RealtimeContext("first")) } }
+        runCurrent()
+        render.setRemoteStream(remote)
+        f.stream.confirmation.complete(Unit)
+        runCurrent()
+        advanceTimeBy(1_000)
+        runCurrent()
+        val failure = start.await().exceptionOrNull() as XmaxError
+        assertEquals(XmaxErrorCode.TIMEOUT, failure.code)
+        assertEquals(XmaxErrorCode.TIMEOUT, failure.code)
+        assertEquals(listOf(failure), f.errors)
+        assertNull(rtc.captureRemoteVideoFrameListener(remote))
+        assertEquals(0, f.stream.audioActivationCount)
+        assertEquals(listOf("session-1"), f.session.closed)
+        assertEquals(RealtimeConnectionState.READY, f.manager.currentState.connectionState)
+        assertEquals(RealtimeReason.Failure(failure), f.manager.currentState.reason)
+
+        f.stream.confirmation = CompletableDeferred()
+        val restart = async { f.manager.startGeneration(local, RealtimeContext("retry")) }
+        runCurrent()
+        val nextRemote = RemoteStream("room-2", "bot")
+        render.setRemoteStream(nextRemote)
+        f.stream.confirmation.complete(Unit)
+        runCurrent()
+        assertFalse(restart.isCompleted)
+        rtc.emitRemoteVideoFrame(nextRemote, 704, 1280)
+        restart.await()
+        assertEquals(RealtimeConnectionState.GENERATING, f.manager.currentState.connectionState)
+        assertEquals(1, f.errors.size)
+        assertEquals(2, f.session.count)
+        f.manager.close()
+    }
+
+    @Test fun `registering and clearing frame listener do not initialize RTC components`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        var builds = 0
+        val frames = ai.xmax.sdk.render.video.RealtimeVideoFrameDispatcher(dispatcher)
+        val manager = XmaxRealtimeManager(RealtimeConfiguration(), { _, _, _ ->
+            builds++
+            error("Frame listeners must not create a runtime")
+        }, RealtimeCallbacks(dispatcher, frames), dispatcher)
+        manager.setRemoteVideoFrameListener { }
+        manager.setRemoteVideoFrameListener(null)
+        manager.close()
+        assertEquals(0, builds)
+    }
+
+    @Test fun `timing measures reconnects but skips updates and cancellation`() = runTest {
+        val logs = mutableListOf<String>()
+        val f = Fixture(StandardTestDispatcher(testScheduler), timing = RealtimeTiming({ testScheduler.currentTime * 1_000_000 }, logs::add))
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.stream.confirmation.complete(Unit)
+        f.manager.startGeneration(local, RealtimeContext("first"))
+        assertEquals(1, logs.size)
+        assertTrue(logs.single().contains("实时连接"))
+        f.manager.startGeneration(RealtimeContext("updated"))
+        assertEquals(1, logs.size)
+        f.manager.disconnect()
+        f.manager.startGeneration(local, RealtimeContext("second"))
+        assertEquals(2, logs.size)
+        assertTrue(logs.last().contains("实时连接"))
+        f.manager.disconnect()
+        f.stream.confirmation = CompletableDeferred()
+        val cancelled = async { f.manager.startGeneration(local, RealtimeContext("cancelled")) }
+        runCurrent()
+        f.manager.disconnect()
+        cancelled.join()
+        assertTrue(cancelled.isCancelled)
+        assertEquals(2, logs.size)
+        f.manager.close()
+    }
+
+    @Test fun `public frame listener survives disconnect and close`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val frameScheduler = kotlinx.coroutines.test.TestCoroutineScheduler()
+        val rtc = ai.xmax.sdk.stream.room.RtcManagingStub()
+        val frames = ai.xmax.sdk.render.video.RealtimeVideoFrameDispatcher(StandardTestDispatcher(frameScheduler))
+        val render = ai.xmax.sdk.render.RenderController(rtc, renderDispatcher = dispatcher,
+            frameDispatcher = frames)
+        val f = Fixture(dispatcher, render, frames = frames)
+        val local = f.manager.createLocalCameraStream(format, CameraPosition.FRONT)
+        f.manager.connect(local)
+        val received = mutableListOf<Long>()
+        f.manager.setRemoteVideoFrameListener { received += it.presentationTimeUs }
+        val stream = ai.xmax.sdk.foundation.rtc.RemoteStream("room", "bot")
+        val frame = object : ai.xmax.sdk.foundation.rtc.RtcRemoteVideoFrame {
+            override val width = 2
+            override val height = 2
+            override fun copy() = RealtimeVideoFrame(2, 2, 42, null, 0, ByteArray(4), ByteArray(1), ByteArray(1))
+        }
+        render.setRemoteStream(stream)
+        val old = rtc.captureRemoteVideoSink(stream)!!
+        old.onFrame(frame)
+        f.manager.disconnect()
+        frameScheduler.runCurrent()
+        assertTrue(received.isEmpty())
+        render.setRemoteStream(stream)
+        old.onFrame(frame)
+        rtc.captureRemoteVideoSink(stream)!!.onFrame(frame)
+        frameScheduler.runCurrent()
+        assertEquals(listOf(42L), received)
+        rtc.captureRemoteVideoSink(stream)!!.onFrame(frame)
+        f.manager.close()
+        render.setRemoteStream(stream)
+        rtc.captureRemoteVideoSink(stream)!!.onFrame(frame)
+        frameScheduler.runCurrent()
+        assertEquals(listOf(42L, 42L), received)
+        render.setRemoteStream(null)
+    }
+
+    private class Fixture(
+        dispatcher: CoroutineDispatcher,
+        frameGate: RenderControlling = RenderStub(),
+        timing: RealtimeTiming = RealtimeTiming(),
+        frames: ai.xmax.sdk.render.video.RealtimeVideoFrameDispatcher = ai.xmax.sdk.render.video.RealtimeVideoFrameDispatcher(),
+        qualityNow: () -> Long = { System.nanoTime() / 1_000_000 },
+        qualityHistory: QualityHistory = QualityHistory(),
+    ) {
+        val media = MediaStub()
+        val stream = StreamStub()
+        val render = object : RenderControlling by frameGate {
+            // JVM tests exercise the real frame gate; Android view/trajectory binding has device tests.
+            override fun registerRemoteTrack(track: RealtimeVideoTrack, interactionListener: (InteractionFrame) -> Unit) = Unit
+        }
+        val session = SessionStub()
+        val errors = mutableListOf<XmaxError>()
+        val manager = XmaxRealtimeManager(RealtimeConfiguration(), { _, _, _ ->
+            RealtimeComponents(media, stream, render,
+                XmaxRealtimeConnectionManager(session, media, render, stream),
+                XmaxRealtimeGenerationManager(media, stream))
+        }, RealtimeCallbacks(dispatcher, frames), dispatcher, timing, qualityHistory = qualityHistory, qualityNow = qualityNow)
+        init { stream.onStop = { render.setRemoteStream(null) } }
+        suspend fun listen() {
+            manager.setStateListener { state ->
+                (state.reason as? RealtimeReason.Failure)?.let { errors += it.error }
+            }
+        }
+    }
+    companion object { val format = RealtimeVideoFormat(704, 1280, 24) }
+}
+
+private class SessionStub : RealtimeSessionServicing {
+    var createBarrier: CompletableDeferred<Unit>? = null
+    var createError: XmaxError? = null
+    var failure: RealtimeSessionHeartbeatFailureHandler? = null
+    var heartbeatJob: Job? = null
+    var count = 0
+    val closed = mutableListOf<String>()
+    override suspend fun createSession(model: RealtimeModel): RealtimeSession {
+        createError?.let { throw it }
+        withContext(NonCancellable) { createBarrier?.await() }
+        return RealtimeSession("session-${++count}", userId = "local", status = "ACTIVE", closeReason = null, connection = RealtimeSessionConnection("room-$count", "local", "token", "bot"))
+    }
+    override fun startHeartbeat(sessionId: String, onFailure: RealtimeSessionHeartbeatFailureHandler) { failure = onFailure }
+    override suspend fun stopHeartbeat() { heartbeatJob?.cancelAndJoin(); heartbeatJob = null }
+    override suspend fun closeSession(sessionId: String) { currentCoroutineContext().ensureActive(); closed += sessionId }
+}
+private class MediaStub : MediaControlling {
+    override var isLocalVideo = false
+    override var isLocalImage = false
+    var interactionUsesDisplayedSize = false
+    var interactionFormat: RealtimeVideoFormat? = null
+    override var currentTrack: RealtimeVideoTrack? = null
+    override val currentVideoFormat get() = currentTrack?.videoFormat
+    override suspend fun prepareConnectionVideoFormat() = currentVideoFormat
+    override suspend fun enumerateCameraDevices(): List<RealtimeCameraDevice> = emptyList()
+    override var hasAudio = false
+    override var networkVideoReference: RealtimeReferenceVideo? = null
+    override var networkVideoFinishHandler: (() -> Unit)? = null
+    override suspend fun createNetworkVideoStream(uri: Uri, videoFormat: RealtimeVideoFormat, sampleMethod: RealtimeVideoSampleMethod, onFinish: (() -> Unit)?) = error("unused")
+    override var isExternalVideo = false
+    var microphoneStartCount = 0
+    var microphoneStopCount = 0
+    var muted = false
+    val muteChanges = mutableListOf<Boolean>()
+    var volume = 0.45f
+    var volumeAtStart = 0.45f
+    var volumeError: XmaxError? = null
+    var createError: XmaxError? = null
+    var registeredCameraPreviewReadyListener: RealtimeCameraPreviewReadyListener? = null
+    var reportPreviewReadyOnCreate = true
+    var cameraStartBarrier: CompletableDeferred<Unit>? = null
+    var stopBarrier: CompletableDeferred<Unit>? = null
+    override fun setCameraPreviewReadyListener(listener: RealtimeCameraPreviewReadyListener?) {
+        registeredCameraPreviewReadyListener = listener
+    }
+    override suspend fun createLocalCameraStream(
+        videoFormat: RealtimeVideoFormat,
+        position: CameraPosition,
+        useMicrophone: Boolean,
+        cameraDeviceId: String?,
+        cameraRotationDegrees: Int,
+        captureFormat: RealtimeCameraCaptureFormat?,
+    ): RealtimeMediaStream {
+        cameraStartBarrier?.await()
+        createError?.let { throw it }
+        volumeAtStart = volume
+        hasAudio = useMicrophone
+        val track = RealtimeVideoTrack("local", videoFormat)
+        currentTrack = track
+        if (reportPreviewReadyOnCreate) {
+            registeredCameraPreviewReadyListener?.onCameraPreviewReady()
+        }
+        return RealtimeMediaStream("local", track)
+    }
+    override fun startMicrophoneCapture() {
+        if (hasAudio) microphoneStartCount += 1
+    }
+    override fun stopMicrophoneCapture() {
+        if (hasAudio) microphoneStopCount += 1
+    }
+    override suspend fun createLocalImageStream(
+        imageData: ByteArray,
+        videoFormat: RealtimeVideoFormat?,
+    ): RealtimeMediaStream {
+        createError?.let { throw it }
+        hasAudio = false
+        val track = RealtimeVideoTrack(
+            "local",
+            videoFormat ?: RealtimeVideoFormat(704, 1_280, 24),
+        )
+        currentTrack = track
+        return RealtimeMediaStream("local", track)
+    }
+    override suspend fun createLocalImageStream(bitmap: Bitmap, videoFormat: RealtimeVideoFormat?) = error("unused")
+    override suspend fun createLocalImageStream(uri: Uri, videoFormat: RealtimeVideoFormat?) = error("unused")
+    override suspend fun createLocalVideoStream(uri: Uri, videoFormat: RealtimeVideoFormat?) = error("unused")
+    override suspend fun stopLocalCameraStream() { currentTrack = null; hasAudio = false }
+    override suspend fun stopLocalImageStream() { currentTrack = null; hasAudio = false }
+    override suspend fun createExternalVideoStream(source: RealtimeExternalVideoSource, videoFormat: RealtimeVideoFormat?): RealtimeMediaStream {
+        isExternalVideo = true
+        hasAudio = source.hasAudio
+        currentTrack = RealtimeVideoTrack("external", videoFormat ?: source.videoFormat)
+        return RealtimeMediaStream("local", currentTrack)
+    }
+    override suspend fun replaceExternalVideoStream(
+        videoFormat: RealtimeVideoFormat?,
+        targetSource: suspend () -> RealtimeExternalVideoSource,
+    ): RealtimeMediaStream {
+        currentTrack = null
+        return createExternalVideoStream(targetSource(), videoFormat)
+    }
+    override suspend fun stopExternalVideoStream() = Unit
+    override suspend fun stopLocalVideoStream() = Unit
+    override suspend fun stopLocalStream() {
+        stopBarrier?.await()
+        currentTrack = null
+    }
+    override suspend fun setLocalAudioPreviewMuted(muted: Boolean) { this.muted = muted; muteChanges += muted }
+    override suspend fun setLocalAudioVolume(volume: Float) { volumeError?.let { throw it }; this.volume = volume }
+    override suspend fun switchCamera() = RealtimeMediaStream("local", currentTrack)
+    override fun owns(stream: RealtimeMediaStream) = stream.videoTrack === currentTrack
+    override suspend fun startInteraction(taskId: String, videoFormat: RealtimeVideoFormat, useDisplayedSize: Boolean) {
+        interactionFormat = videoFormat
+        interactionUsesDisplayedSize = useDisplayedSize
+    }
+    override suspend fun stopInteraction() = Unit
+    override fun submitInteraction(frame: InteractionFrame) = Unit
+}
+private class StreamStub : StreamControlling {
+    val startedPadding = mutableListOf<Boolean>()
+    val updatedPadding = mutableListOf<Boolean>()
+    val updatedFormats = mutableListOf<RealtimeVideoFormat>()
+    var adaptiveListener: ((RealtimeNetworkQuality) -> Unit)? = null
+    val encoderFormats = mutableListOf<RealtimeVideoFormat>()
+    val startedFormats = mutableListOf<RealtimeVideoFormat>()
+    val startedTargets = mutableListOf<RealtimeVideoFormat?>()
+    val downlinkUpdates = mutableListOf<RealtimeVideoFormat>()
+    var downlinkBarrier: CompletableDeferred<Unit>? = null
+    var downlinkError: Throwable? = null
+    var onStop: () -> Unit = {}
+    var audioActivationCount = 0
+    var confirmation = CompletableDeferred<Unit>()
+    var updateError: XmaxError? = null
+    var updateBarrier: CompletableDeferred<Unit>? = null
+    val startedPrompts = mutableListOf<String?>()
+    val startedContexts = mutableListOf<RealtimeContext>()
+    val startedFaceRestorations = mutableListOf<Boolean>()
+    val updatedPrompts = mutableListOf<String?>()
+    var volume = 1f
+    var volumeError: XmaxError? = null
+    val localPublicationSelections = mutableListOf<Boolean>()
+    var networkFinishHandler: (() -> Unit)? = null
+    val localAudioSelections = mutableListOf<Boolean>()
+    var registeredNetworkQualityListener: RealtimeNetworkQualityListener? = null
+    var registeredPerformanceAlarmListener: RealtimePerformanceAlarmListener? = null
+    var registeredUplinkStatisticsListener: UplinkVideoStatisticsListener? = null
+    var registeredDownlinkStatisticsListener: DownlinkVideoStatisticsListener? = null
+    override fun setVideoEncoderConfig(videoFormat: RealtimeVideoFormat) { encoderFormats += videoFormat }
+    override fun setAdaptiveQualityListener(listener: ((RealtimeNetworkQuality) -> Unit)?) { adaptiveListener = listener }
+    override fun setUplinkVideoStatisticsListener(listener: UplinkVideoStatisticsListener?) {
+        registeredUplinkStatisticsListener = listener
+    }
+    override fun setDownlinkVideoStatisticsListener(listener: DownlinkVideoStatisticsListener?) {
+        registeredDownlinkStatisticsListener = listener
+    }
+    override fun setNetworkQualityListener(listener: RealtimeNetworkQualityListener?) {
+        registeredNetworkQualityListener = listener
+    }
+    override fun setPerformanceAlarmListener(listener: RealtimePerformanceAlarmListener?) {
+        registeredPerformanceAlarmListener = listener
+    }
+    override fun setRemoteAudioVolume(volume: Float) { volumeError?.let { throw it }; this.volume = volume }
+    override suspend fun connect(connection: RealtimeSessionConnection, includeLocalAudio: Boolean, publishLocalMedia: Boolean, ensureActive: () -> Unit) {
+        ensureActive()
+        localPublicationSelections += publishLocalMedia
+        localAudioSelections += includeLocalAudio
+    }
+    override suspend fun disconnect() = Unit
+    override fun pushLocalVideoFrame(frame: VideoFrame) = Unit
+    override fun pushLocalAudioFrame(frame: AudioFrame) = Unit
+    override suspend fun updateDownlinkVideoResolution(
+        taskId: String,
+        targetVideoFormat: RealtimeVideoFormat,
+        ensureActive: () -> Unit,
+    ) {
+        downlinkError?.let { throw it }
+        downlinkBarrier?.await()
+        ensureActive()
+        downlinkUpdates += targetVideoFormat
+    }
+
+    override suspend fun beginGeneration(
+        taskId: String,
+        videoFormat: RealtimeVideoFormat,
+        context: RealtimeContext,
+        faceRestoration: Boolean,
+        targetVideoFormat: RealtimeVideoFormat?,
+        paddingContain: Boolean,
+    ): Deferred<Unit> {
+        startedFormats += videoFormat
+        startedPadding += paddingContain
+        startedTargets += targetVideoFormat
+        startedPrompts += context.prompt
+        startedContexts += context
+        startedFaceRestorations += faceRestoration
+        val timing = currentCoroutineContext()[RealtimeTiming.Attempt]
+        timing?.beginSignal(taskId)
+        confirmation.invokeOnCompletion { error -> if (error == null) timing?.confirmRemoteStream(taskId) }
+        return confirmation
+    }
+    override fun activateNetworkVideoCompletion(onFinish: (() -> Unit)?) { networkFinishHandler = onFinish }
+    override fun activateRemoteAudio() { audioActivationCount++ }
+    override suspend fun updateGeneration(
+        taskId: String,
+        videoFormat: RealtimeVideoFormat,
+        context: RealtimeContext,
+        faceRestoration: Boolean,
+        paddingContain: Boolean,
+    ) {
+        updateError?.let { throw it }
+        updatedFormats += videoFormat
+        updatedPadding += paddingContain
+        updatedPrompts += context.prompt
+        withContext(NonCancellable) { updateBarrier?.await() }
+    }
+    override suspend fun stopGeneration(taskId: String) { onStop() }
+    override suspend fun sendTracks(taskId: String, points: List<RealtimePoint>) = Unit
+}
+private class RenderStub : RenderControlling {
+    override fun setRemoteStream(stream: RemoteStream?) = Unit
+    override fun registerRemoteTrack(track: RealtimeVideoTrack, interactionListener: (InteractionFrame) -> Unit) = Unit
+    override fun updateRemoteVideoFormat(videoFormat: RealtimeVideoFormat, track: RealtimeVideoTrack) = Unit
+    override suspend fun waitUntilRemoteFrameReady() = Unit
+    override suspend fun resetRemoteTrack(track: RealtimeVideoTrack?) = Unit
+}

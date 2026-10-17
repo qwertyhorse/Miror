@@ -12,8 +12,9 @@ import type { ExhibitionCameraRequest } from '../shared/exhibitionCamera';
 import { DEFAULT_EXHIBITION_GESTURE_SETTINGS } from '../shared/exhibitionGestures';
 import { createReactHost, flushReact } from './support/reactHost';
 
-const mocks = vi.hoisted(() => ({ api: vi.fn() }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), orient: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
+vi.mock('../src/exhibition/cameraOrientation', () => ({ orientExhibitionCamera: mocks.orient }));
 vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: ({ stream, label, onFirstFrame }: { stream: MediaStream; label?: string; onFirstFrame?: (stream: MediaStream) => void }) => {
   useEffect(() => { if (stream) onFirstFrame?.(stream); }, [stream, onFirstFrame]);
   return createElement('video', { 'aria-label': label, ref: (video: HTMLVideoElement | null) => { if (video) video.srcObject = stream; } });
@@ -30,8 +31,12 @@ let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 function makeStream(id: string) {
-  const track = { readyState: 'live', stop: vi.fn(function () { track.readyState = 'ended'; }), getSettings: () => ({ deviceId: id }), onended: null };
+  const track = { readyState: 'live', stop: vi.fn(function () { track.readyState = 'ended'; }), getSettings: () => id ? { deviceId: id } : {}, onended: null };
   return { stream: { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream, track };
+}
+function makeTransform() {
+  const output = makeStream('');
+  return { ...output, dispose: vi.fn(() => output.track.stop()) };
 }
 async function fixture(initialRequest: ExhibitionCameraRequest | null = request(), initialState = state(), includeMetadataReport = false, localPreview = false,
   options: { cameraPreferenceScope?: string; initialPreference?: ExhibitionCameraPreference; renderKiosk?: boolean } = {}) {
@@ -48,6 +53,10 @@ async function fixture(initialRequest: ExhibitionCameraRequest | null = request(
   vi.stubGlobal('localStorage', storage);
   const devices = ['camera-a', 'camera-b'].map((deviceId, index) => ({ deviceId, label: `USB ${index + 1}`, kind: 'videoinput' as const }));
   const streams: ReturnType<typeof makeStream>[] = [];
+  const transforms: ReturnType<typeof makeTransform>[] = [];
+  mocks.orient.mockReset().mockImplementation(async () => {
+    const transformed = makeTransform(); transforms.push(transformed); return transformed;
+  });
   const getUserMedia = vi.fn(async (constraints: MediaStreamConstraints) => {
     const id = typeof constraints.video === 'object' ? (constraints.video.deviceId as ConstrainDOMStringParameters)?.exact as string : undefined;
     const capture = makeStream(id || 'camera-a'); streams.push(capture); return capture.stream;
@@ -79,10 +88,232 @@ async function fixture(initialRequest: ExhibitionCameraRequest | null = request(
   const button = (label: string) => host!.find(node => node.nodeName === 'button' && node.textContent === label);
   const click = async (label: string) => { await act(async () => { await button(label)!.getReactProps().onClick(); }); await flushReact(); };
   const select = async (id: string) => { await act(async () => { host!.find(node => node.nodeName === 'select')!.getReactProps().onChange({ target: { value: id } }); }); await flushReact(); };
-  return { get live() { return live; }, get gate() { return gate; }, update, report, send, openCamera, storage, getUserMedia, enumerateDevices, streams, click, select, button };
+  const direction = () => host!.find(node => node.nodeName === 'select' && node.getReactProps()['aria-label'] === '摄像头方向')!;
+  const rotate = async (value: string) => { await act(async () => { direction().getReactProps().onChange({ target: { value } }); }); await flushReact(); };
+  const resolution = () => host!.find(node => node.nodeName === 'select' && node.getReactProps()['aria-label'] === '摄像头分辨率')!;
+  const quality = async (value: string) => { await act(async () => { resolution().getReactProps().onChange({ target: { value } }); }); await flushReact(); };
+  return { get live() { return live; }, get gate() { return gate; }, update, report, send, openCamera, storage, getUserMedia, enumerateDevices, streams, transforms, click, select, rotate, direction, button, resolution, quality };
 }
 
+describe('terminal camera resolution preview and persistence', () => {
+  const qualities = [
+    ['1080p', 1920, 1080], ['4k', 3840, 2160], ['l1', 1920, 1024],
+    ['l2', 1536, 818], ['l3', 1248, 664], ['l4', 960, 512],
+  ] as const;
+
+  it('offers default plus all supported capture sizes and ignores invalid UI values', async () => {
+    const f = await fixture();
+    expect(f.resolution().childNodes.map(node => node.getReactProps().value)).toEqual(['', '1080p', '4k', 'l1', 'l2', 'l3', 'l4']);
+    expect(f.resolution().getReactProps().value).toBe('');
+    await f.quality('2k'); await f.quality('4K'); await f.quality('__proto__');
+    expect(f.getUserMedia).not.toHaveBeenCalled(); expect(f.resolution().getReactProps().value).toBe('');
+    expect(f.storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it.each(qualities.flatMap(([quality, width, height]) => ([0, 90, 180, 270] as const).map(rotation => ({ quality, width, height, rotation }))))
+  ('applies $quality bounds to capture and orientation at $rotation degrees', async ({ quality, width, height, rotation }) => {
+    const f = await fixture(request(), state(), false, false, { initialPreference: { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', rotation } });
+    await f.quality(quality);
+    const quarterTurn = rotation === 90 || rotation === 270;
+    expect(f.getUserMedia).toHaveBeenCalledExactlyOnceWith({ audio: false, video: { deviceId: { exact: 'camera-a' },
+      width: { ideal: quarterTurn ? width : height }, height: { ideal: quarterTurn ? height : width }, frameRate: { ideal: 30, max: 30 } } });
+    // Even 0 degrees must use the bounding transform when a size was requested;
+    // getUserMedia ideal constraints alone do not cap a device's actual frames.
+    expect(mocks.orient).toHaveBeenCalledExactlyOnceWith(f.streams[0].stream, rotation, expect.any(AbortSignal), expect.objectContaining({ width, height }));
+    expect(f.live.cameraStream).toBe(f.transforms[0].stream); expect(f.live.rawCameraStream).toBe(f.streams[0].stream);
+    expect(f.button('保存')?.getReactProps().disabled).toBe(false); expect(f.storage.setItem).not.toHaveBeenCalled();
+    expect(readCameraPreference()?.quality).toBeUndefined();
+    expect(mocks.api.mock.calls.every(([url]) => String(url).endsWith('/live/status'))).toBe(true);
+  });
+
+  it('saves the tested quality in its own scope and reopens capture with the saved size and rotation', async () => {
+    const realPreference: ExhibitionCameraPreference = { deviceId: 'camera-a', label: '真实镜端', profile: 'screen', quality: '4k' };
+    const f = await fixture(null, state(), false, true, { cameraPreferenceScope: 'quality/test-a', initialPreference: realPreference });
+    await f.click('摄像头'); expect(f.resolution().getReactProps().value).toBe('');
+    await f.quality('l3'); await f.select('camera-b'); await f.rotate('90');
+    const tested = f.live.cameraStream; await f.click('保存');
+    expect(readCameraPreference('quality/test-a')).toEqual({ deviceId: 'camera-b', label: 'USB 2', profile: 'screen', rotation: 90, quality: 'l3' });
+    expect(readCameraPreference()).toEqual(realPreference); expect(readCameraPreference('quality/test-b')).toBeNull();
+    expect(f.storage.setItem).toHaveBeenCalledExactlyOnceWith(scopedStorageKey('exhibition-camera-preference:quality%2Ftest-a'),
+      JSON.stringify({ deviceId: 'camera-b', label: 'USB 2', profile: 'screen', rotation: 90, quality: 'l3' }));
+    expect(f.live.cameraStream).toBe(tested);
+    await act(async () => f.live.stopCamera()); await flushReact();
+    await act(async () => { await f.live.startCamera(); }); await flushReact();
+    expect(f.getUserMedia).toHaveBeenLastCalledWith({ audio: false, video: { deviceId: { exact: 'camera-b' }, width: { ideal: 1248 }, height: { ideal: 664 }, frameRate: { ideal: 30, max: 30 } } });
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams.at(-1)!.stream, 90, expect.any(AbortSignal), expect.objectContaining({ width: 1248, height: 664 }));
+    await f.click('摄像头'); expect(f.resolution().getReactProps().value).toBe('l3'); expect(f.direction().getReactProps().value).toBe(90);
+    expect(f.report).not.toHaveBeenCalled();
+  });
+
+  it('cancels a replacement resolution by restoring the original device, direction and quality without saving', async () => {
+    const original: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', rotation: 270, quality: 'l2' };
+    const f = await fixture(null, state(), false, false, { initialPreference: original });
+    await act(async () => { await f.live.startCamera(); }); await flushReact();
+    await act(async () => f.update({ request: request() })); await flushReact();
+    await f.quality('4k'); await f.select('camera-b'); await f.rotate('180');
+    const discarded = f.transforms.at(-1)!; await f.click('取消');
+    expect(f.gate.request).toBeNull(); expect(f.live.selectedCameraId).toBe('camera-a'); expect(readCameraPreference()).toEqual(original);
+    expect(f.getUserMedia).toHaveBeenLastCalledWith({ audio: false, video: { deviceId: { exact: 'camera-a' }, width: { ideal: 1536 }, height: { ideal: 818 }, frameRate: { ideal: 30, max: 30 } } });
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams.at(-1)!.stream, 270, expect.any(AbortSignal), expect.objectContaining({ width: 1536, height: 818 }));
+    expect(discarded.dispose).toHaveBeenCalledOnce(); expect(f.live.cameraStream).toBe(f.transforms.at(-1)!.stream);
+    expect(f.storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it.each(['screen', 'default'] as const)('clears a saved resolution and restores the legacy %s capture profile', async profile => {
+    const f = await fixture(request(), state(), false, false, { initialPreference: { deviceId: 'camera-a', label: 'USB 1', profile, quality: '4k' } });
+    await f.click('预览'); expect(mocks.orient).toHaveBeenCalledOnce();
+    await f.quality('');
+    const expected = { audio: false, video: profile === 'default' ? { deviceId: { exact: 'camera-a' } }
+      : { deviceId: { exact: 'camera-a' }, width: { ideal: 1080 }, height: { ideal: 1920 }, frameRate: { ideal: 30, max: 30 } } };
+    expect(f.getUserMedia).toHaveBeenLastCalledWith(expected); expect(f.live.cameraStream).toBe(f.streams[1].stream);
+    expect(mocks.orient).toHaveBeenCalledOnce(); expect(f.transforms[0].dispose).toHaveBeenCalledOnce();
+    await f.click('保存'); expect(readCameraPreference()).toEqual({ deviceId: 'camera-a', label: 'USB 1', profile });
+    await act(async () => f.live.stopCamera()); await flushReact(); await act(async () => { await f.live.startCamera(); }); await flushReact();
+    expect(f.getUserMedia).toHaveBeenLastCalledWith(expected); expect(mocks.orient).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a failed resolution unsaved and retries the selected size before enabling save', async () => {
+    const original: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', quality: 'l2' };
+    const f = await fixture(request(), state(), false, false, { initialPreference: original });
+    f.getUserMedia.mockRejectedValueOnce(new DOMException('denied', 'NotAllowedError'));
+    await f.quality('l4'); expect(f.live.cameraStream).toBeNull(); expect(f.live.cameraError).not.toBe('');
+    expect(f.button('保存')?.getReactProps().disabled).toBe(true); await f.click('保存');
+    expect(f.storage.setItem).not.toHaveBeenCalled(); expect(readCameraPreference()).toEqual(original);
+    await f.click('预览');
+    expect(f.getUserMedia).toHaveBeenLastCalledWith({ audio: false, video: { deviceId: { exact: 'camera-a' }, width: { ideal: 512 }, height: { ideal: 960 }, frameRate: { ideal: 30, max: 30 } } });
+    expect(f.button('保存')?.getReactProps().disabled).toBe(false); await f.click('保存'); expect(readCameraPreference()?.quality).toBe('l4');
+  });
+
+  it('releases a failed bounding transform and never saves the unverified size', async () => {
+    const original: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', quality: '4k' };
+    const f = await fixture(request(), state(), false, false, { initialPreference: original });
+    mocks.orient.mockRejectedValueOnce(new Error('分辨率处理失败')); await f.quality('l3');
+    expect(f.streams[0].track.stop).toHaveBeenCalledOnce(); expect(f.live.cameraStream).toBeNull();
+    expect(f.button('保存')?.getReactProps().disabled).toBe(true); await f.click('保存');
+    expect(f.storage.setItem).not.toHaveBeenCalled(); expect(readCameraPreference()).toEqual(original);
+  });
+
+  it('blocks saving and changing size while the new bounding transform is pending', async () => {
+    const original: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', quality: 'l2' };
+    const f = await fixture(request(), state(), false, false, { initialPreference: original }); await f.click('预览');
+    let resolve!: (value: ReturnType<typeof makeTransform>) => void;
+    mocks.orient.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await f.quality('l4');
+    expect(f.live.opening).toBe(true); expect(f.resolution().getReactProps().disabled).toBe(true); expect(f.button('保存')?.getReactProps().disabled).toBe(true);
+    await f.click('保存'); expect(f.storage.setItem).not.toHaveBeenCalled(); expect(readCameraPreference()).toEqual(original);
+    const ready = makeTransform(); await act(async () => resolve(ready)); await flushReact();
+    expect(f.live.cameraStream).toBe(ready.stream); expect(f.button('保存')?.getReactProps().disabled).toBe(false);
+    await f.click('保存'); expect(readCameraPreference()?.quality).toBe('l4');
+  });
+
+  it('uses saved quality for ordinary capture and permits only diagnostic quality overrides', async () => {
+    const original: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', quality: 'l2' };
+    const f = await fixture(null, state(), false, false, { initialPreference: original });
+    await act(async () => { await f.live.startCamera('camera-a', false, 90, '4k'); }); await flushReact();
+    expect(f.getUserMedia).toHaveBeenLastCalledWith({ audio: false, video: { deviceId: { exact: 'camera-a' }, width: { ideal: 818 }, height: { ideal: 1536 }, frameRate: { ideal: 30, max: 30 } } });
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams[0].stream, 0, expect.any(AbortSignal), expect.objectContaining({ width: 1536, height: 818 }));
+    await act(async () => f.update({ request: request() })); await flushReact();
+    await act(async () => { await f.live.startCamera('camera-a', true); }); await flushReact();
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams[1].stream, 0, expect.any(AbortSignal), expect.objectContaining({ width: 1536, height: 818 }));
+    await act(async () => { await f.live.startCamera('camera-a', true, 0, null); }); await flushReact();
+    expect(f.live.cameraStream).toBe(f.streams[2].stream); expect(mocks.orient).toHaveBeenCalledTimes(2);
+    expect(readCameraPreference()).toEqual(original); expect(f.storage.setItem).not.toHaveBeenCalled();
+  });
+});
+
 describe('bound browser terminal camera diagnostics', () => {
+  it('saves the real camera and tested rotation in the browser-test scope and restores them on reopening capture', async () => {
+    const f = await fixture(null, state(), false, true, { cameraPreferenceScope: 'test-rotation' });
+    await f.click('摄像头'); await f.select('camera-b'); await f.rotate('90');
+    const rotated = f.transforms[0];
+    expect(rotated.track.getSettings()).toEqual({});
+    expect(f.live.cameraStream).toBe(rotated.stream); expect(f.live.rawCameraStream).toBe(f.streams[1].stream);
+    expect(f.getUserMedia).toHaveBeenLastCalledWith({ audio: false, video: { deviceId: { exact: 'camera-b' },
+      width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } } });
+    expect(f.button('保存')?.getReactProps().disabled).toBe(false);
+    await f.click('保存');
+    expect(readCameraPreference('test-rotation')).toEqual({ deviceId: 'camera-b', label: 'USB 2', profile: 'screen', rotation: 90 });
+    expect(readCameraPreference()).toBeNull(); expect(readCameraPreference('test-other')).toBeNull();
+    expect(rotated.dispose).not.toHaveBeenCalled();
+    await act(async () => f.live.stopCamera()); await flushReact();
+    expect(rotated.dispose).toHaveBeenCalledOnce(); expect(f.streams[1].track.stop).toHaveBeenCalledOnce();
+    await act(async () => { await f.live.startCamera(); }); await flushReact();
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams[2].stream, 90, expect.any(AbortSignal));
+    expect(f.live.selectedCameraId).toBe('camera-b'); expect(f.live.cameraStream).toBe(f.transforms[1].stream);
+    await f.click('摄像头'); expect(f.direction().getReactProps().value).toBe(90);
+    expect(f.report).not.toHaveBeenCalled();
+    expect(mocks.api.mock.calls.every(([url]) => String(url).endsWith('/live/status'))).toBe(true);
+  });
+
+  it('restores both the previous device and angle when cancelling a rotated replacement', async () => {
+    const preference: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', rotation: 90 };
+    const f = await fixture(null, state(), false, false, { initialPreference: preference });
+    await act(async () => { await f.live.startCamera(); }); await flushReact();
+    await act(async () => f.update({ request: request() })); await flushReact();
+    await f.select('camera-b'); await f.rotate('270');
+    const replacement = f.transforms[2];
+    expect(f.live.selectedCameraId).toBe('camera-b');
+    await f.click('取消');
+    expect(f.gate.request).toBeNull(); expect(f.live.selectedCameraId).toBe('camera-a');
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams[3].stream, 90, expect.any(AbortSignal));
+    expect(f.live.cameraStream).toBe(f.transforms[3].stream);
+    expect(replacement.dispose).toHaveBeenCalledOnce(); expect(f.streams[2].track.stop).toHaveBeenCalledOnce();
+    expect(f.storage.setItem).not.toHaveBeenCalled(); expect(readCameraPreference()).toEqual(preference);
+    expect(f.report).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'closed', activeDeviceId: 'camera-a' }));
+  });
+
+  it('returns a saved quarter-turn to direct capture and persists default direction without retaining rotation', async () => {
+    const f = await fixture(request(), state(), false, false,
+      { initialPreference: { deviceId: 'camera-a', label: 'USB 1', profile: 'screen', rotation: 90 } });
+    await f.click('预览'); expect(mocks.orient).toHaveBeenCalledOnce();
+    await f.rotate('0');
+    expect(f.live.cameraStream).toBe(f.streams[1].stream); expect(f.live.rawCameraStream).toBe(f.streams[1].stream);
+    expect(f.transforms[0].dispose).toHaveBeenCalledOnce(); expect(mocks.orient).toHaveBeenCalledOnce();
+    expect(f.getUserMedia).toHaveBeenLastCalledWith({ audio: false, video: { deviceId: { exact: 'camera-a' },
+      width: { ideal: 1080 }, height: { ideal: 1920 }, frameRate: { ideal: 30, max: 30 } } });
+    await f.click('保存');
+    expect(readCameraPreference()).toEqual({ deviceId: 'camera-a', label: 'USB 1', profile: 'screen' });
+    await act(async () => f.live.stopCamera()); await flushReact();
+    await act(async () => { await f.live.startCamera(); }); await flushReact();
+    expect(f.live.cameraStream).toBe(f.streams[2].stream); expect(mocks.orient).toHaveBeenCalledOnce();
+  });
+
+  it('releases a failed rotation, keeps the existing preference, and retries the chosen direction before saving', async () => {
+    const original: ExhibitionCameraPreference = { deviceId: 'camera-a', label: 'USB 1', profile: 'screen' };
+    const f = await fixture(request(), state(), false, false, { initialPreference: original });
+    mocks.orient.mockRejectedValueOnce(new Error('旋转取景失败'));
+    await f.rotate('180');
+    expect(f.live.cameraStream).toBeNull(); expect(f.live.cameraError).not.toBe('');
+    expect(f.streams[0].track.stop).toHaveBeenCalledOnce(); expect(f.button('保存')?.getReactProps().disabled).toBe(true);
+    await f.click('保存'); expect(f.storage.setItem).not.toHaveBeenCalled(); expect(readCameraPreference()).toEqual(original);
+    await f.click('预览');
+    expect(mocks.orient).toHaveBeenLastCalledWith(f.streams[1].stream, 180, expect.any(AbortSignal));
+    expect(f.live.cameraError).toBe(''); expect(f.button('保存')?.getReactProps().disabled).toBe(false);
+    await f.click('保存'); expect(readCameraPreference()?.rotation).toBe(180);
+    expect(f.transforms[0].dispose).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'expiry'] as const)('disposes a rotation finishing after %s without saving or retaining either stream', async action => {
+    vi.useFakeTimers(); const f = await fixture();
+    let resolve!: (value: ReturnType<typeof makeTransform>) => void;
+    mocks.orient.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await f.rotate('90');
+    const signal = mocks.orient.mock.calls[0][2] as AbortSignal;
+    expect(f.live.opening).toBe(true); expect(f.direction().getReactProps().disabled).toBe(true);
+    expect(f.button('保存')?.getReactProps().disabled).toBe(true);
+    if (action === 'cancel') await f.click('取消');
+    else { await act(async () => { await vi.advanceTimersByTimeAsync(120001); }); await flushReact(); }
+    expect(f.gate.request).toBeNull(); expect(signal.aborted).toBe(true);
+    expect(f.streams[0].track.stop).toHaveBeenCalledOnce();
+    const reports = f.report.mock.calls.length;
+    const late = makeTransform(); await act(async () => resolve(late)); await flushReact();
+    expect(late.dispose).toHaveBeenCalledOnce(); expect(late.track.stop).toHaveBeenCalledOnce();
+    expect(f.streams[0].track.stop).toHaveBeenCalledOnce();
+    expect(f.live.cameraStream).toBeNull(); expect(f.live.rawCameraStream).toBeNull();
+    expect(f.storage.setItem).not.toHaveBeenCalled(); expect(f.report).toHaveBeenCalledTimes(reports);
+    expect(mocks.api.mock.calls.every(([url]) => String(url).endsWith('/live/status'))).toBe(true);
+  });
+
   it('keeps a saved replacement camera visible on the empty browser-test screen without allocating a session', async () => {
     const initial: ExhibitionState = { ...state(), providerMode: 'xmax', selectedLookId: null,
       publication: { revision: 1, publishedAt: 1, legacy: false, looks: [] },

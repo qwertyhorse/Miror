@@ -1,6 +1,7 @@
 import base64
 import importlib.util
 import io
+import json
 import pathlib
 import sys
 import unittest
@@ -19,6 +20,191 @@ def encode(width=64, height=48, format="JPEG"):
     with Image.new("RGB", (width, height), "white") as image:
         image.save(output, format=format)
     return base64.b64encode(output.getvalue()).decode()
+
+
+def frame(width=4, height=2, rotation=0, mirrored=False, **changes):
+    value = {"format": "i420-v1", "width": width, "height": height,
+             "rotation": rotation, "mirrored": mirrored,
+             "byteLength": width * height + 2 * ((width + 1) // 2) * ((height + 1) // 2)}
+    return dict(value, **changes)
+
+
+def colored_i420(width, height):
+    y_size = width * height
+    chroma_size = ((width + 1) // 2) * ((height + 1) // 2)
+    return bytes((index * 29) % 256 for index in range(y_size)) + \
+        bytes((index * 51 + 23) % 256 for index in range(chroma_size)) + \
+        bytes((index * 83 + 192) % 256 for index in range(chroma_size))
+
+
+def reference_rgb(data, width, height):
+    """Independent scalar color conversion before display transforms, for small fixtures."""
+    chroma_width = (width + 1) // 2
+    chroma_size = chroma_width * ((height + 1) // 2)
+    result = worker.np.zeros((height, width, 3), dtype=worker.np.uint8)
+    for row in range(height):
+        for column in range(width):
+            yy = max(0, data[row * width + column] - 16)
+            offset = row // 2 * chroma_width + column // 2
+            uu = data[width * height + offset] - 128
+            vv = data[width * height + chroma_size + offset] - 128
+            result[row, column] = [min(255, max(0, channel >> 8)) for channel in
+                                   (298 * yy + 409 * vv + 128,
+                                    298 * yy - 100 * uu - 208 * vv + 128,
+                                    298 * yy + 516 * uu + 128)]
+    return result
+
+
+class I420BoundaryTests(unittest.TestCase):
+    def test_color_rotation_and_unmirror_match_display_coordinates(self):
+        for width, height in [(4, 2), (5, 3), (1, 1), (1, 5)]:
+            data = colored_i420(width, height)
+            original = reference_rgb(data, width, height)
+            for rotation in (0, 90, 180, 270):
+                for mirrored in (False, True):
+                    with self.subTest(width=width, height=height, rotation=rotation, mirrored=mirrored):
+                        expected = worker.np.rot90(original, -(rotation // 90))
+                        if mirrored:
+                            expected = worker.np.fliplr(expected)
+                        actual = worker.i420_pixels(data, frame(width, height, rotation, mirrored))
+                        worker.np.testing.assert_array_equal(actual, expected)
+                        self.assertTrue(actual.flags.c_contiguous)
+                        self.assertEqual(actual.dtype, worker.np.uint8)
+
+    def test_resize_samples_rotated_grid_before_horizontal_unmirror(self):
+        width, height = 1440, 9
+        data = colored_i420(width, height)
+        original = reference_rgb(data, width, height)
+        for edge in (480, 720, 960):
+            for rotation in (0, 90, 180, 270):
+                for mirrored in (False, True):
+                    with self.subTest(edge=edge, rotation=rotation, mirrored=mirrored):
+                        displayed = worker.np.rot90(original, -(rotation // 90))
+                        # At 720 this short edge is 4.5, which must round to 5.
+                        short_edge = {480: 3, 720: 5, 960: 6}[edge]
+                        out_width, out_height = (short_edge, edge) if rotation in (90, 270) else (edge, short_edge)
+                        rows = worker.np.arange(out_height) * displayed.shape[0] // out_height
+                        columns = worker.np.arange(out_width) * displayed.shape[1] // out_width
+                        expected = displayed[rows[:, None], columns[None, :]]
+                        if mirrored:
+                            expected = worker.np.fliplr(expected)
+                        worker.np.testing.assert_array_equal(
+                            worker.i420_pixels(data, frame(width, height, rotation, mirrored), edge), expected)
+
+    def test_default_is_720_and_no_rgb_allocation_at_camera_resolution(self):
+        descriptor = frame(3840, 2160)
+        data = bytes(descriptor["byteLength"])
+        with patch.object(worker.np, "empty", wraps=worker.np.empty) as allocate:
+            pixels = worker.i420_pixels(data, descriptor)
+        self.assertEqual(pixels.shape, (405, 720, 3))
+        allocate.assert_called_once_with((405, 720, 3), dtype=worker.np.uint8)
+
+    def test_dimension_and_pixel_boundaries(self):
+        for width, height in [(1, 1), (4096, 1), (1, 4096), (3840, 2160), (2160, 3840)]:
+            self.assertEqual(worker.i420_layout(frame(width, height))[:2], (width, height))
+        for changes in [{"width": value} for value in (0, -1, True, 1.5, "4", None, 4097)] + \
+                [{"height": value} for value in (0, -1, True, 1.5, "2", None, 4097)] + \
+                [{"width": 4096, "height": 2160}, {"width": 3840, "height": 2161}]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                worker.i420_layout(dict(frame(), **changes))
+
+    def test_rejects_format_length_and_orientation_without_reading_payload(self):
+        changes = [{"format": value} for value in (None, "i420", "jpeg")] + \
+            [{"byteLength": value} for value in (0, -1, True, 12.0, "12", 11, 13, worker.MAX_RAW_BYTES + 1)] + \
+            [{"rotation": value} for value in (None, True, 90.0, "90", -90, 360, 45)] + \
+            [{"mirrored": value} for value in (None, 0, 1, "false")]
+        for change in changes:
+            with self.subTest(change=change):
+                source = Mock()
+                with self.assertRaises(ValueError):
+                    worker.read_i420(source, dict(frame(), **change))
+                source.readinto.assert_not_called()
+        for missing in ("format", "width", "height", "rotation", "mirrored", "byteLength"):
+            value = frame()
+            del value[missing]
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                worker.i420_layout(value)
+
+    def test_data_must_match_exact_length(self):
+        data = colored_i420(4, 2)
+        for value in (data[:-1], data + b"\n", None, [0] * len(data)):
+            with self.assertRaises(ValueError):
+                worker.i420_pixels(value, frame())
+
+    def test_bounded_reads_handle_partial_chunks_and_preserve_next_header(self):
+        descriptor = frame(720, 480)
+        data = bytes(descriptor["byteLength"])
+        following = b'{"id":2}\n'
+
+        class PartialStream(io.BytesIO):
+            def readinto(self, target):
+                self.max_read = max(getattr(self, "max_read", 0), len(target))
+                return super().readinto(target[:1027])
+
+        source = PartialStream(data + following)
+        self.assertEqual(worker.read_i420(source, descriptor), data)
+        self.assertLessEqual(source.max_read, worker.RAW_READ_CHUNK)
+        self.assertEqual(source.read(), following)
+        with self.assertRaises(ValueError):
+            worker.read_i420(io.BytesIO(data[:-1]), descriptor)
+
+    def test_input_size_is_independent_of_model_settings(self):
+        self.assertEqual(worker.input_long_edge_from({}), 720)
+        for edge in (480, 720, 960):
+            self.assertEqual(worker.input_long_edge_from({"inputLongEdge": edge}), edge)
+            self.assertEqual(worker.settings_from({"inputLongEdge": edge}), (0.5, 0.5, 0.5))
+        for edge in (None, True, 720.0, "720", 0, 640, 961):
+            with self.assertRaises(ValueError):
+                worker.settings_from({"inputLongEdge": edge})
+
+
+class WorkerFramingTests(unittest.TestCase):
+    def run_worker(self, payload):
+        detector = Mock()
+        detector.infer.return_value = {"hands": [], "poses": []}
+        output = io.StringIO()
+        with patch.object(worker, "Detector", return_value=detector), \
+                patch.object(worker.sys, "argv", ["gesture-worker.py", "--model", "hand.task", "--pose-model", "pose.task"]), \
+                patch.object(worker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload))), \
+                patch.object(worker.sys, "stdout", output):
+            status = worker.main()
+        detector.close.assert_called_once()
+        return status, [json.loads(line) for line in output.getvalue().splitlines()], detector
+
+    def line(self, number, **fields):
+        return (json.dumps(dict({"id": number, "type": "infer", "timestamp": number}, **fields)) + "\n").encode()
+
+    def test_multiple_raw_frames_without_separator_and_legacy_jpegs(self):
+        first = bytes([10, 20, 30, 40, 50, 60, 70, 80, 128, 128, 128, 128])
+        second = colored_i420(3, 5)
+        payload = self.line(1, jpeg=encode(32, 48)) + self.line(2, frame=frame()) + first + \
+            self.line(3, frame=frame(3, 5, 90, True), settings={"inputLongEdge": 480}) + second + \
+            self.line(4, jpeg=encode(48, 32))
+        status, output, detector = self.run_worker(payload)
+        self.assertEqual(status, 0)
+        self.assertEqual([item["type"] for item in output], ["ready"] + ["result"] * 4)
+        self.assertEqual([item["id"] for item in output[1:]], [1, 2, 3, 4])
+        calls = detector.infer.call_args_list
+        self.assertEqual([call.args[0].shape for call in calls], [(48, 32, 3), (2, 4, 3), (3, 5, 3), (32, 48, 3)])
+        worker.np.testing.assert_array_equal(calls[1].args[0], worker.i420_pixels(first, frame()))
+        worker.np.testing.assert_array_equal(calls[2].args[0], worker.i420_pixels(second, frame(3, 5, 90, True), 480))
+
+    def test_bad_raw_framing_stops_with_sanitized_error(self):
+        secret = b"PRIVATE_FRAME_CONTENT"
+        for descriptor, data in [(frame(byteLength=worker.MAX_RAW_BYTES + 1), secret), (frame(), b"short")]:
+            with self.subTest(descriptor=descriptor):
+                status, output, detector = self.run_worker(self.line(1, frame=descriptor) + data)
+                self.assertEqual(status, 2)
+                self.assertEqual(output, [{"type": "ready"}, {"type": "error", "id": 1, "code": "INVALID_IMAGE"}])
+                detector.infer.assert_not_called()
+
+    def test_bad_jpeg_can_recover_before_raw_frame(self):
+        data = colored_i420(4, 2)
+        status, output, detector = self.run_worker(
+            self.line(1, jpeg="invalid") + self.line(2, frame=frame()) + data)
+        self.assertEqual(status, 0)
+        self.assertEqual([item["type"] for item in output], ["ready", "error", "result"])
+        detector.infer.assert_called_once()
 
 
 class JpegBoundaryTests(unittest.TestCase):

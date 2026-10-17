@@ -10,7 +10,7 @@ android {
     defaultConfig {
         minSdk 26
         consumerProguardFiles 'consumer-rules.pro'
-        buildConfigField 'String', 'XMAX_SDK_VERSION', '"1.0.8"'
+        buildConfigField 'String', 'XMAX_SDK_VERSION', '"1.0.9"'
     }
 
     buildFeatures {
@@ -23,15 +23,16 @@ android {
     }
 }
 
-// Match the official 1.0.8 publication. JNI binaries come from its verified AAR.
+// Match the official 1.0.9 publication. JNI binaries come from its verified AAR.
 dependencies {
     api platform('androidx.compose:compose-bom:2026.08.00')
     api 'androidx.compose.ui:ui'
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'androidx.exifinterface:exifinterface:1.4.2'
-    implementation 'com.volcengine:VolcEngineRTC:3.60.106.400'
+    implementation 'io.agora.rtc:full-rtc-basic:4.6.4'
     implementation 'com.qcloud.cos:cos-android-lite-nobeacon:5.9.52'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
     testImplementation 'junit:junit:4.13.2'
-    testImplementation 'org.json:json:20240303'
+    testImplementation 'org.json:json:20260814'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0'
 }

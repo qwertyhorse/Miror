@@ -7,6 +7,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbManager
+import android.os.Build
+import android.util.Size
 
 /** Read-only enumeration. This never opens a camera or requests access to a USB device. */
 internal class NativeCameraCatalog(context: Context) {
@@ -34,16 +36,32 @@ internal class NativeCameraCatalog(context: Context) {
                     else -> NativeCameraFacing.UNKNOWN
                 }
                 // SurfaceTexture sizes describe the normal preview/video output used by the RTC SDK.
-                val sizes = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                    ?.getOutputSizes(SurfaceTexture::class.java)?.map { NativeCameraSize(it.width, it.height) }
+                val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val sizes = streamMap?.getOutputSizes(SurfaceTexture::class.java)?.map { NativeCameraSize(it.width, it.height) }
                     .orEmpty().filter { it.width > 0 && it.height > 0 }.distinct()
                     .sortedWith(compareByDescending<NativeCameraSize> { it.width.toLong() * it.height }.thenByDescending { it.width })
+                // Optional metadata can be absent (zero) or broken on a vendor driver. Keep the
+                // camera available and leave that size at the compatible rate when lookup fails.
+                val minimumFrameDurations = sizes.mapNotNull { size ->
+                    runCatching { streamMap?.getOutputMinFrameDuration(SurfaceTexture::class.java, Size(size.width, size.height)) }
+                        .getOrNull()?.takeIf { it > 0 }?.let { size to it }
+                }.toMap()
                 // AE ranges are camera-wide capabilities, not a promise that every size supports every rate.
                 val fps = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                     ?.map { NativeCameraFpsRange(it.lower, it.upper) }
                     .orEmpty().filter { it.min > 0 && it.max >= it.min }.distinct()
                     .sortedWith(compareBy<NativeCameraFpsRange> { it.max }.thenBy { it.min })
-                NativeCameraDevice(id, facing, sizes = sizes, fpsRanges = fps)
+                val pixelArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                    ?.let { NativeCameraSize(it.width, it.height) }
+                val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                    ?.let { NativeCameraSize(it.width(), it.height()) }
+                val unavailable = NativeCameraCompatibility.unavailableSizes(
+                    NativeCameraFirmware(Build.MANUFACTURER, Build.MODEL, Build.DEVICE, Build.HARDWARE,
+                        Build.BOARD, Build.VERSION.SDK_INT, Build.VERSION.RELEASE, Build.FINGERPRINT),
+                    id, pixelArray, activeArray, sizes,
+                )
+                NativeCameraDevice(id, facing, sizes = sizes, fpsRanges = fps, unavailableSizes = unavailable,
+                    minimumFrameDurationsNs = minimumFrameDurations)
             } catch (_: SecurityException) {
                 denied = true
                 null

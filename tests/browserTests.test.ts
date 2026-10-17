@@ -187,13 +187,12 @@ describe('independent complete browser tests', () => {
     expect(f.store.mirrorEvents(created.mirror.id).length).toBeGreaterThan(0);
   });
 
-  it('expires after one fixed hour despite reads and stops only its own active session', async () => {
+  it('does not revive an expired context and stops only its own active session', async () => {
     const f = fixture(); const created = f.manager.create(f.source); const context = f.manager.resolve(created.mirror.id, created.token); const session = await start(context);
     await f.source.prepareReference(f.source.read().selectedLookId ?? 'commute'); f.source.command({ action: 'configure', providerMode: 'xmax' }); const state = f.source.command({ action: 'begin' });
     const physical = await f.source.createLiveSession({ deviceId: 'physical', lookId: state.selectedLookId, generationNumber: state.generationNumber });
     const before = f.source.read();
-    f.advance(BROWSER_TEST_TTL_MS - 1); expect(f.manager.resolve(created.mirror.id, created.token).expiresAt).toBe(created.expiresAt);
-    f.advance(1); expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_EXPIRED'));
+    f.advance(BROWSER_TEST_TTL_MS); expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_EXPIRED'));
     await f.manager.sweep();
     expect(f.store.get(session.id).status).toBe('stopped'); expect(f.store.get(physical.id).status).toBe('active'); expect(f.source.read()).toEqual(before);
   });
@@ -240,18 +239,30 @@ describe('independent complete browser tests', () => {
     expect(f.requests).toEqual([]); expect(f.store.list()).toEqual([]);
   });
 
-  it('keeps valid API polling alive without extending the fixed one-hour expiry', async () => {
+  it('renews valid API activity beyond multiple original deadlines, then collects sixty seconds of inactivity', async () => {
     const f = fixture(); const created = f.manager.create(f.source); const path = testPath(f, created.mirror.id)!;
-    while (f.now() + BROWSER_TEST_IDLE_MS - 1 < created.expiresAt) {
+    const end = f.now() + BROWSER_TEST_TTL_MS * 2 + BROWSER_TEST_IDLE_MS;
+    while (f.now() < end) {
       f.advance(BROWSER_TEST_IDLE_MS - 1);
-      expect(f.manager.resolve(created.mirror.id, created.token).expiresAt).toBe(created.expiresAt);
+      expect(f.manager.resolve(created.mirror.id, created.token).expiresAt).toBe(f.now() + BROWSER_TEST_TTL_MS);
       await f.manager.sweep(); expect(existsSync(path)).toBe(true);
     }
-    f.advance(created.expiresAt - f.now() - 1);
-    expect(f.manager.resolve(created.mirror.id, created.token).expiresAt).toBe(created.expiresAt);
+    expect(f.manager.resolve(created.mirror.id, created.token).expiresAt).toBeGreaterThan(created.expiresAt + BROWSER_TEST_TTL_MS * 2);
+    f.advance(BROWSER_TEST_IDLE_MS - 1);
     await f.manager.sweep(); expect(existsSync(path)).toBe(true);
     f.advance(1); await f.manager.sweep(); expect(existsSync(path)).toBe(false);
     expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_EXPIRED'));
+    await f.manager.close(created.mirror.id, created.token);
+    expect(f.requests).toEqual([]); expect(f.store.list()).toEqual([]);
+  });
+
+  it('rejects late activity at the idle deadline even before the watchdog runs', async () => {
+    const f = fixture(); const created = f.manager.create(f.source); const path = testPath(f, created.mirror.id)!;
+    f.advance(BROWSER_TEST_IDLE_MS);
+    expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_EXPIRED'));
+    await f.manager.sweep(); expect(existsSync(path)).toBe(false);
+    expect(() => f.manager.resolve(created.mirror.id, created.token)).toThrow(code('BROWSER_TEST_EXPIRED'));
+    expect(f.requests).toEqual([]);
   });
 
   it('does not let unauthorized API requests keep an abandoned preview alive', async () => {

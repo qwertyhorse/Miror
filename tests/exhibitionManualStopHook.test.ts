@@ -5,10 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExhibitionLive, type ExhibitionLiveController } from '../src/exhibition/useExhibitionLive';
 import type { ExhibitionState } from '../shared/exhibition';
 import { createReactHost, flushReact } from './support/reactHost';
+import { xmaxSessionFixture } from './support/xmaxSessionFixture';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), createXmaxClient: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
-vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: mocks.createXmaxClient, models: { realtime: (name: string) => name } }));
+vi.mock('../src/exhibition/xmaxWebSdk', () => ({ createExhibitionSdk: () => ({ createXmaxClient: mocks.createXmaxClient, models: { realtime: (name: string) => name } }) }));
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => { await host?.close(); host = undefined; await flushReact(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 function deferred<T>() { let resolve!: (value: T) => void; return { promise: new Promise<T>(done => { resolve = done; }), resolve }; }
@@ -33,7 +34,7 @@ async function fixture() {
   const connect = vi.fn(async (_source: unknown, options: any) => {
     const id = callbacks.length + 1; callbacks.push(options);
     const sdk = { getSessionUid: () => `ums-hook-stop-${id}`, disconnect: vi.fn(async () => {}), set: vi.fn(async () => {}) };
-    sdks.push(sdk); return sdk;
+    sdks.push(sdk); return xmaxSessionFixture(sdk, options);
   });
   mocks.createXmaxClient.mockReturnValue({ realtime: { connect } });
   const sessions = new Map<string, any>();

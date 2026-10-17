@@ -8,10 +8,15 @@ import type { MirrorRegistry } from '../src/exhibition/useMirrors';
 import { createReactHost } from './support/reactHost';
 
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
-afterEach(async () => { await host?.close(); host = undefined; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+const popups: { closed: boolean }[] = [];
+afterEach(async () => { await host?.close(); host = undefined; popups.splice(0).forEach(popup => { popup.closed = true; }); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 async function fixture(phase: ExhibitionState['phase'], pageHref?: string) {
   host = await createReactHost();
+  const popup = { closed: false, focus: vi.fn() };
+  popups.push(popup);
+  const open = vi.fn<Window['open']>(() => popup as unknown as Window);
+  Object.assign(window, { open });
   if (pageHref) {
     const page = new URL(pageHref);
     Object.assign(window.location, { protocol: page.protocol, href: page.href });
@@ -35,15 +40,68 @@ async function fixture(phase: ExhibitionState['phase'], pageHref?: string) {
   const registry = { data: { defaultMirrorId: 'default', mirrors: [mirror] }, error: '', refresh: vi.fn(async () => {}) } as unknown as MirrorRegistry;
   const render = () => host!.render(createElement(MirrorConsole, { controller, mirror, registry, live: { liveStatus: null } as ExhibitionLiveController, selectMirror: vi.fn(), preview: null }));
   await render();
-  return { state, send, stopExperience, render, button: (label: string) => host!.find(node => node.nodeName === 'button' && node.textContent === label)!.getReactProps() };
+  return { state, send, stopExperience, render, open, popup, button: (label: string) => host!.find(node => node.nodeName === 'button' && node.textContent === label)!.getReactProps() };
 }
 
 describe('console material navigation commands', () => {
-  it('opens the selected mirror directly on the camera-capable origin', async () => {
-    await fixture('idle');
-    const link = host!.find(node => node.nodeName === 'a' && node.textContent === '打开大屏');
-    const target = new URL(link!.getReactProps().href);
+  it('opens wireless sharing securely and focuses the existing page on repeat clicks', async () => {
+    const f = await fixture('idle');
+    await act(async () => f.button('无线投屏').onClick());
+    const url = new URL(String(f.open.mock.calls[0][0]));
+    expect(url.origin).toBe('https://xuminghong.local:10202');
+    expect(url.searchParams.get('presentation')).toBe('wireless');
+    expect(url.searchParams.get('mirror')).toBe('default');
+    expect(url.searchParams.get('output')).not.toBe('browser');
+    await act(async () => f.button('无线投屏').onClick());
+    expect(f.open).toHaveBeenCalledOnce(); expect(f.send).not.toHaveBeenCalled();
+  });
+  it('provides a direct wireless link after a popup block', async () => {
+    const f = await fixture('idle'); f.open.mockReturnValueOnce(null);
+    await act(async () => f.button('无线投屏').onClick());
+    const link = host!.find(node => node.nodeName === 'a' && node.textContent === '打开无线投屏');
+    expect(new URL(link!.getReactProps().href).searchParams.get('presentation')).toBe('wireless');
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it('opens HDMI synchronously on the camera-capable origin and retains Android and ordinary browser links', async () => {
+    const f = await fixture('idle');
+    await act(async () => {
+      f.button('HDMI 大屏').onClick();
+      expect(f.open).toHaveBeenCalledOnce();
+    });
+    const target = new URL(String(f.open.mock.calls[0][0]));
     expect(target.origin).toBe('https://xuminghong.local:10202'); expect(target.searchParams.get('mirror')).toBe('default');
+    expect(target.pathname).toMatch(/\/exhibition\/computer$/); expect(target.searchParams.get('output')).toBe('browser');
+    expect(target.searchParams.get('presentation')).toBe('hdmi');
+    const android = host!.find(node => node.nodeName === 'a' && node.textContent === '安卓联动');
+    expect(new URL(android!.getReactProps().href).searchParams.get('output')).not.toBe('browser');
+    const browser = host!.find(node => node.nodeName === 'a' && node.getReactProps().href?.includes('output=browser'));
+    expect(new URL(browser!.getReactProps().href).searchParams.has('presentation')).toBe(false);
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it('focuses the same HDMI window after the console remounts without navigating or starting', async () => {
+    const f = await fixture('idle');
+    await act(async () => f.button('HDMI 大屏').onClick());
+    f.popup.focus.mockClear();
+    await host!.render(null);
+    await f.render();
+    await act(async () => f.button('HDMI 大屏').onClick());
+    expect(f.open).toHaveBeenCalledOnce();
+    expect(f.popup.focus).toHaveBeenCalledOnce();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it('provides a native HTTPS link when the popup is blocked and clears the notice after retry', async () => {
+    const f = await fixture('idle');
+    f.open.mockReturnValueOnce(null);
+    await act(async () => f.button('HDMI 大屏').onClick());
+    expect(host!.find(node => node.getReactProps().role === 'alert')?.textContent).toContain('弹窗被拦截');
+    const fallback = host!.find(node => node.nodeName === 'a' && node.textContent === '打开 HDMI 大屏')!.getReactProps();
+    expect(new URL(fallback.href).origin).toBe('https://xuminghong.local:10202');
+    expect(new URL(fallback.href).searchParams.get('presentation')).toBe('hdmi');
+    expect(fallback.target).toBe('_blank');
+    expect(fallback.onClick).toBeUndefined();
+    await act(async () => f.button('HDMI 大屏').onClick());
+    expect(host!.find(node => node.getReactProps().role === 'alert')).toBeUndefined();
+    expect(f.send).not.toHaveBeenCalled();
   });
   it.each(['http://xuminghong.local:10200', 'http://xuminghong.local:10201', 'http://xuminghong.local:10601', 'http://192.168.1.2:10601'])('keeps the staff link on the current HTTP origin %s', async origin => {
     await fixture('idle', `${origin}/v1.1/exhibition/control?mirror=default`);

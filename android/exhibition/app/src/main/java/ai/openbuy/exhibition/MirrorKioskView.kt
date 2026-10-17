@@ -35,6 +35,8 @@ internal class MirrorKioskView(context: Context) : FrameLayout(context) {
     val stage = FrameLayout(context).apply { clipToOutline = true }
     val video = XmaxRealtimeVideoView(context).apply {
         videoContentMode = VideoContentMode.FILL; isInteractionEnabled = false
+        maximumRenderPixels = 1920 * 1080
+        useSurfaceViewForLocalCamera = true
     }
     val poster = ImageView(context).apply {
         scaleType = ImageView.ScaleType.FIT_CENTER

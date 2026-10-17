@@ -7,10 +7,11 @@ import { useExhibitionLive, type ExhibitionLiveController } from '../src/exhibit
 import { Kiosk } from '../src/exhibition/ExhibitionApp';
 import { exhibitionPromptForLook, type ExhibitionState } from '../shared/exhibition';
 import { createReactHost, flushReact } from './support/reactHost';
+import { xmaxSessionFixture } from './support/xmaxSessionFixture';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), createXmaxClient: vi.fn() }));
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
-vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: mocks.createXmaxClient, models: { realtime: (name: string) => name } }));
+vi.mock('../src/exhibition/xmaxWebSdk', () => ({ createExhibitionSdk: () => ({ createXmaxClient: mocks.createXmaxClient, models: { realtime: (name: string) => name } }) }));
 vi.mock('../src/exhibition/OutfitCarousel', () => ({ OutfitCarousel: () => null }));
 vi.mock('../src/exhibition/MoXDragSurface', () => ({ MoXDragSurface: () => null }));
 vi.mock('../src/exhibition/LiveCameraPanel', () => ({ StreamVideo: () => null, LiveCameraPanel: () => null }));
@@ -39,7 +40,7 @@ async function fixture(initial = state(), renderKiosk = false, initialSelectionP
   const callbacks: any[] = [];
   const sdk = { getSessionUid: () => 'provider', disconnect: vi.fn(async () => {}), set: vi.fn(async () => {}),
     media: { streamSetting: { width: 512, height: 768 } }, beginDrag: vi.fn(), endDrag: vi.fn(), sendTracks: vi.fn(async () => {}) };
-  const connect = vi.fn(async (_source: unknown, options: any) => { callbacks.push(options); return sdk; });
+  const connect = vi.fn(async (_source: unknown, options: any) => { callbacks.push(options); return xmaxSessionFixture(sdk, options); });
   const upload = vi.fn(async (_file: File) => ({ url: 'https://mock.test/ref.png' }));
   mocks.createXmaxClient.mockReturnValue({ files: { uploadAndCheckImage: upload }, realtime: { connectMedia: connect, connect } });
   let session: any;

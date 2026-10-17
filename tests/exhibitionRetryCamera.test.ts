@@ -6,18 +6,19 @@ import { useExhibitionLive, type ExhibitionLiveController } from '../src/exhibit
 import type { CreatedSession } from '../src/api';
 import type { ExhibitionState } from '../shared/exhibition';
 import { createReactHost, flushReact } from './support/reactHost';
+import type { RealtimeConnectOptions } from '../src/exhibition/xmaxSdkContract';
+import { xmaxSessionFixture } from './support/xmaxSessionFixture';
 
 const mocks = vi.hoisted(() => {
   const sdk = { getSessionUid: vi.fn(() => 'provider-retry-fixture'), set: vi.fn(async () => {}), disconnect: vi.fn(async () => {}) };
-  const connect = vi.fn(async () => sdk);
+  const connect = vi.fn(async (_source: unknown, options: Pick<RealtimeConnectOptions, 'onStateChange'>) => xmaxSessionFixture(sdk, options));
   const uploadAndCheckImage = vi.fn(async () => ({ url: 'https://reference.fixture/garment.png' }));
   return { api: vi.fn(), sdk, connect, uploadAndCheckImage,
     createXmaxClient: vi.fn(() => ({ files: { uploadAndCheckImage }, realtime: { connect, connectMedia: connect } })),
     models: { realtime: vi.fn((name: string) => ({ name })) } };
 });
 vi.mock('../src/api', () => ({ api: mocks.api, backend: {} }));
-vi.mock('@xmaxai/sdk', () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }));
-vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }));
+vi.mock('../src/exhibition/xmaxWebSdk', () => ({ createExhibitionSdk: () => ({ createXmaxClient: mocks.createXmaxClient, models: mocks.models }) }));
 
 let host: Awaited<ReturnType<typeof createReactHost>> | undefined;
 afterEach(async () => {

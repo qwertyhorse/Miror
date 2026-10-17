@@ -27,14 +27,13 @@
   },
   "dependencies": {
     "@decartai/sdk": "0.2.11",
-    "@xmaxai/sdk": "1.1.13",
-    "@xmaxai/sdk-global": "^1.1.13",
     "lucide-react": "^1.49.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "selfsigned": "5.5.0",
     "sharp": "^0.35.5",
-    "tsx": "^4.23.15"
+    "tsx": "^4.23.15",
+    "@xmaxai/web-sdk": "1.0.10"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

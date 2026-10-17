@@ -17,6 +17,10 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const finish of cleanup.splice(0)) await finish(); });
 const origin = 'https://xuxin.local:10202';
 const jpeg = Buffer.from([0xff, 0xd8, 0x01, 0xff, 0xd9]);
+const rawHeaders = { 'Content-Type': 'application/x-openbuy-i420',
+  'X-OpenBuy-Gesture-Width': '3', 'X-OpenBuy-Gesture-Height': '3',
+  'X-OpenBuy-Gesture-Rotation': '90', 'X-OpenBuy-Gesture-Mirrored': 'true' };
+const rawPixels = Buffer.alloc(17, 128);
 const palm = [[0, 0], [-.04, -.05], [-.09, -.09], [-.12, -.14], [-.16, -.17],
   [-.06, -.17], [-.065, -.29], [-.07, -.37], [-.075, -.44],
   [0, -.19], [0, -.32], [0, -.41], [0, -.49],
@@ -33,7 +37,7 @@ function deferred<T>() {
 class FakeInference implements GestureInference {
   hands: GestureInferenceResult['hands'] = [];
   pending: Promise<GestureInferenceResult> | null = null;
-  infer = vi.fn(async () => {
+  infer = vi.fn<GestureInference['infer']>(async () => {
     const pending = this.pending; this.pending = null;
     return pending ? await pending : result(this.hands);
   });
@@ -74,7 +78,7 @@ async function fixture(factory?: () => Promise<GestureInference>) {
     const response = await json(path(bound.mirrorId), bound.credentials);
     expect(response.status).toBe(200);
     const state = await response.json() as RemoteGestureSnapshot;
-    expect(state).toMatchObject({ epoch: 0, blocked: true, needsRelease: true, event: null });
+    expect(state).toMatchObject({ epoch: 0, blocked: true, needsRelease: true, event: null, frameFormat: 'i420-v1' });
     let epoch = 1, seq = 0;
     const control = await json(path(bound.mirrorId, 'control'), { ...bound.credentials, sessionId: state.sessionId, epoch, blocked: false });
     expect(control.status).toBe(200);
@@ -128,6 +132,52 @@ async function fixture(factory?: () => Promise<GestureInference>) {
 }
 
 describe('remote gesture authenticated HTTP boundary', () => {
+  it('accepts full-size uncompressed I420 with orientation metadata and retains JPEG compatibility', async () => {
+    const f = await fixture(); const a = await f.open(f.bind());
+    const pixels = Buffer.alloc(1920 * 1080 * 3 / 2, 128);
+    const response = await a.frame(0, { ...rawHeaders, 'X-OpenBuy-Gesture-Width': '1920', 'X-OpenBuy-Gesture-Height': '1080' }, pixels);
+    expect(response.status).toBe(200);
+    const call = f.workers[0].infer.mock.calls[0];
+    expect(call[0].equals(pixels)).toBe(true);
+    expect(call.slice(1)).toEqual([0, expect.objectContaining({ inputLongEdge: 720 }),
+      { format: 'i420-v1', width: 1920, height: 1080, rotation: 90, mirrored: true }]);
+    expect((await a.frame(100, rawHeaders, rawPixels)).status).toBe(200);
+    expect((await a.frame(200)).status).toBe(200);
+    expect(f.workers[0].infer).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects invalid raw dimensions, rotation, mirror flags and nonexact body lengths before inference', async () => {
+    const f = await fixture(); const a = await f.open(f.bind());
+    for (const [key, values] of Object.entries({ Width: ['0', '-1', '1.5', '4097', ''], Height: ['0', '4097'],
+      Rotation: ['-90', '45', '360', ''], Mirrored: ['', '1', 'False'] })) {
+      for (const value of values) expect((await a.frame(0, { ...rawHeaders, [`X-OpenBuy-Gesture-${key}`]: value }, rawPixels)).status).toBe(400);
+    }
+    expect((await a.frame(0, { ...rawHeaders, 'X-OpenBuy-Gesture-Width': '4096', 'X-OpenBuy-Gesture-Height': '4096' }, rawPixels)).status).toBe(400);
+    for (const length of [0, 16, 18]) expect((await a.frame(0, rawHeaders, Buffer.alloc(length))).status).toBe(400);
+    for (const length of [16, 18]) {
+      const streamed = f.raw(f.path('default', 'frame'), { ...a.headers(0, rawHeaders), 'Transfer-Encoding': 'chunked' });
+      streamed.request.end(Buffer.alloc(length));
+      expect((await streamed.response).status).toBe(400);
+    }
+    const oversized = f.raw(f.path('default', 'frame'), { ...a.headers(0, rawHeaders), 'Content-Length': String(16 * 1024 * 1024 + 1) });
+    oversized.request.end(rawPixels);
+    expect((await oversized.response).status).toBe(413);
+    expect(f.workers[0].infer).not.toHaveBeenCalled();
+    expect((await a.frame(0, rawHeaders, rawPixels)).status).toBe(200);
+  });
+
+  it('keeps raw uploads single-flight and discards raw inference crossing a control boundary', async () => {
+    const f = await fixture(); const a = await f.open(f.bind());
+    const pending = deferred<GestureInferenceResult>(); f.workers[0].pending = pending.promise;
+    const old = a.frame(0, rawHeaders, rawPixels);
+    await vi.waitFor(() => expect(f.workers[0].infer).toHaveBeenCalledOnce());
+    expect((await a.frame(100, rawHeaders, rawPixels)).status).toBe(429);
+    await a.control(true);
+    pending.resolve(result([hand]));
+    expect(await (await old).json()).toMatchObject({ code: 'GESTURE_STALE' });
+    expect((await a.frame(200, { ...rawHeaders, 'X-OpenBuy-Gesture-Blocked': 'true' }, rawPixels)).status).toBe(200);
+  });
+
   it('rejects unbound, missing, wrong and foreign-origin credentials before starting a model', async () => {
     const f = await fixture();
     for (const input of [{}, { terminalId: 'unknown', terminalToken: 'unknown' }]) {

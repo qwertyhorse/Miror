@@ -4,7 +4,7 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        // AGP's built-in Kotlin must read the official XMAX 1.0.8 metadata.
+        // AGP's built-in Kotlin must read the official XMAX 1.0.9 metadata.
         classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.21'
     }
 }

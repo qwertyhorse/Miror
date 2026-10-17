@@ -263,6 +263,8 @@ if (!response.ok) throw new Error(next.message);
 
 手掌允许自然五指并拢，默认连续可见约 300 ms 确认，持续展示只触发一次；收手后才能再次展掌。仅勾选挥手时静止展示手掌不触发。镜端复用摄像头，只重建需要更新模型阈值的识别 Worker，不会因此启动新的 XMAX 生成。
 
+Android 0.6.13 暂停安卓本机手势推理，原本机配置按关闭处理；电脑模式改为原始 I420 传输。`POST M/gestures/open` 返回 `frameFormat: "i420-v1"` 后，新镜端才开始上传。`POST M/gestures/frame` 使用 `application/x-openbuy-i420`，沿用终端身份和 session/epoch/seq/time/blocked 请求头，并提供 `X-OpenBuy-Gesture-Width`、`Height`、`Rotation`、`Mirrored`。正文依次为紧密 Y、U、V 平面，字节数严格等于 `width*height + 2*ceil(width/2)*ceil(height/2)`；单边不超过 4096、总像素不超过 3840×2160、请求体上限 16 MiB。旋转仅允许 0/90/180/270，镜像仅允许 `true`/`false`。安卓不缩放、不转 RGB、不做 JPEG 压缩，电脑按后台输入长边转换与缩放后识别；旧 JPEG 客户端继续兼容，新客户端不回退压缩。每设备最多一帧在途，服务未就绪或繁忙时在抽帧前跳过，迟到结果不执行，图像仅在内存中处理。
+
 默认上传限制：
 
 ```json

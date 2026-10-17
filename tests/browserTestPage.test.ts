@@ -177,9 +177,16 @@ describe('isolated browser test page', () => {
     expect(!!button('重试结束')).toBe(!alreadyClosed);
   });
 
-  it('expires a test and releases its local capture without touching the source mirror', async () => {
-    const f = await fixture(); f.fetcher.mockResolvedValueOnce(Response.json(session(Date.now() + 1000))); await f.render();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); await flushReact();
+  it('keeps the active capture beyond the initial expiry until the user explicitly ends the test', async () => {
+    const f = await fixture(); const disconnected = vi.fn();
+    function CaptureOwner({ controls }: { controls: ReactNode }) { useEffect(() => disconnected, []); return controls; }
+    f.renderMirror.mockImplementation((_value, controls) => createElement(CaptureOwner, { controls }));
+    f.fetcher.mockResolvedValueOnce(Response.json(session(Date.now() + 1000))); await f.render();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000); }); await flushReact();
+    expect(disconnected).not.toHaveBeenCalled(); expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(button('结束测试')).toBeDefined();
+    await click('结束测试');
+    expect(disconnected).toHaveBeenCalledOnce();
     expect(host!.find(node => node.nodeName === 'h1')?.textContent).toBe('测试已结束');
     expect(f.fetcher.mock.calls.map(([path]) => path)).toEqual([appUrl('/api/exhibition/mirrors/source/browser-tests'), appUrl(`/api/exhibition/mirrors/${testId}/browser-test/close`)]);
   });

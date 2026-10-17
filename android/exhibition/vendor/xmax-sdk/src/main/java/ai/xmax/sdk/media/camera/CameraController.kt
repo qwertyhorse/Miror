@@ -22,8 +22,12 @@ import ai.xmax.sdk.render.video.VideoRenderRegistry
 import ai.xmax.sdk.stream.StreamID
 import android.content.Context
 import androidx.compose.ui.unit.IntSize
+import kotlin.math.abs
+import kotlin.math.ln
 
-/** 协调相机权限、RTC 内部采集和本地预览资源。 */
+/**
+ * 协调相机权限、RTC 内部采集和本地预览资源。
+ */
 internal class CameraController(
     private val rtcManager: RtcManaging,
     private val permissionManager: PermissionManaging,
@@ -91,7 +95,14 @@ internal class CameraController(
     }
 
     private fun applyGeometry(track: RealtimeVideoTrack, geometry: CameraFrameGeometry) {
-        val size = mediaService.resolveModelInputSize(IntSize(geometry.displayWidth, geometry.displayHeight))
+        val actual = IntSize(geometry.displayWidth, geometry.displayHeight)
+        // 1.0.9 models accept fixed generation buckets. Driver-negotiated capture
+        // remains independent; select the bucket closest to its corrected aspect.
+        val aspect = actual.width.toDouble() / actual.height
+        val input = mediaService.model.resolutionBuckets.minByOrNull {
+            abs(ln(aspect / (it.width.toDouble() / it.height)))
+        } ?: actual
+        val size = mediaService.resolveModelInputSize(input)
         track.updateVideoFormat(checkNotNull(track.videoFormat).copy(width = size.width, height = size.height).also(RealtimeVideoFormat::validate))
     }
 
@@ -154,7 +165,7 @@ internal class CameraController(
                 VideoRenderBinding(
                     attachHandler = { view, contentMode ->
                         try {
-                            view.prepareRtcVideoRendering()
+                            view.prepareLocalCameraRendering()
                             rtcManager.bindLocalVideo(view.rtcRenderView, contentMode)
                         } catch (error: Throwable) {
                             errorListener(XmaxError.from(error))

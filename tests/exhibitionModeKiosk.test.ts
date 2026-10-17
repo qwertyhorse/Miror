@@ -162,6 +162,21 @@ describe('mirror video state labels', () => {
     expect(failed).toContain('画面暂未连接');
   });
 
+  it('returns a paused screen to local capture and start instead of retaining generated output or completion feedback', () => {
+    const html = screen('paused', live({ outputStream: output, status: 'error', error: '本次换装已结束，请由工作人员继续体验。' }));
+    expect(html).toContain('ex-welcome'); expect(html).toContain('aria-label="本地取景"');
+    expect(html).toContain('开始体验'); expect(html).not.toContain('继续体验');
+    expect(html).not.toContain('本次换装已结束'); expect(html).not.toContain('已暂停的生成画面');
+    expect(html).not.toContain('生成结果'); expect(html).not.toContain('role="alert"');
+    expect(badgeText(html)).toBe('');
+  });
+
+  it('retains an actionable camera failure on the paused start screen', () => {
+    const html = screen('paused', live({ status: 'error', error: '摄像头已断开，请重新开启。', cameraError: '摄像头已断开，请重新开启。' }));
+    expect(html).toContain('role="alert"'); expect(html).toContain('摄像头已断开，请重新开启。');
+    expect(html).toContain('开始体验'); expect(html).not.toContain('继续体验');
+  });
+
   it('keeps backend previews explicit about receiving state instead of video', () => {
     const html = screen('generating', live({ outputStream: output, status: 'running' }), true);
     expect(html).toContain('aria-label="镜端状态预览"');

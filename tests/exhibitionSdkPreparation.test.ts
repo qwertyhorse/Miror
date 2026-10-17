@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { exhibitionSdk, prepareExhibitionEntry } from '../src/exhibition/sdkPreparation';
 
 const clients = vi.hoisted(() => ({ cn: vi.fn(), global: vi.fn() }));
-vi.mock('@xmaxai/sdk', () => ({ createXmaxClient: clients.cn, XMAX_OPEN_API_PRODUCTION_BASE_URL: 'https://api.xmaxai.com/open/api/v1' }));
-vi.mock('@xmaxai/sdk-global', () => ({ createXmaxClient: clients.global, XMAX_OPEN_API_PRODUCTION_BASE_URL: 'https://api.xmax.ai/open/api/v1' }));
+vi.mock('../src/exhibition/xmaxWebSdk', () => ({ createExhibitionSdk: (region: 'cn' | 'global') => ({
+  createXmaxClient: clients[region],
+  XMAX_OPEN_API_PRODUCTION_BASE_URL: region === 'cn' ? 'https://api.xmaxai.com/open/api/v1' : 'https://api.xmax.ai/open/api/v1',
+}) }));
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 async function flush() { for (let i = 0; i < 50; i++) await Promise.resolve(); }
 function documentFixture() {

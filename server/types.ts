@@ -1,5 +1,5 @@
 import type { ExhibitionExperienceMode } from '../shared/exhibition.ts';
-import type { XmaxRegion } from '../shared/xmax.ts';
+import type { XmaxRegion, XmaxRealtimeModel } from '../shared/xmax.ts';
 
 export type SourceKind = 'photo' | 'video' | 'camera';
 export type SessionState = 'reserved' | 'active' | 'stopping' | 'stopped' | 'issuance_unknown' | 'error';
@@ -30,6 +30,7 @@ export interface Provider {
   readonly region?: XmaxRegion;
   credentialSnapshot?(): string;
   forCredential?(apiKey: string, region?: XmaxRegion): Provider;
+  forModel?(model: XmaxRealtimeModel): Provider;
   issueKey(pointsLimit: number, expireSeconds: number): Promise<IssuedKey>;
   keyStatus(token: string): Promise<KeyStatus>;
   deactivate(token: string): Promise<KeyStatus>;

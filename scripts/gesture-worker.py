@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Warm CPU pose and hand models per terminal. JSON lines use private pipes only."""
+"""Warm CPU pose and hand models per terminal. Framed input uses private pipes only."""
 import argparse
 import base64
 import io
@@ -16,6 +16,10 @@ from PIL import Image, ImageFile
 MAX_JPEG_BYTES = 256 * 1024
 MAX_DIMENSION = 960
 MAX_LINE_BYTES = 352 * 1024
+MAX_RAW_DIMENSION = 4096
+MAX_RAW_PIXELS = 3840 * 2160
+MAX_RAW_BYTES = 16 * 1024 * 1024
+RAW_READ_CHUNK = 64 * 1024
 Image.MAX_IMAGE_PIXELS = MAX_DIMENSION * MAX_DIMENSION
 ImageFile.LOAD_TRUNCATED_IMAGES = False
 warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -27,11 +31,91 @@ def emit(value):
 
 
 def settings_from(value):
+    if not isinstance(value, dict):
+        raise ValueError("Invalid settings")
     fields = ("minHandDetectionConfidence", "minHandPresenceConfidence", "minTrackingConfidence")
     result = tuple(value.get(field, 0.5) for field in fields)
     if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 1 for x in result):
         raise ValueError("Invalid confidence")
+    input_long_edge_from(value)
     return result
+
+
+def input_long_edge_from(value):
+    edge = value.get("inputLongEdge", 720)
+    if type(edge) is not int or edge not in (480, 720, 960):
+        raise ValueError("Invalid input size")
+    return edge
+
+
+def i420_layout(frame):
+    if not isinstance(frame, dict) or frame.get("format") != "i420-v1":
+        raise ValueError("Invalid frame format")
+    width, height = frame.get("width"), frame.get("height")
+    if any(type(size) is not int or not 1 <= size <= MAX_RAW_DIMENSION for size in (width, height)) or width * height > MAX_RAW_PIXELS:
+        raise ValueError("Invalid frame dimensions")
+    rotation, mirrored = frame.get("rotation"), frame.get("mirrored")
+    if type(rotation) is not int or rotation not in (0, 90, 180, 270) or type(mirrored) is not bool:
+        raise ValueError("Invalid frame orientation")
+    byte_length = frame.get("byteLength")
+    expected = width * height + 2 * ((width + 1) // 2) * ((height + 1) // 2)
+    if type(byte_length) is not int or not 1 <= byte_length <= MAX_RAW_BYTES or byte_length != expected:
+        raise ValueError("Invalid frame length")
+    return width, height, rotation, mirrored, byte_length
+
+
+def read_i420(stream, frame):
+    # Reject dimensions and framing before allocating or consuming binary data.
+    byte_length = i420_layout(frame)[4]
+    data = bytearray(byte_length)
+    view = memoryview(data)
+    offset = 0
+    while offset < byte_length:
+        count = stream.readinto(view[offset:min(byte_length, offset + RAW_READ_CHUNK)])
+        if not count:
+            raise ValueError("Truncated frame")
+        offset += count
+    return data
+
+
+def i420_pixels(data, frame, input_long_edge=720):
+    width, height, rotation, mirrored, byte_length = i420_layout(frame)
+    if not isinstance(data, (bytes, bytearray, memoryview)) or len(data) != byte_length:
+        raise ValueError("Invalid frame data")
+    edge = input_long_edge_from({"inputLongEdge": input_long_edge})
+    turned = rotation in (90, 270)
+    rotated_width, rotated_height = (height, width) if turned else (width, height)
+    scale = min(1.0, edge / max(rotated_width, rotated_height))
+    # Kotlin roundToInt rounds positive halves up, unlike Python round().
+    out_width = max(1, math.floor(rotated_width * scale + 0.5))
+    out_height = max(1, math.floor(rotated_height * scale + 0.5))
+    columns = np.arange(out_width, dtype=np.int32)
+    if mirrored:
+        columns = out_width - 1 - columns
+    rx = (columns * rotated_width // out_width)[None, :]
+    ry = (np.arange(out_height, dtype=np.int32) * rotated_height // out_height)[:, None]
+    # Sample directly in the reduced display grid. No full-size RGB image exists.
+    if rotation == 90:
+        sx, sy = ry, height - 1 - rx
+    elif rotation == 180:
+        sx, sy = width - 1 - rx, height - 1 - ry
+    elif rotation == 270:
+        sx, sy = width - 1 - ry, rx
+    else:
+        sx, sy = rx, ry
+    source = np.frombuffer(data, dtype=np.uint8)
+    y_size = width * height
+    chroma_width = (width + 1) // 2
+    chroma_size = chroma_width * ((height + 1) // 2)
+    chroma_indices = sy // 2 * chroma_width + sx // 2
+    yy = np.maximum(0, source[sy * width + sx].astype(np.int32) - 16)
+    uu = source[y_size + chroma_indices].astype(np.int32) - 128
+    vv = source[y_size + chroma_size + chroma_indices].astype(np.int32) - 128
+    pixels = np.empty((out_height, out_width, 3), dtype=np.uint8)
+    pixels[:, :, 0] = np.clip((298 * yy + 409 * vv + 128) >> 8, 0, 255)
+    pixels[:, :, 1] = np.clip((298 * yy - 100 * uu - 208 * vv + 128) >> 8, 0, 255)
+    pixels[:, :, 2] = np.clip((298 * yy + 516 * uu + 128) >> 8, 0, 255)
+    return pixels
 
 
 def jpeg_pixels(encoded):
@@ -144,11 +228,22 @@ def main():
             timestamp = request.get("timestamp")
             if request.get("type") != "infer" or not isinstance(request.get("id"), int) or isinstance(timestamp, bool) or not isinstance(timestamp, int) or not previous_timestamp < timestamp <= 9007199254740991:
                 return 2
-            settings = settings_from(request.get("settings", {}))
+            raw_settings = request.get("settings", {})
+            settings = settings_from(raw_settings)
             try:
-                pixels = jpeg_pixels(request.get("jpeg"))
+                if "frame" in request:
+                    data = read_i420(sys.stdin.buffer, request["frame"])
+                    try:
+                        pixels = i420_pixels(data, request["frame"], input_long_edge_from(raw_settings))
+                    finally:
+                        del data
+                else:
+                    pixels = jpeg_pixels(request.get("jpeg"))
             except Exception:
                 emit({"type": "error", "id": request["id"], "code": "INVALID_IMAGE"})
+                if "frame" in request:
+                    # An invalid/truncated raw frame cannot be safely resynchronized.
+                    return 2
                 continue
             previous_timestamp = timestamp
             try:

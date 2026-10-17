@@ -17,7 +17,9 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-/** SDK 内置的发光轨迹效果。 */
+/**
+ * SDK 内置的发光轨迹效果。
+ */
 public class DefaultTrajectoryEffectRenderer(context: Context) : View(context),
     TrajectoryEffectRendering {
     override val view: View
@@ -72,32 +74,27 @@ public class DefaultTrajectoryEffectRenderer(context: Context) : View(context),
 
     override fun reset() {
         activeTrajectories.clear()
-        clearTrailBitmap()
+        releaseTrailBitmap()
         invalidate()
     }
 
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
-        rebuildTrailBitmap(width, height)
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        if (trailBitmap == null) rebuildTrailBitmap(width, height)
+        // A resize discards the old pixels; active touches may draw again at the new size.
+        // Idle video views never allocate a full-screen transparent bitmap.
+        releaseTrailBitmap()
     }
 
     override fun onDetachedFromWindow() {
         reset()
-        trailBitmap?.recycle()
-        trailBitmap = null
-        trailCanvas = null
         super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        if (!hasTrailPixels && activeTrajectories.isEmpty()) return
         fadeTrailBitmap()
-        trailBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
+        if (hasTrailPixels) trailBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
 
         val now = SystemClock.elapsedRealtimeNanos() / NANOS_PER_SECOND
         activeTrajectories.values.forEach { trajectory ->
@@ -111,21 +108,23 @@ public class DefaultTrajectoryEffectRenderer(context: Context) : View(context),
         }
     }
 
-    private fun rebuildTrailBitmap(width: Int, height: Int) {
+    private fun releaseTrailBitmap() {
         trailBitmap?.recycle()
         trailBitmap = null
         trailCanvas = null
         hasTrailPixels = false
         idleFadeFrameCount = 0
-        if (width <= 0 || height <= 0) return
+    }
 
-        trailBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
-            trailCanvas = Canvas(bitmap)
-        }
+    private fun trailDrawingCanvas(): Canvas? {
+        trailCanvas?.let { return it }
+        if (width <= 0 || height <= 0) return null
+        trailBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        return Canvas(checkNotNull(trailBitmap)).also { trailCanvas = it }
     }
 
     private fun drawTrailSegment(start: PointF, end: PointF) {
-        val canvas = trailCanvas ?: return
+        val canvas = trailDrawingCanvas() ?: return
         drawLine(canvas, start, end, dp(18f), GLOW_COLOR, 0.22f, dp(12f))
         drawLine(canvas, start, end, dp(10f), GLOW_COLOR, 0.52f, dp(6f))
         drawLine(canvas, start, end, dp(3f), Color.WHITE, 0.82f, 0f)
@@ -166,13 +165,7 @@ public class DefaultTrajectoryEffectRenderer(context: Context) : View(context),
         }
 
         idleFadeFrameCount += 1
-        if (idleFadeFrameCount > IDLE_FADE_FRAME_LIMIT) clearTrailBitmap()
-    }
-
-    private fun clearTrailBitmap() {
-        trailCanvas?.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-        hasTrailPixels = false
-        idleFadeFrameCount = 0
+        if (idleFadeFrameCount > IDLE_FADE_FRAME_LIMIT) releaseTrailBitmap()
     }
 
     private fun drawPulsingRings(

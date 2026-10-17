@@ -8,39 +8,61 @@ import ai.xmax.sdk.VideoFrame
 import ai.xmax.sdk.VideoContentMode
 import android.view.View
 
-/** 定义 RTC 引擎生命周期和房间连接能力。 */
+/**
+ * 定义 RTC 引擎生命周期和房间连接能力。
+ */
 internal interface RtcManaging {
-    /** 初始化 RTC 引擎。重复调用不会重复获取引擎。 */
+    /**
+     * 初始化 RTC 引擎。重复调用不会重复获取引擎。
+     */
     suspend fun initialize()
 
-    /** 离开房间并销毁 RTC 引擎。重复调用安全。 */
+    /**
+     * 离开房间并销毁 RTC 引擎。重复调用安全。
+     */
     suspend fun destroy()
 
-    /** 应用主视频流编码配置。 */
+    /**
+     * 应用主视频流编码配置。
+     */
     fun configureVideoEncoding(configuration: VideoEncodingConfiguration)
 
-    /** 推送一帧外部视频数据及其可选 SEI。 */
+    /**
+     * 推送一帧外部视频数据及其可选 SEI。
+     */
     fun pushExternalVideoFrame(
         frame: VideoFrame,
         seiData: ByteArray?,
     )
 
-    /** 推送一帧 10 ms PCM 外部音频数据。 */
+    /**
+     * 推送一帧 10 ms PCM 外部音频数据。
+     */
     fun pushExternalAudioFrame(frame: AudioFrame)
 
-    /** 将主视频切换为 RTC 外部帧输入。 */
+    /**
+     * 将主视频切换为 RTC 外部帧输入。
+     */
     fun useExternalVideoSource()
 
-    /** 将主音频切换为 RTC 外部 PCM 输入。 */
+    /**
+     * 将主音频切换为 RTC 外部 PCM 输入。
+     */
     fun startExternalAudioSource()
 
-    /** 停止 RTC 外部音频输入。 */
+    /**
+     * 停止 RTC 外部音频输入。
+     */
     fun stopExternalAudioSource()
 
-    /** 切换到 RTC 内部音频源并启动麦克风采集。 */
+    /**
+     * 切换到 RTC 内部音频源并启动麦克风采集。
+     */
     fun startAudioCapture()
 
-    /** 停止 RTC 内部麦克风采集。 */
+    /**
+     * 停止 RTC 内部麦克风采集。
+     */
     fun stopAudioCapture()
 
     /** 设置相机安装方向修正；必须在开始采集之前调用，不改变视图方向。 */
@@ -53,10 +75,14 @@ internal interface RtcManaging {
         frameRate: Int,
     )
 
-    /** 停止 RTC 内部摄像头采集。 */
+    /**
+     * 停止 RTC 内部摄像头采集。
+     */
     fun stopVideoCapture()
 
-    /** 切换 RTC 内部采集使用的摄像头。 */
+    /**
+     * 切换 RTC 内部采集使用的摄像头。
+     */
     fun switchCamera(position: CameraPosition)
 
     /** 读取 RTC 提供的真实设备 ID，不启动采集。 */
@@ -71,62 +97,97 @@ internal interface RtcManaging {
         contentMode: VideoContentMode,
     )
 
-    /** 解除本地视频与渲染视图的绑定。 */
+    /**
+     * 解除本地视频与渲染视图的绑定。
+     */
     fun unbindLocalVideo()
 
-    /** 将指定远端视频流绑定到渲染视图。 */
+    /**
+     * 将指定远端视频流绑定到渲染视图。
+     */
     fun bindRemoteVideo(
         stream: RemoteStream,
         view: View,
         contentMode: VideoContentMode,
     )
 
-    /** 解除指定远端视频流的渲染绑定。 */
+    /**
+     * 解除指定远端视频流的渲染绑定。
+     */
     fun unbindRemoteVideo(stream: RemoteStream)
 
-    /** 加入 RTC 房间，并等待服务端确认加入成功。 */
+    /**
+     * 加入 RTC 房间，并等待服务端确认加入成功。
+     */
     suspend fun joinRoom(configuration: RoomJoinConfiguration)
 
-    /** 离开当前或正在加入的 RTC 房间。重复调用安全。 */
+    /**
+     * 离开当前或正在加入的 RTC 房间。重复调用安全。
+     */
     suspend fun leaveRoom()
 
-    /** 发布本地视频流。 */
+    /**
+     * 发布本地视频流。
+     */
     fun publishLocalVideo()
 
-    /** 停止发布本地视频流。没有活动房间时安全返回。 */
+    /**
+     * 停止发布本地视频流。没有活动房间时安全返回。
+     */
     fun unpublishLocalVideo()
 
-    /** 发布本地音频流。 */
+    /**
+     * 发布本地音频流。
+     */
     fun publishLocalAudio()
 
-    /** 停止发布本地音频流。没有活动房间时安全返回。 */
+    /**
+     * 停止发布本地音频流。没有活动房间时安全返回。
+     */
     fun unpublishLocalAudio()
 
-    /** 更新远端视频流订阅状态。 */
+    /**
+     * 更新远端视频流订阅状态。
+     */
     fun subscribeRemoteVideo(
         userId: String,
         subscribe: Boolean,
     )
 
-    /** 更新远端音频流订阅状态。 */
+    /**
+     * 更新远端音频流订阅状态。
+     */
     fun subscribeRemoteAudio(
         userId: String,
         subscribe: Boolean,
     )
 
-    /** 设置指定远端用户的音频播放音量。 */
+    /**
+     * 设置指定远端用户的音频播放音量。
+     */
     fun setRemoteAudioVolume(
         volume: Int,
         userId: String,
     )
 
-    /** 向当前 RTC 房间发送消息。 */
+    /**
+     * 向当前 RTC 房间发送消息。
+     */
     fun sendRoomMessage(message: String)
 
-    /** 设置 RTC 事件监听器，传入空值时清除。 */
+    /**
+     * 不阻塞主线程地等待已经入队的房间信令提交完成。
+     */
+    suspend fun awaitPendingMessages() = Unit
+
+    /**
+     * 设置 RTC 事件监听器，传入空值时清除。
+     */
     fun setEventListener(listener: RtcEventListener?)
 
-    /** 设置 RTC 摄像头预览就绪监听器，传入空值时清除。 */
+    /**
+     * 设置 RTC 摄像头预览就绪监听器，传入空值时清除。
+     */
     fun setCameraPreviewReadyListener(listener: RealtimeCameraPreviewReadyListener?)
 
     val cameraFrameGeometry: CameraFrameGeometry?
@@ -140,6 +201,8 @@ internal interface RtcManaging {
         listener: RtcRemoteVideoSink?,
     )
 
-    /** 设置 RTC 质量事件监听器，传入空值时清除。 */
+    /**
+     * 设置 RTC 质量事件监听器，传入空值时清除。
+     */
     fun setQualityListener(listener: RtcQualityListener?)
 }

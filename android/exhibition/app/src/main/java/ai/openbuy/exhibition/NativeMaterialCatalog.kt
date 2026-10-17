@@ -13,6 +13,15 @@ internal object NativeMaterialCatalog {
         return (0 until all.length()).mapNotNull { all.optJSONObject(it) }
     }
     fun hasAlternative(state: JSONObject?): Boolean = looks(state).any { it.optString("id") != state?.optString("selectedLookId") }
+    fun next(state: JSONObject?, direction: Int): JSONObject? {
+        if (!hasAlternative(state)) return null
+        val available = looks(state)
+        val current = available.indexOfFirst { it.optString("id") == state?.optString("selectedLookId") }
+        val next = if (current < 0) {
+            if (direction < 0) available.lastIndex else 0
+        } else Math.floorMod(current + direction, available.size)
+        return available[next]
+    }
     fun selected(state: JSONObject?): JSONObject? = state?.optJSONObject("activeLook")
         ?.takeIf { it.optString("id") == state.optString("selectedLookId") }
         ?: looks(state).firstOrNull { it.optString("id") == state?.optString("selectedLookId") }

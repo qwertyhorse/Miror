@@ -6,6 +6,7 @@ import { ExhibitionService } from './exhibition.ts';
 import { TryOnService } from './service.ts';
 import { ApiError } from './types.ts';
 
+/** Authenticated activity renews this lease; abandoned pages are collected sooner. */
 export const BROWSER_TEST_TTL_MS = 60 * 60 * 1_000;
 export const BROWSER_TEST_IDLE_MS = 60 * 1_000;
 export const BROWSER_TEST_LIMIT = 8;
@@ -77,13 +78,15 @@ export class BrowserTests {
     if (entry && !entry.closing) this.synchronize(entry);
     if (entry?.invalidated) throw new ApiError('BROWSER_TEST_SOURCE_CHANGED', '设备配置已更新，请重新打开浏览器测试。', 410);
     if (!entry || entry.closing) throw this.expired();
-    if (this.now() >= entry.expiresAt) {
+    const now = this.now();
+    if (now >= entry.expiresAt || now - entry.lastSeen >= BROWSER_TEST_IDLE_MS) {
       void this.finish(entry).catch(() => undefined);
       throw this.expired();
     }
-    const context = { exhibition: entry.exhibition, service: entry.service, mirror: this.summary(entry), expiresAt: entry.expiresAt };
-    entry.lastSeen = this.now();
-    return context;
+    // Validate the old deadline first: a late request cannot revive an expired page.
+    entry.lastSeen = now;
+    entry.expiresAt = now + BROWSER_TEST_TTL_MS;
+    return { exhibition: entry.exhibition, service: entry.service, mirror: this.summary(entry), expiresAt: entry.expiresAt };
   }
 
   async close(id: string, token: unknown): Promise<void> {

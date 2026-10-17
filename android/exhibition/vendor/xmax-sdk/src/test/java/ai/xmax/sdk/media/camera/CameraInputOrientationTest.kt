@@ -13,10 +13,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CameraInputOrientationTest {
-    private val format = RealtimeVideoFormat(704, 1280, 24)
+    private val format = RealtimeVideoFormat(1024, 1920, 24)
 
     @Test fun actualFrameGeometryControlsEncoderOrientationForEveryQuarterTurn() = runBlocking {
-        for ((width, height) in listOf(1280 to 704, 704 to 1280)) {
+        for ((width, height) in listOf(1920 to 1024, 1024 to 1920)) {
             for (rotation in listOf(0, 90, 180, 270)) {
                 val fixture = CameraDeviceSelectionTest.Fixture(MediaService())
                 fixture.engine.firstGeometry = CameraFrameGeometry(width, height, rotation)
@@ -48,16 +48,16 @@ class CameraInputOrientationTest {
     @Test fun squareCameraInputUsesPortraitWithoutChangingTheRequestedSize() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture()
         fixture.rtc.initialize()
-        fixture.rtc.startVideoCapture(704, 704, 24)
-        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(704, 704, 24))
+        fixture.rtc.startVideoCapture(1024, 1024, 24)
+        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1024, 1024, 24))
         assertEquals(CameraVideoOrientation.PORTRAIT, fixture.engine.orientations.last())
-        assertEquals(listOf("orientation:PORTRAIT", "encode:704x704"), fixture.engine.operations.takeLast(2))
+        assertEquals(listOf("orientation:PORTRAIT", "encode:1024x1024"), fixture.engine.operations.takeLast(2))
         fixture.rtc.destroy()
     }
 
     @Test fun orientationFailurePreventsEncodingAndAllowsAnExplicitRetry() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture()
-        fixture.engine.firstGeometry = CameraFrameGeometry(1280, 704, 90)
+        fixture.engine.firstGeometry = CameraFrameGeometry(1920, 1024, 90)
         fixture.media.createLocalCameraStream(format, CameraPosition.BACK)
         val prepared = checkNotNull(fixture.media.prepareConnectionVideoFormat())
         fixture.engine.orientationResult = -1
@@ -70,7 +70,7 @@ class CameraInputOrientationTest {
         assertEquals("orientation:PORTRAIT", fixture.engine.operations.last())
         fixture.engine.orientationResult = 0
         EncodingController(fixture.rtc).configure(prepared)
-        assertEquals(listOf("orientation:PORTRAIT", "encode:704x1280"), fixture.engine.operations.takeLast(2))
+        assertEquals(listOf("orientation:PORTRAIT", "encode:1024x1920"), fixture.engine.operations.takeLast(2))
         fixture.media.stopLocalStream()
     }
 
@@ -90,7 +90,7 @@ class CameraInputOrientationTest {
 
     @Test fun externalInputClearsCameraRotationAndFixedOrientationBeforeSwitchingSource() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture()
-        fixture.engine.firstGeometry = CameraFrameGeometry(1280, 704, 90)
+        fixture.engine.firstGeometry = CameraFrameGeometry(1920, 1024, 90)
         fixture.media.createLocalCameraStream(format, CameraPosition.BACK, cameraRotationDegrees = 90)
         EncodingController(fixture.rtc).configure(checkNotNull(fixture.media.prepareConnectionVideoFormat()))
         fixture.engine.operations.clear()
@@ -101,8 +101,8 @@ class CameraInputOrientationTest {
         assertNull(fixture.rtc.cameraFrameGeometry)
         fixture.engine.operations.clear()
         // Image input provides its own geometry and must not inherit the camera's orientation lock.
-        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1280, 704, 24))
-        assertEquals(listOf("encode:1280x704"), fixture.engine.operations)
+        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1920, 1024, 24))
+        assertEquals(listOf("encode:1920x1024"), fixture.engine.operations)
         assertEquals(CameraVideoOrientation.ADAPTIVE, fixture.engine.orientations.last())
         assertEquals(0, fixture.engine.rotations.last())
         fixture.media.stopLocalStream()
@@ -113,8 +113,8 @@ class CameraInputOrientationTest {
             val fixture = CameraDeviceSelectionTest.Fixture()
             fixture.rtc.initialize()
             fixture.rtc.setVideoCaptureRotation(270)
-            fixture.rtc.startVideoCapture(704, 1280, 24)
-            fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(704, 1280, 24))
+            fixture.rtc.startVideoCapture(1024, 1920, 24)
+            fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1024, 1920, 24))
             fixture.engine.operations.clear()
             if (failingOperation == "orientation") fixture.engine.orientationResult = -1
             else fixture.engine.rotationResult = -1
@@ -133,25 +133,25 @@ class CameraInputOrientationTest {
     @Test fun reopeningCaptureOnTheSameEngineResetsItsPreviousOrientationBeforeFirstFrame() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture()
         fixture.rtc.initialize()
-        fixture.rtc.startVideoCapture(704, 1280, 24)
-        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(704, 1280, 24))
+        fixture.rtc.startVideoCapture(1024, 1920, 24)
+        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1024, 1920, 24))
         fixture.rtc.stopVideoCapture()
         fixture.engine.operations.clear()
 
-        fixture.rtc.startVideoCapture(1280, 704, 24)
+        fixture.rtc.startVideoCapture(1920, 1024, 24)
 
         assertEquals(listOf("orientation:ADAPTIVE", "capture"), fixture.engine.operations)
         assertEquals(2, fixture.engine.captureStarts)
-        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1280, 704, 24))
-        assertEquals(listOf("orientation:LANDSCAPE", "encode:1280x704"), fixture.engine.operations.takeLast(2))
+        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1920, 1024, 24))
+        assertEquals(listOf("orientation:LANDSCAPE", "encode:1920x1024"), fixture.engine.operations.takeLast(2))
         fixture.rtc.destroy()
     }
 
     @Test fun encodingWithoutAnActiveCameraDoesNotSetAFixedOrientation() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture()
         fixture.rtc.initialize()
-        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(704, 1280, 24))
-        assertEquals(listOf("encode:704x1280"), fixture.engine.operations)
+        fixture.rtc.configureVideoEncoding(VideoEncodingConfiguration(1024, 1920, 24))
+        assertEquals(listOf("encode:1024x1920"), fixture.engine.operations)
         assertTrue(fixture.engine.orientations.isEmpty())
         fixture.rtc.destroy()
     }

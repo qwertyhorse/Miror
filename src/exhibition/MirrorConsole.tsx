@@ -1,13 +1,16 @@
 import { exhibitionApiPath } from './mirrorApi';
 import { appUrl } from '../versionScope';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Check, Copy, ExternalLink, Monitor, Pencil, Play, Plus, RotateCcw, Settings, Image, SkipBack, SkipForward, Square, Trash2, Wifi, WifiOff, X } from 'lucide-react';
+import { Cast, Check, Copy, ExternalLink, Monitor, MonitorSmartphone, Pencil, Play, Plus, RotateCcw, Settings, Image, SkipBack, SkipForward, Square, Trash2, Wifi, WifiOff, X } from 'lucide-react';
 import { isExhibitionLocallyEnded, type ExhibitionMirrorSummary } from '../../shared/exhibition';
 import type { ExhibitionController } from './useExhibition';
 import type { ExhibitionLiveController } from './useExhibitionLive';
 import type { MirrorRegistry } from './useMirrors';
 import { exhibitionUrl } from './mirrorApi';
 import { exhibitionBrowserTestUrl, exhibitionCameraUrl } from './cameraEntry';
+import { exhibitionComputerUrl, exhibitionHdmiUrl, exhibitionWirelessUrl } from './computerDisplay';
+import { openHdmiWindow } from './hdmiWindow';
+import { openWirelessWindow } from './wirelessWindow';
 import { enabledLooksForMode, lookById, phaseLabel } from './catalog';
 import { ExperienceModeChips, experienceModeLabel } from './ExperienceModeChips';
 import { WardrobePanel } from './WardrobePanel';
@@ -120,7 +123,7 @@ function DeviceSettings({ controller, live, mirrorId }: { controller: Exhibition
     <MirrorUiSkinSettings key={`skin-${mirrorId}`} controller={controller} />
     <details className="ex-device-details"><summary>素材上传限制<span>文件大小与图片尺寸</span></summary><UploadLimitsSettings controller={controller} /></details>
     <details className="ex-device-details"><summary>设备入口<span>镜端与后台地址</span></summary><div className="ex-device-links">
-      {[{ name: '镜端入口', url: screenUrl }, { name: '工作人员后台', url: controlUrl }].map(entry => <div key={entry.name}><strong>{entry.name}</strong><a href={entry.url} target="_blank" rel="noreferrer">{entry.url}<ExternalLink size={14} /></a></div>)}
+      {[{ name: '镜端入口', url: screenUrl }, { name: '安卓联动', url: exhibitionComputerUrl(mirrorId) }, { name: '网页大屏', url: exhibitionComputerUrl(mirrorId, undefined, 'browser') }, { name: '工作人员后台', url: controlUrl }].map(entry => <div key={entry.name}><strong>{entry.name}</strong><a href={entry.url} target="_blank" rel="noreferrer">{entry.url}<ExternalLink size={14} /></a></div>)}
     </div></details>
   </div>;
 }
@@ -139,6 +142,8 @@ function MirrorConsoleContent({ controller, live, mirror, registry, selectMirror
   const [tab, setTab] = useState<'live' | 'looks'>('live');
   const [modal, setModal] = useState<'create' | 'rename' | 'copy' | null>(null);
   const [copyNotice, setCopyNotice] = useState('');
+  const [hdmiBlocked, setHdmiBlocked] = useState(false);
+  const [wirelessBlocked, setWirelessBlocked] = useState(false);
   const [deletingMirror, setDeletingMirror] = useState<ExhibitionMirrorSummary | null>(null);
   if (!state) return null;
   const configurable = ['select', 'idle'].includes(state.phase) && !state.live;
@@ -180,7 +185,9 @@ function MirrorConsoleContent({ controller, live, mirror, registry, selectMirror
         {registry.error && <p className="ex-mirror-list-error" role="status">设备列表连接中断</p>}
       </nav>
       <div className="ex-console-main">
-        <header className="ex-mirror-heading"><div className="ex-mirror-name"><h1>{mirror.name}</h1><button className="ex-icon-button" aria-label="修改设备名称" onClick={() => setModal('rename')}><Pencil size={16} /></button></div><div className="ex-mirror-actions"><a className="ex-button" href={exhibitionBrowserTestUrl(mirror.id)} target="_blank" rel="noreferrer"><Monitor size={16} />浏览器测试</a><button className="ex-button" disabled={!connected || (registry.data?.mirrors.length ?? 0) < 2} title={(registry.data?.mirrors.length ?? 0) < 2 ? '新增另一台设备后可复制数据' : undefined} onClick={() => { setCopyNotice(''); setModal('copy'); }}><Copy size={16} />复制到…</button><a className="ex-button ex-primary" href={exhibitionCameraUrl(mirror.id)} target="_blank" rel="noreferrer"><ExternalLink size={16} />打开大屏</a></div></header>
+        <header className="ex-mirror-heading"><div className="ex-mirror-name"><h1>{mirror.name}</h1><button className="ex-icon-button" aria-label="修改设备名称" onClick={() => setModal('rename')}><Pencil size={16} /></button></div><div className="ex-mirror-actions"><button type="button" className="ex-button ex-primary" onClick={() => setWirelessBlocked(openWirelessWindow(mirror.id) === 'blocked')}><Cast size={16} />无线投屏</button><a className="ex-button" href={exhibitionComputerUrl(mirror.id)} target="_blank" rel="noreferrer"><MonitorSmartphone size={16} aria-hidden="true" />安卓联动</a><a className="ex-button" href={exhibitionBrowserTestUrl(mirror.id)} target="_blank" rel="noreferrer"><Monitor size={16} />浏览器测试</a><button className="ex-button" disabled={!connected || (registry.data?.mirrors.length ?? 0) < 2} title={(registry.data?.mirrors.length ?? 0) < 2 ? '新增另一台设备后可复制数据' : undefined} onClick={() => { setCopyNotice(''); setModal('copy'); }}><Copy size={16} />复制到…</button><button type="button" className="ex-button ex-primary" onClick={() => setHdmiBlocked(openHdmiWindow(mirror.id) === 'blocked')}><ExternalLink size={16} />HDMI 大屏</button></div></header>
+        {wirelessBlocked && <p className="ex-field-error" role="alert">弹窗被拦截。<a href={exhibitionWirelessUrl(mirror.id)} target="_blank" rel="noreferrer">打开无线投屏</a></p>}
+        {hdmiBlocked && <p className="ex-field-error" role="alert">弹窗被拦截。<a href={exhibitionHdmiUrl(mirror.id)} target="_blank" rel="noreferrer">打开 HDMI 大屏</a></p>}
         {copyNotice && <p className="ex-library-notice" role="status"><Check size={16} />{copyNotice}</p>}
         <div className="ex-mirror-tabs" role="tablist" aria-label="设备功能">{([{ id: 'live', label: '控制与设置', icon: Settings }, { id: 'looks', label: '素材管理', icon: Image }] as const).map(item => <button key={item.id} id={`mirror-tab-${item.id}`} type="button" role="tab" aria-selected={tab === item.id} aria-controls="mirror-tab-panel" tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)} onKeyDown={event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const next = event.key === 'Home' ? 'live' : event.key === 'End' ? 'looks' : tab === 'live' ? 'looks' : 'live'; setTab(next); document.getElementById(`mirror-tab-${next}`)?.focus(); } }}><item.icon size={17} />{item.label}</button>)}</div>
         <div id="mirror-tab-panel" className="ex-mirror-tab-panel" role="tabpanel" aria-labelledby={`mirror-tab-${tab}`}>

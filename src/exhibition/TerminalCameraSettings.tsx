@@ -6,7 +6,9 @@ import { EXHIBITION_CAMERA_REQUEST_TTL_MS } from '../../shared/exhibitionCamera'
 import type { TerminalBinding, TerminalConnection, TerminalIdentity } from './useTerminalBinding';
 import type { ExhibitionLiveController } from './useExhibitionLive';
 import { cameraTrackDeviceId } from './cameraCapture';
+import type { ExhibitionCameraRotation } from './cameraOrientation';
 import { readCameraPreference, saveCameraPreference } from './cameraPreference';
+import { CAMERA_RESOLUTION_OPTIONS, isComputerCameraResolution, type ComputerCameraQuality } from './cameraQuality';
 import { StreamVideo } from './LiveCameraPanel';
 import './terminal-camera.css';
 
@@ -157,6 +159,8 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
   const current = useRef(live); current.current = live;
   const [devices, setDevices] = useState(() => cameraDevices(live.cameras));
   const [selected, setSelected] = useState(live.selectedCameraId || previous.current.preference?.deviceId || '');
+  const [rotation, setRotation] = useState<ExhibitionCameraRotation>(previous.current.preference?.rotation ?? 0);
+  const [quality, setQuality] = useState<ComputerCameraQuality | null>(previous.current.preference?.quality ?? null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState('');
   const [closing, setClosing] = useState(false);
@@ -166,7 +170,7 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
   const scanEpoch = useRef(0);
   const touched = useRef(false);
   const [previewFrame, setPreviewFrame] = useState<MediaStream | null>(null);
-  const activeId = live.cameraStream ? cameraTrackDeviceId(live.cameraStream.getVideoTracks()[0]) || live.selectedCameraId : '';
+  const activeId = live.cameraStream ? cameraTrackDeviceId((live.rawCameraStream ?? live.cameraStream).getVideoTracks()[0]) || live.selectedCameraId : '';
   const previewReady = !!live.cameraStream && previewFrame === live.cameraStream && activeId === selected && devices.some(device => device.id === selected);
   useEffect(() => {
     const element = dialog.current;
@@ -206,10 +210,10 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
     if (completed.current) return;
     publish(scanning || live.opening ? 'scanning' : (error || live.cameraError).includes('权限') ? 'permission-required' : previewReady ? 'preview' : 'ready');
   }, [publish, scanning, live.opening, live.cameraError, error, previewReady]);
-  const preview = async (deviceId = selected) => {
+  const preview = async (deviceId = selected, direction = rotation, resolution = quality) => {
     if (closing || live.opening || completed.current) return;
-    setError(''); touched.current = true;
-    const opened = await current.current.startCamera(deviceId || undefined, true);
+    setError(''); setPreviewFrame(null); touched.current = true;
+    const opened = await current.current.startCamera(deviceId || undefined, true, direction, resolution);
     if (!mounted.current) return;
     if (opened) await scan();
   };
@@ -217,19 +221,20 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
     if (closing || completed.current) return;
     setClosing(true); completed.current = true;
     const original = previous.current;
+    let restored = !!original.stream && original.stream === current.current.cameraStream && !current.current.opening;
     if (touched.current) {
       if (original.stream && original.deviceId) {
-        if (original.stream !== current.current.cameraStream || current.current.opening) await current.current.startCamera(original.deviceId, true);
+        if (!restored) restored = await current.current.startCamera(original.deviceId, true, original.preference?.rotation ?? 0, original.preference?.quality ?? null);
       } else current.current.stopCamera();
     }
     if (!mounted.current) return;
     publish('closed', { selectedDeviceId: original.preference?.deviceId ?? null,
-      activeDeviceId: original.stream && current.current.cameraStream ? current.current.selectedCameraId || null : null, error: undefined });
+      activeDeviceId: restored ? original.deviceId || null : null, error: undefined });
     close();
   };
   const save = () => {
     if (!previewReady || closing || completed.current) return;
-    try { saveCameraPreference({ deviceId: activeId, label: devices.find(device => device.id === activeId)?.label ?? '摄像头', profile: previous.current.preference?.profile ?? 'screen' }, cameraPreferenceScope); }
+    try { saveCameraPreference({ deviceId: activeId, label: devices.find(device => device.id === activeId)?.label ?? '摄像头', profile: previous.current.preference?.profile ?? 'screen', ...(rotation ? { rotation } : {}), ...(quality ? { quality } : {}) }, cameraPreferenceScope); }
     catch { setError('无法保存摄像头选择，请允许浏览器保存网站数据。'); return; }
     completed.current = true; publish('closed', { error: undefined, activeDeviceId: keepPreview ? activeId || null : null });
     if (!keepPreview) current.current.stopCamera();
@@ -238,11 +243,20 @@ export function TerminalCameraSettings({ request, live, report = ignoreCameraRep
   return <dialog ref={dialog} className="ex-terminal-camera" aria-labelledby="terminal-camera-title" onCancel={event => { event.preventDefault(); void cancel(); }}>
     <header><h2 id="terminal-camera-title"><Camera size={22} />摄像头</h2><button type="button" aria-label="取消摄像头设置" disabled={closing} onClick={() => void cancel()}><X size={22} /></button></header>
     <div className="ex-terminal-camera-preview">{live.cameraStream ? <StreamVideo stream={live.cameraStream} mirrored={live.mirrored} label="摄像头检测预览" onFirstFrame={setPreviewFrame} /> : <Camera size={44} />}</div>
-    <p className="ex-form-note">浏览器使用摄像头原始方向；旋转安装请使用原生镜端。</p>
     <div className="ex-terminal-camera-controls"><label>摄像头<select value={selected} disabled={live.opening || closing} onChange={event => { setSelected(event.target.value); void preview(event.target.value); }}>
       {!devices.some(device => device.id === selected) && <option value={selected}>{selected ? '已选摄像头未连接' : '选择摄像头'}</option>}
       {devices.map(device => <option key={device.id} value={device.id}>{device.label}</option>)}
     </select></label><button type="button" disabled={scanning || live.opening || closing} onClick={() => void scan()}><RefreshCw size={17} />重新检测</button></div>
+    <div className="ex-terminal-camera-controls"><label>摄像头分辨率<select aria-label="摄像头分辨率" value={quality ?? ''} disabled={live.opening || closing} onChange={event => {
+      const next = event.target.value;
+      if (next !== '' && !isComputerCameraResolution(next)) return;
+      setQuality(next || null); void preview(selected, rotation, next || null);
+    }}><option value="">默认</option>{CAMERA_RESOLUTION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+    <label>摄像头方向<select aria-label="摄像头方向" value={rotation} disabled={live.opening || closing} onChange={event => {
+      const next = Number(event.target.value);
+      if (next !== 0 && next !== 90 && next !== 180 && next !== 270) return;
+      setRotation(next); void preview(selected, next);
+    }}><option value={0}>默认</option><option value={90}>顺时针 90°</option><option value={180}>180°</option><option value={270}>逆时针 90°</option></select></label></div>
     {(error || live.cameraError) ? <p className="ex-terminal-camera-error" role="alert">{error || live.cameraError}</p> : <p role="status">{scanning ? '正在检测…' : live.opening ? '正在开启摄像头…' : previewReady ? '画面正常' : devices.length ? '选择摄像头预览' : '未检测到摄像头'}</p>}
     <footer><button type="button" disabled={closing} onClick={() => void cancel()}>取消</button>{!previewReady && <button type="button" disabled={live.opening || closing} onClick={() => void preview()}>预览</button>}<button className="is-primary" type="button" disabled={!previewReady || live.opening || closing} onClick={save}>保存</button></footer>
   </dialog>;

@@ -265,4 +265,106 @@ describe('planned continuous-session renewal in the mirror client', () => {
     pending.resolve(); expect(await updating).toBe(false); await flush();
     expect(f.deps.commitRenewal).not.toHaveBeenCalled();
   });
+
+  it('keeps a healthy connection reusable while renewal preparation is awaiting a plan', async () => {
+    const f = fixture(); const pending = deferred<{ renewalId: string }>();
+    f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
+    await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
+    const next = { ...f.input, lookId: 'second', generationNumber: 2, image: '/assets/second.png' };
+    // A switch can be accepted before the backend publishes state.live.renewal.
+    // The hook must retain this connection while its update waits for preparation.
+    expect(f.controller.canReuse(next)).toBe(true);
+    expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(f.events.stream).not.toHaveBeenCalledWith(null);
+  });
+
+  it.each(['EXHIBITION_STALE_GENERATION', 'EXHIBITION_RENEWAL_UNAVAILABLE'])(
+    'retains healthy output after pre-plan %s and retries on a later heartbeat', async code => {
+      const f = fixture();
+      f.deps.prepareRenewal.mockRejectedValueOnce(Object.assign(new Error('Renewal preparation raced the current selection'), { code }));
+      await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
+      expect(f.deps.prepareRenewal).toHaveBeenCalledOnce();
+      expect(f.sdk.disconnect).not.toHaveBeenCalled(); expect(f.deps.stop).not.toHaveBeenCalled();
+      expect(f.events.stream).not.toHaveBeenCalledWith(null); expect(f.deps.reportError).not.toHaveBeenCalled();
+      expect(f.deps.commitRenewal).not.toHaveBeenCalled(); expect(f.controller.canReuse(f.input)).toBe(true);
+      const pending = deferred<{ renewalId: string }>(); f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
+      f.due(); await vi.advanceTimersByTimeAsync(5_000);
+      expect(f.deps.prepareRenewal).toHaveBeenCalledTimes(2);
+      expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    },
+  );
+
+  it('applies an accepted outfit switch after a conflicting preparation settles without replacing the RTC session', async () => {
+    const f = fixture(); const pending = deferred<{ renewalId: string }>();
+    f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
+    await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
+    let settled = false;
+    const updating = f.controller.update({ ...f.input, lookId: 'second', generationNumber: 2, image: '/assets/second.png' })
+      .finally(() => { settled = true; });
+    await flush(); expect(settled).toBe(false); expect(f.deps.updateCondition).not.toHaveBeenCalled();
+    pending.reject(Object.assign(new Error('体验状态已更新，请保留当前会话。'), { code: 'EXHIBITION_STALE_GENERATION' }));
+    expect(await updating).toBe(true); await flush();
+    expect(f.deps.updateCondition).toHaveBeenCalledOnce(); expect(f.sdk.set).toHaveBeenCalledTimes(2);
+    expect(f.deps.conditionApplied).toHaveBeenCalledOnce();
+    expect(f.sdk.disconnect).not.toHaveBeenCalled(); expect(f.deps.stop).not.toHaveBeenCalled();
+    expect(f.events.stream).not.toHaveBeenCalledWith(null); expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+  });
+
+  it('does not apply a queued outfit update to the old connection after preparation succeeds', async () => {
+    const f = fixture(); const pending = deferred<{ renewalId: string }>();
+    f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
+    await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
+    let settled = false;
+    const updating = f.controller.update({ ...f.input, lookId: 'second', generationNumber: 2, image: '/assets/second.png' })
+      .finally(() => { settled = true; });
+    await flush(); expect(settled).toBe(false); expect(f.deps.updateCondition).not.toHaveBeenCalled();
+    pending.resolve({ renewalId: 'planned-renewal' });
+    expect(await updating).toBe(false); await flush();
+    expect(f.deps.updateCondition).not.toHaveBeenCalled(); expect(f.sdk.set).toHaveBeenCalledOnce();
+    expect(f.deps.commitRenewal).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('drains an earlier update before renewal and a later update after a conflict without a dependency cycle', async () => {
+    const f = fixture(); const pending = deferred<void>();
+    f.deps.prepareRenewal.mockRejectedValueOnce(Object.assign(new Error('A newer outfit was accepted'), { code: 'EXHIBITION_STALE_GENERATION' }));
+    await f.ready(); await vi.advanceTimersByTimeAsync(104_000);
+    f.sdk.set.mockImplementationOnce(() => pending.promise);
+    const first = f.controller.update({ ...f.input, lookId: 'second', generationNumber: 2, image: '/assets/second.png' });
+    await flush(); await vi.advanceTimersByTimeAsync(1_000);
+    const second = f.controller.update({ ...f.input, lookId: 'third', generationNumber: 3, image: '/assets/third.png' });
+    await flush(); expect(f.deps.prepareRenewal).not.toHaveBeenCalled();
+    expect(f.deps.updateCondition).toHaveBeenCalledOnce();
+    pending.resolve(); await flush();
+    expect(await first).toBe(true); expect(await second).toBe(true);
+    expect(f.deps.prepareRenewal).toHaveBeenCalledExactlyOnceWith('old-credential', { deviceId: 'screen-a', sessionNumber: 1, generationNumber: 2 }, expect.any(AbortSignal));
+    expect(f.deps.updateCondition).toHaveBeenCalledTimes(2); expect(f.deps.conditionApplied).toHaveBeenCalledTimes(2);
+    expect(f.sdk.set).toHaveBeenCalledTimes(3); expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(f.deps.stop).not.toHaveBeenCalled(); expect(f.events.stream).not.toHaveBeenCalledWith(null);
+  });
+
+  it.each(['EXHIBITION_STALE_GENERATION', 'EXHIBITION_RENEWAL_UNAVAILABLE'])(
+    'still reports %s as a failure after a renewal plan was accepted and cleanup started', async code => {
+      const f = fixture(); f.deps.commitRenewal.mockRejectedValueOnce(Object.assign(new Error('Planned renewal no longer valid'), { code }));
+      await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
+      expect(f.deps.prepareRenewal).toHaveBeenCalledOnce(); expect(f.deps.commitRenewal).toHaveBeenCalledOnce();
+      expect(f.sdk.disconnect).toHaveBeenCalledOnce(); expect(f.deps.stop).toHaveBeenCalledOnce();
+      expect(f.events.status).toHaveBeenCalledWith('error', expect.any(String)); expect(f.deps.reportError).toHaveBeenCalledOnce();
+      expect(f.controller.canReuse(f.input)).toBe(false);
+    },
+  );
+
+  it('does not resume an outfit update waiting on renewal after the user manually stops', async () => {
+    const f = fixture(); const pending = deferred<{ renewalId: string }>();
+    f.deps.prepareRenewal.mockImplementationOnce(() => pending.promise);
+    await f.ready(); await vi.advanceTimersByTimeAsync(105_000);
+    const updating = f.controller.update({ ...f.input, lookId: 'second', generationNumber: 2, image: '/assets/second.png' });
+    await flush(); await f.controller.stop();
+    expect(f.deps.prepareRenewal.mock.calls[0][2].aborted).toBe(true);
+    pending.resolve({ renewalId: 'planned-renewal' });
+    expect(await updating).toBe(false); await flush();
+    expect(f.deps.updateCondition).not.toHaveBeenCalled(); expect(f.sdk.set).toHaveBeenCalledOnce();
+    expect(f.deps.commitRenewal).not.toHaveBeenCalled(); expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.sdk.disconnect).toHaveBeenCalledOnce(); expect(f.deps.stop).toHaveBeenCalledOnce();
+  });
 });

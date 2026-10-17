@@ -6,8 +6,9 @@ import { attachExhibitionStream } from '../src/exhibition/LiveCameraPanel';
 const controllers: ExhibitionLiveConnection[] = [];
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(yes => { resolve = yes; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 async function flush() { for (let i = 0; i < 30; i++) await Promise.resolve(); }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10000); });
@@ -129,15 +130,61 @@ describe('exhibition live client lifecycle', () => {
     expect(f.deps.readyLookup).not.toHaveBeenCalled();
     expect(f.sdk.set).not.toHaveBeenCalled();
   });
-  it('disconnects a late SDK connection without generating', async () => {
+  it('revokes immediately but confirms stop only after a late SDK has disconnected', async () => {
     const f = fixture();
     const pending = deferred<SdkSession>();
+    const disconnecting = deferred<void>();
     f.deps.connect.mockImplementationOnce(() => pending.promise);
+    vi.mocked(f.sdk.disconnect).mockImplementationOnce(() => disconnecting.promise);
     const starting = f.controller.start(); await flush();
-    await f.controller.stop(); pending.resolve(f.sdk); await starting;
+    const finished = vi.fn(); const stopping = f.controller.stop().then(finished); await flush();
+    expect(f.deps.stop).toHaveBeenCalledExactlyOnceWith(f.created.id);
+    expect(f.cloneStop).toHaveBeenCalledOnce(); expect(f.originalStop).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled(); expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    pending.resolve(f.sdk); await flush();
+    expect(finished).not.toHaveBeenCalled();
     expect(f.sdk.disconnect).toHaveBeenCalledTimes(1);
+    disconnecting.resolve(); await Promise.all([stopping, starting]);
+    expect(finished).toHaveBeenCalledExactlyOnceWith(true);
+    expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.deps.link).not.toHaveBeenCalled();
     expect(f.sdk.set).not.toHaveBeenCalled();
     expect(f.cloneStop).toHaveBeenCalledTimes(1);
+  });
+  it('keeps a timed-out SDK bootstrap unconfirmed until a retry drains its late connection', async () => {
+    const f = fixture(); const pending = deferred<SdkSession>(); const disconnecting = deferred<void>();
+    f.deps.connect.mockImplementationOnce(() => pending.promise);
+    vi.mocked(f.sdk.disconnect).mockImplementationOnce(() => disconnecting.promise);
+    const starting = f.controller.start(); await flush();
+    const stopping = f.controller.stop(); await vi.advanceTimersByTimeAsync(15_000);
+    expect(await stopping).toBe(false);
+    expect(f.events.status).toHaveBeenCalledWith('error', '停止状态未确认，请联系工作人员。');
+    expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(f.originalStop).not.toHaveBeenCalled();
+
+    const finished = vi.fn(); const retrying = f.controller.stop().then(finished); await flush();
+    expect(finished).not.toHaveBeenCalled();
+    pending.resolve(f.sdk); await flush();
+    expect(f.sdk.disconnect).toHaveBeenCalledOnce(); expect(finished).not.toHaveBeenCalled();
+    disconnecting.resolve(); await Promise.all([retrying, starting]);
+    expect(finished).toHaveBeenCalledExactlyOnceWith(true);
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.deps.link).not.toHaveBeenCalled(); expect(f.sdk.set).not.toHaveBeenCalled();
+  });
+  it('waits for a rejected bootstrap even when its error callback fires before connect returns', async () => {
+    const f = fixture(); const pending = deferred<SdkSession>();
+    const error = { code: 'WEB_RTC_ERROR', details: { reason_code: 'local_publish_failed', failure_stage: 'publish' } };
+    f.deps.connect.mockImplementationOnce((_source, _local, callbacks) => {
+      callbacks.onError('publishing failed', error);
+      return pending.promise;
+    });
+    const starting = f.controller.start(); await flush();
+    const finished = vi.fn(); const stopping = f.controller.stop().then(finished); await flush();
+    expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.deps.reportError).toHaveBeenCalledOnce();
+    expect(finished).not.toHaveBeenCalled();
+    pending.reject(error); await Promise.all([starting, stopping]); await flush();
+    expect(finished).toHaveBeenCalledExactlyOnceWith(true);
+    expect(f.sdk.disconnect).not.toHaveBeenCalled(); expect(f.sdk.set).not.toHaveBeenCalled();
+    expect(f.deps.reportError).toHaveBeenCalledOnce(); expect(f.originalStop).not.toHaveBeenCalled();
   });
   it('does not heartbeat or connect while allocation is unresolved and stops a late credential', async () => {
     const f = fixture(); const pending = deferred<typeof f.created>(); f.deps.create.mockImplementationOnce(() => pending.promise);
@@ -217,7 +264,7 @@ describe('exhibition live client lifecycle', () => {
     expect(report.reason).toBe('rtc_failed');
     expect(report.message).toContain('local_publish_failed'); expect(report.message).toContain('publish');
     expect(report.message).not.toMatch(/tk-secret|sk-secret|example\.test/);
-    expect(f.events.status).toHaveBeenCalledWith('error', '摄像头画面未能上传，请检查镜端网络后重试。');
+    expect(f.events.status).toHaveBeenCalledWith('error', '视频推流启动失败，请重新连接。');
     expect(f.deps.stop).toHaveBeenCalledOnce(); expect(f.deps.create).toHaveBeenCalledOnce();
     expect(f.sdk.set).not.toHaveBeenCalled(); expect(f.originalStop).not.toHaveBeenCalled();
   });
@@ -225,6 +272,9 @@ describe('exhibition live client lifecycle', () => {
   it.each([
     [{ code: 'INVALID_API_KEY' }, 'provider_rejected'],
     [{ code: 'SESSION_ERROR', details: { http_status: 403 } }, 'provider_rejected'],
+    [{ code: 'SESSION_ERROR', message: 'POINTS_INSUFFICIENT', details: { failure_stage: 'rtc' } }, 'provider_rejected'],
+    [{ code: 'API_ERROR', message: '用户积分余额不足', details: { failure_stage: 'rtc_connect' } }, 'provider_rejected'],
+    [{ code: 'API_ERROR', httpStatus: 403 }, 'provider_rejected'],
     [{ code: 'WEB_RTC_ERROR', details: { reason_code: 'local_outbound_track_ended' } }, 'camera_lost'],
     [{ code: 'UNKNOWN_ERROR' }, 'rtc_failed'],
   ])('classifies early connection failure from evidence: %j', async (error, reason) => {

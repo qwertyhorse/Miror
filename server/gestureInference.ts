@@ -2,11 +2,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { REMOTE_GESTURE_MAX_FRAME_BYTES, remoteGestureI420ByteLength,
+  type RemoteGestureI420Metadata } from '../shared/remoteGestures.ts';
 
 export interface GestureInferenceSettings {
   minHandDetectionConfidence: number;
   minHandPresenceConfidence: number;
   minTrackingConfidence: number;
+  inputLongEdge?: number;
 }
 export interface GestureInferenceResult {
   hands: Array<{ handedness: string; landmarks: Array<{ x: number; y: number; z: number }> }>;
@@ -16,7 +19,7 @@ export interface GestureInferenceResult {
   inferenceMs: number;
 }
 export interface GestureInference {
-  infer(jpeg: Buffer, timestamp: number, settings: GestureInferenceSettings): Promise<GestureInferenceResult>;
+  infer(image: Buffer, timestamp: number, settings: GestureInferenceSettings, rawFrame?: RemoteGestureI420Metadata): Promise<GestureInferenceResult>;
   close(): Promise<void>;
 }
 export class GestureInferenceError extends Error {
@@ -32,7 +35,6 @@ export interface GestureInferenceOptions {
   closeGraceMs?: number;
 }
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
-const MAX_IMAGE_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const error = (code: string, message: string) => new GestureInferenceError(code, message);
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -145,7 +147,7 @@ export async function createGestureInference(options: GestureInferenceOptions = 
       if (reply.type === 'result' && validResult(reply.result)) {
         pending = undefined; clearTimeout(active.timer); active.resolve(reply.result);
       } else if (reply.type === 'error' && reply.code === 'INVALID_IMAGE') {
-        rejectPending(error('INVALID_IMAGE', 'Only complete JPEG frames of at most 960 × 960 are supported.'));
+        rejectPending(error('INVALID_IMAGE', 'Gesture frame pixels or dimensions are invalid.'));
       } else {
         fail(error(reply.type === 'error' ? 'INFERENCE_FAILED' : 'RUNTIME_PROTOCOL', 'Gesture inference failed.')); return;
       }
@@ -153,24 +155,33 @@ export async function createGestureInference(options: GestureInferenceOptions = 
   });
   try { await startup; } catch (reason) { await close(); throw reason; }
   return {
-    infer(jpeg, timestamp, settings) {
+    infer(image, timestamp, settings, rawFrame) {
       if (closed || !ready) return Promise.reject(error('RUNTIME_CLOSED', 'Gesture runtime is closed.'));
       if (pending) return Promise.reject(error('INFERENCE_BUSY', 'Gesture runtime is already processing a frame.'));
-      if (!Buffer.isBuffer(jpeg) || jpeg.length < 4 || jpeg.length > MAX_IMAGE_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 || jpeg[jpeg.length - 2] !== 0xff || jpeg[jpeg.length - 1] !== 0xd9) {
-        return Promise.reject(error('INVALID_IMAGE', 'A JPEG frame of at most 256 KiB is required.'));
+      if (!Buffer.isBuffer(image) || (rawFrame === undefined
+        ? image.length < 4 || image.length > REMOTE_GESTURE_MAX_FRAME_BYTES || image[0] !== 0xff || image[1] !== 0xd8 || image[image.length - 2] !== 0xff || image[image.length - 1] !== 0xd9
+        : remoteGestureI420ByteLength(rawFrame) !== image.length)) {
+        return Promise.reject(error('INVALID_IMAGE', 'A bounded JPEG or complete I420 frame is required.'));
       }
       if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp <= previousTimestamp) return Promise.reject(error('INVALID_TIMESTAMP', 'Gesture frame timestamps must increase.'));
-      if (!settings || ![settings.minHandDetectionConfidence, settings.minHandPresenceConfidence, settings.minTrackingConfidence].every(value => finite(value) && value >= 0 && value <= 1)) {
-        return Promise.reject(error('INVALID_SETTINGS', 'Gesture confidence settings must be between zero and one.'));
+      if (!settings || ![settings.minHandDetectionConfidence, settings.minHandPresenceConfidence, settings.minTrackingConfidence].every(value => finite(value) && value >= 0 && value <= 1)
+        || (settings.inputLongEdge !== undefined && ![480, 720, 960].includes(settings.inputLongEdge))) {
+        return Promise.reject(error('INVALID_SETTINGS', 'Gesture inference settings are invalid.'));
       }
       previousTimestamp = timestamp;
       return new Promise<GestureInferenceResult>((yes, no) => {
         const id = ++nextId;
         pending = { id, resolve: yes, reject: no,
           timer: setTimeout(() => fail(error('INFERENCE_TIMEOUT', 'Gesture inference timed out.')), inferenceTimeoutMs) };
-        child.stdin.write(JSON.stringify({ id, type: 'infer', timestamp, settings, jpeg: jpeg.toString('base64') }) + '\n', failure => {
+        const onWrite = (failure: Error | null | undefined) => {
           if (failure) fail(error('RUNTIME_EXITED', 'Gesture runtime input closed.'));
-        });
+        };
+        if (rawFrame) {
+          // One pending frame owns the pipe; preserve binary pixels without a base64-sized copy.
+          const frame = { ...rawFrame, byteLength: image.length };
+          child.stdin.write(JSON.stringify({ id, type: 'infer', timestamp, settings, frame }) + '\n', onWrite);
+          child.stdin.write(image, onWrite);
+        } else child.stdin.write(JSON.stringify({ id, type: 'infer', timestamp, settings, jpeg: image.toString('base64') }) + '\n', onWrite);
       });
     },
     close,

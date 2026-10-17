@@ -24,6 +24,7 @@ internal class NativeCameraSettingsPanel(
 ) : NativeCameraSettingsView(context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var operation: Job? = null
+    private val previewRecovery = NativeCameraPreviewRecovery()
     private var epoch = 0L
     private var closed = false
     private var initialized = false
@@ -143,25 +144,48 @@ internal class NativeCameraSettingsPanel(
                 report("ready", "摄像头已断开，请重新检测")
             }
         }
-        controller.preview(cameraDeviceId = selected.id, target = preview, cameraRotationDegrees = rotationDegrees,
-            captureSelection = captureSelection)
+        var recovered = false
+        try {
+            controller.preview(cameraDeviceId = selected.id, target = preview, cameraRotationDegrees = rotationDegrees,
+                captureSelection = captureSelection)
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            if (closed || owner != epoch) throw error
+            val fallback = previewRecovery.fallback(owner, selected, captureSelection, controller.hasReleaseFailure)
+                ?: throw error
+            // preview() releases its failed lease before throwing. Confirm cleanup and ownership
+            // before changing the choice; a stuck/failed native release must never trigger a retry.
+            controller.disconnect()
+            currentCoroutineContext().ensureActive()
+            if (closed || owner != epoch) throw error
+            captureSelection = fallback
+            updateCaptureChoices(selected)
+            message("恢复 ${fallback.label}…")
+            controller.preview(cameraDeviceId = selected.id, target = preview, cameraRotationDegrees = rotationDegrees,
+                captureSelection = captureSelection)
+            recovered = true
+        }
+        currentCoroutineContext().ensureActive()
         // The shared controller defaults to the full-screen mirror's fill mode.
         preview.videoContentMode = VideoContentMode.FIT
         if (!closed && owner == epoch) {
             previewedDeviceId = selected.id
             val actual = controller.captureInfo
+            previewRecovery.remember(owner, selected, actual)
             val requested = captureSelection.size
             val sizeMessage = actual?.let {
                 "实际 ${it.width}×${it.height}" + if (requested != null &&
                     (requested.width != it.width || requested.height != it.height))
                     "（请求 ${requested.width}×${requested.height}）" else ""
             }
-            message(sizeMessage ?: "已连接 · ${selected.label}")
+            message((if (recovered) "已恢复 · " else "") + (sizeMessage ?: "已连接 · ${selected.label}"))
             report("preview")
         }
     }
 
     private fun updateCaptureChoices(device: NativeCameraDevice?) {
+        if (device != null) captureSelection = captureSelection.normalized(device)
         val available = device?.let { NativeCameraCaptureSelection.options(it) }.orEmpty()
             .map(::NativeCameraCaptureSelection)
         val nextOptions = listOf(NativeCameraCaptureSelection.Automatic) + available
@@ -178,7 +202,8 @@ internal class NativeCameraSettingsPanel(
     }
 
     private fun launchOperation(action: suspend () -> Unit) {
-        val owner = ++epoch
+        if (closed) return
+        val owner = previewRecovery.beginOperation().also { epoch = it }
         previewedDeviceId = null
         val previous = operation
         previous?.cancel()
@@ -189,6 +214,8 @@ internal class NativeCameraSettingsPanel(
                 ensureActive()
                 controller.onError = null
                 controller.disconnect()
+                ensureActive()
+                if (closed || owner != epoch) return@launch
                 action()
             } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) {
@@ -206,7 +233,7 @@ internal class NativeCameraSettingsPanel(
     suspend fun close() {
         if (closed) return
         closed = true
-        epoch++
+        epoch = previewRecovery.beginOperation()
         try {
             operation?.cancelAndJoin()
             // No other engine may resume until this has completed, including on Activity.onStop.

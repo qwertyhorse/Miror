@@ -42,6 +42,18 @@ fun main() = runBlocking {
         }
     }
     try {
+        for ((region, model) in listOf("cn" to "x2.1.1-preview-cn", "global" to "x2.1.1-preview-us")) {
+            RoundFixture("clothx", prebound = true, providerRegion = region).use { fixture ->
+                val controller = NativeXmaxController(fixture.events)
+                val running = startRound(fixture, controller)
+                try {
+                    withTimeout(5_000) { running.firstFrame.await() }
+                    verify(controller.connectedRegion == region && controller.connectedModel == model,
+                        "Negotiated model or region changed before RTC connect")
+                    fixture.checkHandler()
+                } finally { running.job.cancelAndJoin() }
+            }
+        }
         RoundFixture("clothx", published = false).use { fixture ->
             val running = startRound(fixture, NativeXmaxController(fixture.events))
             try {
@@ -187,6 +199,9 @@ fun main() = runBlocking {
             } finally { running.job.cancelAndJoin() }
         }
         val invalidPrebound = listOf<Pair<String, (JSONObject) -> Unit>>(
+            "legacy model" to { it.put("model", "x2.0"); Unit },
+            "wrong model region" to { it.put("model", "x2.1.1-preview-us"); Unit },
+            "missing model" to { it.remove("model"); Unit },
             "reference scope" to { it.put("referenceScope", ""); Unit },
             "reference URL" to { it.put("refImageUrl", "http://supplier-fixture.invalid/reference.png"); Unit },
             "reference asset" to { it.put("referenceAsset", "/assets/exhibition/another.png"); Unit },
@@ -670,6 +685,7 @@ private class RoundFixture(
     separateReference: Boolean = false,
     expiry: String = Instant.now().plusSeconds(120).toString(),
     private val continuous: Boolean = false,
+    private val providerRegion: String = "cn",
 ) : AutoCloseable {
     val events = CopyOnWriteArrayList<String>()
     val imagePaths = CopyOnWriteArrayList<String>()
@@ -711,7 +727,8 @@ private class RoundFixture(
     private val record = JSONObject().put("id", SESSION_ID).put("status", "active")
         .put("sourceKind", if (mode == "mox") "photo" else "camera")
         .put("referenceAsset", if (noReference) "" else if (separateReference) "/assets/exhibition/reference.png" else look.getString("image"))
-        .put("referenceScope", "fixture-scope").put("referenceVersion", 0).put("refImageUrl", "").put("providerRegion", "cn")
+        .put("referenceScope", "fixture-scope").put("referenceVersion", 0).put("refImageUrl", "").put("providerRegion", providerRegion)
+        .put("model", if (providerRegion == "cn") "x2.1.1-preview-cn" else "x2.1.1-preview-us")
         .put("expiresAt", expiry)
         .put("exhibition", JSONObject().put("mirrorId", "default").put("deviceId", "device-fixture")
             .put("lookId", "commute").put("mode", mode).put("prompt", NativeRoundMetadata.prompt(look))
@@ -747,6 +764,7 @@ private class RoundFixture(
                 check(exchange.requestMethod == "POST")
                 if (published) check(exchange.requestHeaders.getFirst("X-Miror-Material") == "catalog-v2")
                 val body = exchange.body()
+                check(body.getString("xmaxModelFamily") == "x2.1.1-preview")
                 check(body.getString("deviceId") == "device-fixture" && body.getString("lookId") == "commute")
                 check(body.getLong("generationNumber") == 3L && body.getLong("expectedRevision") == 4L)
                 check(body.getString("contentVersion") == "fixture-version")
@@ -762,7 +780,7 @@ private class RoundFixture(
                 }
                 createEntered.countDown()
                 if (holdCreate) check(releaseCreate.await(5, TimeUnit.SECONDS))
-                val created = synchronized(lock) { JSONObject(record.toString()).put("token", "tk-fixture").put("model", "x2.0") }
+                val created = synchronized(lock) { JSONObject(record.toString()).put("token", "tk-fixture") }
                 mutateCreated?.invoke(created)
                 // A cancelled request intentionally discards this reply after allocation.
                 try { exchange.json(created, 201) } catch (error: Exception) { if (!holdCreate) throw error }

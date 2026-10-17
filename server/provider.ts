@@ -1,5 +1,5 @@
 import { ApiError, type IssuedKey, type KeyStatus, type Provider, type ProviderSessionStatus } from './types.ts';
-import type { XmaxRegion } from '../shared/xmax.ts';
+import { isXmaxRealtimeModel, xmaxNativeModel, type XmaxRegion, type XmaxRealtimeModel } from '../shared/xmax.ts';
 
 const BASE: Record<XmaxRegion, string> = {
   cn: 'https://api.xmaxai.com/open/api/v1',
@@ -21,18 +21,23 @@ function date(value: unknown): string {
 
 /** Only the documented XMax Open API; no guessed fallback models or endpoints. */
 export class XmaxProvider implements Provider {
-  constructor(private apiKey: string, private readonly fetcher: typeof fetch = fetch, readonly region: XmaxRegion = 'global') {
+  constructor(private apiKey: string, private readonly fetcher: typeof fetch = fetch, readonly region: XmaxRegion = 'global', private readonly model?: XmaxRealtimeModel) {
     if (region !== 'cn' && region !== 'global') throw new ApiError('INVALID_PROVIDER_REGION', 'XMAX 服务区域无效。');
+    if (model !== undefined && (!isXmaxRealtimeModel(model) || model !== xmaxNativeModel(region))) throw new ApiError('INVALID_PROVIDER_MODEL', 'XMAX 模型与服务区域不匹配。');
   }
   get configured(): boolean { return /^uk-[A-Za-z0-9_-]+$/.test(this.apiKey); }
   credentialSnapshot(): string { return this.apiKey; }
   forCredential(apiKey: string, region: XmaxRegion = this.region): XmaxProvider { return new XmaxProvider(apiKey, this.fetcher, region); }
+  forModel(model: XmaxRealtimeModel): XmaxProvider { return new XmaxProvider(this.apiKey, this.fetcher, this.region, model); }
   setApiKey(apiKey: string): void { this.apiKey = apiKey; }
   private async request(path: string, method: string, credential: string, body?: JsonObject): Promise<JsonObject> {
     if (!this.configured) throw new ApiError('MISSING_API_KEY', '尚未配置 XMax 服务端凭证。', 503);
     let response: Response;
     try {
-      response = await this.fetcher(`${BASE[this.region]}${path}`, {
+      // SDK 1.0.9 selects this model-specific endpoint for create/heartbeat/close.
+      // Freeze the same choice for temporary-key issuance, verification and revocation.
+      const base = this.model === 'x2.1.1-preview-cn' ? 'https://cloud.xmax.22duck.cn/open/api/v1' : BASE[this.region];
+      response = await this.fetcher(`${base}${path}`, {
         method, headers: { 'X-Api-Key': credential, 'Content-Type': 'application/json' },
         body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(12_000), redirect: 'error',
       });

@@ -2,7 +2,7 @@ import type { XmaxRegion } from '../../shared/xmax';
 
 // Share the same import with upload/connect, so entry preparation warms their code too.
 export function exhibitionSdk(region: XmaxRegion = 'global') {
-  return region === 'cn' ? import('@xmaxai/sdk') : import('@xmaxai/sdk-global');
+  return import('./xmaxWebSdk').then(sdk => sdk.createExhibitionSdk(region));
 }
 
 /** Code + HTTPS transport hint only. Never creates a client, credential, RTC room or generation. */

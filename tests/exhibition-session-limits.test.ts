@@ -346,10 +346,34 @@ describe('continuous experience renewal', () => {
     } finally { server.close(); await once(server, 'close'); }
   });
 
-  it.each(['deviceId', 'sessionNumber', 'generationNumber'] as const)('rejects an incorrect %s without stopping the healthy stream', async field => {
+  it.each(['sessionId', 'deviceId', 'sessionNumber'] as const)('rejects an incorrect %s without stopping the healthy stream', async field => {
     const context = await runningContinuous(); due(context);
-    await expect(prepare(context.exhibition, context.session.id, { [field]: field === 'deviceId' ? 'other-screen' : 999 })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+    const id = field === 'sessionId' ? 'other-session' : context.session.id;
+    const overrides: Record<string, unknown> = { generationNumber: context.exhibition.get().generationNumber - 1 };
+    if (field !== 'sessionId') overrides[field] = field === 'deviceId' ? 'other-screen' : 999;
+    await expect(prepare(context.exhibition, id, overrides)).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
     expect(context.exhibition.get().live?.renewal).toBeUndefined(); expect(context.deactivate).not.toHaveBeenCalled();
+    expect(context.store.get(context.session.id).status).toBe('active');
+  });
+
+  it.each(['generating', 'showcase'] as const)('rejects a stale renewal generation after a same-connection outfit switch while %s', async phase => {
+    const context = await runningContinuous(); const { exhibition, session, store, issue, deactivate } = context; due(context);
+    const before = exhibition.get();
+    const switching = exhibition.command({ action: 'switch', lookId: 'evening' });
+    const intent = { deviceId, lookId: 'evening', sessionNumber: switching.sessionNumber, generationNumber: switching.generationNumber };
+    if (phase === 'showcase') {
+      const updated = await exhibition.updateLiveCondition(session.id, { ...intent, bindingId: exhibition.readyReference('evening', true)!.bindingId });
+      await exhibition.liveConditionApplied(session.id, { ...intent, referenceVersion: updated.referenceVersion });
+    }
+    const current = exhibition.get();
+    expect(current).toMatchObject({ phase, sessionNumber: before.sessionNumber, generationNumber: before.generationNumber + 1,
+      live: { sessionId: session.id, deviceId, status: 'running' } });
+    await expect(prepare(exhibition, session.id, { generationNumber: before.generationNumber })).rejects.toMatchObject({ code: 'EXHIBITION_STALE_GENERATION' });
+    await exhibition.sweepLive();
+    expect(exhibition.get()).toEqual(current); expect(exhibition.get().live?.renewal).toBeUndefined();
+    expect(store.get(session.id)).toMatchObject({ status: 'active', providerSessionId: 'ums-continuous-test' });
+    expect(issue).toHaveBeenCalledTimes(1); expect(deactivate).not.toHaveBeenCalled();
+    if (phase === 'showcase') expect(await prepare(exhibition, session.id)).toHaveProperty('renewalId');
   });
 
   it.each(['end', 'idle', 'pause'] as const)('never resumes after a manual %s during renewal', async action => {
@@ -384,11 +408,14 @@ describe('continuous experience renewal', () => {
     }
   });
 
-  it('pauses a lost handoff, and preserves a failed new issuance without trying another segment', async () => {
+  it('keeps a continuous handoff for its original owner, but preserves a failed new issuance without guessing its outcome', async () => {
     const context = await runningContinuous(); const { exhibition, service, session, advance, issue } = context; due(context);
     const { renewalId } = await prepare(exhibition, session.id); await service.stop(session.id);
     await exhibition.commitLiveRenewal(session.id, { deviceId, renewalId }); advance(20_000);
-    await expect(create(exhibition)).rejects.toMatchObject({ code: 'EXHIBITION_INVALID_PHASE' }); expect(issue).toHaveBeenCalledTimes(1);
+    expect(exhibition.get()).toMatchObject({ phase: 'generating', live: null, lifecycle: { state: 'active', ownerDeviceId: deviceId } });
+    await expect(create(exhibition, { deviceId: 'another-handoff-screen' })).rejects.toMatchObject({ code: 'EXHIBITION_OWNER_MISMATCH' });
+    expect(issue).toHaveBeenCalledTimes(1);
+    await create(exhibition); expect(issue).toHaveBeenCalledTimes(2);
     const failed = await runningContinuous(); due(failed);
     const plan = await prepare(failed.exhibition, failed.session.id); await failed.service.stop(failed.session.id);
     await failed.exhibition.commitLiveRenewal(failed.session.id, { deviceId, ...plan });

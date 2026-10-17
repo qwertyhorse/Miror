@@ -75,10 +75,13 @@ export async function prepareLaunchRuntime(root, options = {}) {
   let movedPrevious = false;
   try {
     await mkdir(staging, { mode: 0o700 });
-    for (const name of ['dist', 'server', 'shared', 'scripts', 'seed', 'node_modules']) {
+    for (const name of ['dist', 'server', 'src', 'shared', 'scripts', 'runtime', 'seed', 'node_modules']) {
       await cp(resolve(root, name), resolve(staging, name), { recursive: true, dereference: true, preserveTimestamps: true });
     }
-    for (const name of ['package.json', 'package-lock.json', '.env.example']) await copyFile(resolve(root, name), resolve(staging, name));
+    for (const name of ['package.json', 'package-lock.json', 'tsconfig.json', '.env.example']) await copyFile(resolve(root, name), resolve(staging, name));
+    // Vite copies public model assets into dist; inference still resolves their
+    // source paths. Keep both paths inside the published application.
+    await symlink('dist', resolve(staging, 'public'), 'dir');
     await symlink('../data', resolve(staging, '.data'), 'dir');
     await symlink('../environment.env', resolve(staging, '.env'), 'file');
     if (await exists(runtime.app)) { await rename(runtime.app, previous); movedPrevious = true; }

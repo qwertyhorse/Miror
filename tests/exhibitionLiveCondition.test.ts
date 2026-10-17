@@ -76,6 +76,41 @@ describe('same-session exhibition condition changes', () => {
     expect(f.originalStop).not.toHaveBeenCalled(); expect(f.cloneStop).not.toHaveBeenCalled();
   });
 
+  it('keeps the new outfit and session when a previous task recording completes after a switch', async () => {
+    const f = fixture(); await f.ready();
+    expect(await f.controller.update(f.next('second'))).toBe(true);
+    f.deps.connect.mock.calls[0][2].onRoomEvent({ event: 'video_completed', uid: 'first-task', session_uid: 'first-task' });
+    await flush();
+    expect(f.controller.stopped).toBe(false); expect(f.controller.key).toBe('default:1:2:second');
+    expect(f.events.stream).toHaveBeenLastCalledWith(f.output); expect(f.events.status).toHaveBeenLastCalledWith('running');
+    expect(await f.controller.update(f.next('third', 3))).toBe(true);
+    expect(f.deps.conditionApplied).toHaveBeenLastCalledWith('same-credential', expect.objectContaining({ lookId: 'third', generationNumber: 3, referenceVersion: 3 }), expect.any(AbortSignal));
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.deps.firstFrame).toHaveBeenCalledOnce(); expect(f.sdk.set).toHaveBeenCalledTimes(3);
+    expect(f.deps.stop).not.toHaveBeenCalled(); expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.sdk.disconnect).not.toHaveBeenCalled(); expect(f.cloneStop).not.toHaveBeenCalled();
+    expect(f.originalStop).not.toHaveBeenCalled(); expect(f.events.stream).not.toHaveBeenCalledWith(null);
+  });
+
+  it('finishes a pending outfit switch when a previous task recording completes during SDK set', async () => {
+    const f = fixture(); await f.ready();
+    const pending = deferred<void>(); f.sdk.set.mockImplementationOnce(() => pending.promise);
+    const updating = f.controller.update(f.next('second')); await flush();
+    expect(f.sdk.set).toHaveBeenCalledTimes(2); expect(f.deps.conditionApplied).not.toHaveBeenCalled();
+    f.deps.connect.mock.calls[0][2].onRoomEvent({ event: 'video_completed', uid: 'first-task', session_uid: 'first-task' });
+    await flush();
+    expect(f.controller.stopped).toBe(false);
+    expect(f.deps.updateCondition.mock.calls[0][2].aborted).toBe(false);
+    expect(f.events.stream).toHaveBeenLastCalledWith(f.output);
+    pending.resolve(); expect(await updating).toBe(true);
+    expect(f.deps.conditionApplied).toHaveBeenCalledExactlyOnceWith('same-credential', expect.objectContaining({ lookId: 'second', generationNumber: 2, referenceVersion: 2 }), expect.any(AbortSignal));
+    expect(f.events.status).toHaveBeenLastCalledWith('running');
+    expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
+    expect(f.deps.stop).not.toHaveBeenCalled(); expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.sdk.disconnect).not.toHaveBeenCalled(); expect(f.cloneStop).not.toHaveBeenCalled();
+    expect(f.originalStop).not.toHaveBeenCalled(); expect(f.events.stream).not.toHaveBeenCalledWith(null);
+  });
+
   it('does not preupload neighbours and resolves foreground choice once on the backend', async () => {
     const f = fixture('clothx', ['/assets/second.png']); await f.ready();
     expect(f.deps.readyLookup).not.toHaveBeenCalled();
@@ -151,6 +186,30 @@ describe('same-session exhibition condition changes', () => {
     expect(f.deps.create).toHaveBeenCalledOnce(); expect(f.deps.connect).toHaveBeenCalledOnce();
     expect(f.sdk.set).toHaveBeenCalledTimes(101); expect(f.deps.stop).not.toHaveBeenCalled();
   });
+  it.each(['POINTS_INSUFFICIENT', '用户积分余额不足'])('stops an explicitly rejected condition without retrying it as an uncertain command: %s', async message => {
+    const f = fixture(); await f.ready();
+    f.sdk.set.mockRejectedValueOnce(Object.assign(new Error(message), { code: 'API_ERROR' }));
+    expect(await f.controller.update(f.next('second'))).toBe(false);
+    expect(f.deps.reportError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: 'provider_rejected', message: expect.stringContaining('XMAX 积分不足') }));
+    expect(f.deps.conditionApplied).not.toHaveBeenCalled();
+    expect(f.sdk.disconnect).toHaveBeenCalledOnce();
+    expect(await f.controller.retryUpdate()).toBe(false);
+    expect(f.deps.create).toHaveBeenCalledOnce();
+    expect(f.events.status).toHaveBeenCalledWith('error', 'XMAX 积分不足，请联系工作人员。');
+  });
+
+  it.each(['REFERENCE_BINDING_INVALID', 'EXHIBITION_INVALID_REFERENCE'])('retains the previous RTC after a material validation refusal: %s', async code => {
+    const f = fixture(); await f.ready();
+    f.deps.updateCondition.mockRejectedValueOnce(Object.assign(new Error('素材授权已更新，请重新选择。'), { code }));
+    expect(await f.controller.update(f.next('second'))).toBe(false);
+    expect(f.controller.stopped).toBe(false);
+    expect(f.deps.reportError).not.toHaveBeenCalled();
+    expect(f.sdk.disconnect).not.toHaveBeenCalled();
+    expect(f.events.stream).not.toHaveBeenCalledWith(null);
+    expect(f.events.updateError).toHaveBeenLastCalledWith('素材授权已更新，请重新选择。');
+    expect(await f.controller.update(f.next('third', 3))).toBe(true);
+  });
+
   it('closes an uncertain SDK update instead of repeating a potentially accepted command', async () => {
     const f = fixture(); await f.ready(); f.sdk.set.mockRejectedValueOnce(new Error('切换请求失败。'));
     expect(await f.controller.update(f.next('second'))).toBe(false); expect(f.deps.conditionApplied).not.toHaveBeenCalled();

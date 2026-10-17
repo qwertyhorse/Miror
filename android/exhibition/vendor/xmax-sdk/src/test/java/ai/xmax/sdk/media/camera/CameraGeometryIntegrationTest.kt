@@ -15,12 +15,12 @@ import org.junit.Test
 import sun.misc.Unsafe
 
 class CameraGeometryIntegrationTest {
-    private val format = RealtimeVideoFormat(704, 1280, 24, 700, 1700, RealtimeVideoEncoderPreference.MAINTAIN_QUALITY)
+    private val format = RealtimeVideoFormat(1024, 1920, 24, 700, 1700, RealtimeVideoEncoderPreference.MAINTAIN_QUALITY)
     private val rules = MediaService()
 
     @Test fun nonSquareRtcFramesResolveBeforeReadyAndDriveBothEncoderAndGeneration() = runBlocking {
-        val samples = listOf(0, 90, 180, 270).map { CameraFrameGeometry(1280, 704, it) } +
-            CameraFrameGeometry(704, 1280, 0) // RTC has already rotated the pixels.
+        val samples = listOf(0, 90, 180, 270).map { CameraFrameGeometry(1920, 1024, it) } +
+            CameraFrameGeometry(1024, 1920, 0) // RTC has already rotated the pixels.
         for (geometry in samples) {
             val fixture = CameraDeviceSelectionTest.Fixture(rules)
             fixture.engine.firstGeometry = geometry
@@ -41,7 +41,7 @@ class CameraGeometryIntegrationTest {
             assertEquals(24, fixture.engine.encoding?.frameRate)
             assertEquals(700, fixture.engine.encoding?.minimumBitrate)
             assertEquals(1700, fixture.engine.encoding?.maximumBitrate)
-            assertEquals(listOf(expected.width, expected.height), size(RoomEvent.start("user", "task", prepared, RealtimeContext("test"))))
+            assertEquals(listOf(expected.width, expected.height), size(RoomEvent.start("user", "task", prepared, RealtimeContext("test"), 700, 1700)))
             fixture.engine.geometryListener?.invoke(CameraFrameGeometry(960, 640, 0), false)
             assertEquals("Late size changes must not alter an active generation", expected, fixture.media.currentVideoFormat)
             assertEquals(listOf(expected.width, expected.height), size(RoomEvent.changeCondition("user", "task",
@@ -52,17 +52,17 @@ class CameraGeometryIntegrationTest {
 
     @Test fun latestSizeIsAlignedWithoutChangingFpsBitratesAndIsReevaluatedForReconnect() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture(rules)
-        fixture.engine.firstGeometry = CameraFrameGeometry(1280, 704, 0)
+        fixture.engine.firstGeometry = CameraFrameGeometry(1920, 1024, 0)
         fixture.media.createLocalCameraStream(format, CameraPosition.BACK)
         val latest = CameraFrameGeometry(1920, 1080, 90)
         fixture.engine.geometryListener?.invoke(latest, false)
-        val resolved = rules.resolveModelInputSize(IntSize(1080, 1920))
+        val resolved = rules.resolveModelInputSize(IntSize(1024, 1920))
         val prepared = fixture.media.prepareConnectionVideoFormat()
         assertEquals(format.copy(width = resolved.width, height = resolved.height), prepared)
-        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1280, 704, 0), false)
+        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1920, 1024, 0), false)
         assertEquals(prepared, fixture.media.currentVideoFormat)
         // Core calls prepare only while disconnected, once per connection attempt.
-        assertEquals(format.copy(width = 1280, height = 704), fixture.media.prepareConnectionVideoFormat())
+        assertEquals(format.copy(width = 1920, height = 1024), fixture.media.prepareConnectionVideoFormat())
         fixture.media.stopLocalStream()
     }
 
@@ -71,12 +71,12 @@ class CameraGeometryIntegrationTest {
         fixture.media.createLocalCameraStream(format, CameraPosition.BACK)
         val pending = async(start = CoroutineStart.UNDISPATCHED) { fixture.media.prepareConnectionVideoFormat() }
         assertFalse(pending.isCompleted)
-        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1280, 704, 270), false)
+        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1920, 1024, 270), false)
         assertFalse("A size change is not proof that capture has started", pending.isCompleted)
-        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(0, 704, 0), true)
-        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1280, 704, 45), true)
+        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(0, 1024, 0), true)
+        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1920, 1024, 45), true)
         assertFalse(pending.isCompleted)
-        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1280, 704, 270), true)
+        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1920, 1024, 270), true)
         assertEquals(format, pending.await())
         fixture.media.stopLocalStream()
     }
@@ -88,16 +88,16 @@ class CameraGeometryIntegrationTest {
         val pending = async(start = CoroutineStart.UNDISPATCHED) { fixture.media.prepareConnectionVideoFormat() }
         fixture.media.stopLocalStream()
         assertTrue(runCatching { pending.await() }.exceptionOrNull() is CancellationException)
-        old(CameraFrameGeometry(1280, 704, 0), true)
+        old(CameraFrameGeometry(1920, 1024, 0), true)
         assertNull(fixture.rtc.cameraFrameGeometry)
         fixture.media.createLocalCameraStream(format, CameraPosition.BACK)
-        old(CameraFrameGeometry(1280, 704, 0), true)
+        old(CameraFrameGeometry(1920, 1024, 0), true)
         assertNull(fixture.rtc.cameraFrameGeometry)
         val current = checkNotNull(fixture.engine.geometryListener)
-        current(CameraFrameGeometry(1280, 704, 90), true)
+        current(CameraFrameGeometry(1920, 1024, 90), true)
         assertEquals(format, fixture.media.prepareConnectionVideoFormat())
         fixture.rtc.useExternalVideoSource()
-        current(CameraFrameGeometry(1280, 704, 0), false)
+        current(CameraFrameGeometry(1920, 1024, 0), false)
         assertNull(fixture.rtc.cameraFrameGeometry)
         fixture.media.stopLocalStream()
     }
@@ -108,7 +108,7 @@ class CameraGeometryIntegrationTest {
             override fun dispatch(context: CoroutineContext, block: Runnable) { callbacks += block }
         }
         val fixture = CameraDeviceSelectionTest.Fixture(rules, CoroutineScope(dispatcher))
-        fixture.engine.firstGeometry = CameraFrameGeometry(1280, 704, 90)
+        fixture.engine.firstGeometry = CameraFrameGeometry(1920, 1024, 90)
         var ready = 0
         fixture.media.setCameraPreviewReadyListener { ready++ }
         fixture.media.createLocalCameraStream(format, CameraPosition.BACK)
@@ -126,14 +126,14 @@ class CameraGeometryIntegrationTest {
     @Test fun stoppedCaptureCallbacksCannotAffectARestartOnTheSameEngineLease() = runBlocking {
         val fixture = CameraDeviceSelectionTest.Fixture(rules)
         fixture.rtc.initialize()
-        fixture.rtc.startVideoCapture(704, 1280, 24)
+        fixture.rtc.startVideoCapture(1024, 1920, 24)
         val old = checkNotNull(fixture.engine.geometryListener)
         fixture.rtc.stopVideoCapture()
-        fixture.rtc.startVideoCapture(704, 1280, 24)
-        old(CameraFrameGeometry(1280, 704, 0), true)
+        fixture.rtc.startVideoCapture(1024, 1920, 24)
+        old(CameraFrameGeometry(1920, 1024, 0), true)
         assertNull(fixture.rtc.cameraFrameGeometry)
-        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1280, 704, 90), true)
-        assertEquals(CameraFrameGeometry(1280, 704, 90), fixture.rtc.awaitCameraFrameGeometry())
+        fixture.engine.geometryListener?.invoke(CameraFrameGeometry(1920, 1024, 90), true)
+        assertEquals(CameraFrameGeometry(1920, 1024, 90), fixture.rtc.awaitCameraFrameGeometry())
         fixture.rtc.destroy()
     }
 

@@ -1,7 +1,6 @@
 package ai.openbuy.exhibition
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import ai.xmax.sdk.CameraPosition
@@ -25,8 +24,6 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -61,13 +58,14 @@ internal class NativeXmaxController(
     var onFirstFrame: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     internal var onCameraSnapshot: ((NativeCameraSnapshot) -> Unit)? = null
-    /** Receiver owns each sample and must close it, even when discarding it. */
-    @Volatile var onLocalFrame: ((NativeCameraFrame) -> Unit)? = null
-    @Volatile var shouldSampleLocalFrame: (() -> Boolean)? = null
+    /** Acquire the ready consumer before SDK copying; its epoch-bound receiver owns the sample. */
+    @Volatile var acquireLocalFrameReceiver: (() -> ((NativeGestureFrame) -> Unit)?)? = null
     @Volatile private var gestureSampling = NativeGestureSampling.LOCAL
 
+    fun invalidateGestureSampling() { gestureSampling = gestureSampling.copy() }
+
     fun configureGestureSampling(settings: NativeGestureSampling) {
-        // A distinct snapshot invalidates old conversions even when values later return to their previous setting.
+        // A distinct snapshot invalidates old samples even when values later return to their previous setting.
         if (gestureSampling != settings) gestureSampling = settings.copy()
     }
 
@@ -92,7 +90,7 @@ internal class NativeXmaxController(
                 val ownerEpoch = epoch.get()
                 // Client construction and createLocalCameraStream do not invoke an HTTP API.
                 val next = client("local-preview-only", "cn")
-                    .createRealtimeManager(RealtimeConfiguration(RealtimeModel.X2_0))
+                    .createRealtimeManager(RealtimeConfiguration(RealtimeModel.X2_1_1_PREVIEW_CN))
                 manager = next
                 previewOnly = true
                 previewPosition = position
@@ -127,14 +125,15 @@ internal class NativeXmaxController(
         cameraRotationDegrees: Int = 0,
         captureSelection: NativeCameraCaptureSelection = NativeCameraCaptureSelection.Automatic,
     ): String = withContext(Dispatchers.Main.immediate) {
-        require(model == "x2.0") { "当前仅支持 X2.0" }
+        require(NativeXmaxModel.matches(model, region)) { "当前模型与服务区域不匹配，请更新后台" }
+        val realtimeModel = if (region == "cn") RealtimeModel.X2_1_1_PREVIEW_CN else RealtimeModel.X2_1_1_PREVIEW_US
         require(cameraRotationDegrees in listOf(0, 90, 180, 270)) { "摄像头方向无效" }
         mutex.withLock {
             check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
             release()
             val ownerEpoch = epoch.get()
             val next = client(token, region)
-                .createRealtimeManager(RealtimeConfiguration(RealtimeModel.X2_0))
+                .createRealtimeManager(RealtimeConfiguration(realtimeModel))
             manager = next
             try {
                 val ready = observeErrors(next, ownerEpoch)
@@ -172,7 +171,7 @@ internal class NativeXmaxController(
                     ?: throw IllegalStateException("请先连接镜端")
                 require(!active.currentState.sessionId.isNullOrBlank()) { "实时会话未就绪" }
                 val ownerEpoch = epoch.get()
-                // Official 1.0.8 returns only after the current task's postprocessed
+                // Official 1.0.9 returns only after the current task's postprocessed
                 // remote frame arrives and the remote render binding succeeds.
                 active.startGeneration(RealtimeContext(prompt, refUrl))
                 if (epoch.get() == ownerEpoch && !firstFrameDelivered) {
@@ -204,7 +203,7 @@ internal class NativeXmaxController(
         mutex.withLock {
             check(!hasReleaseFailure) { "摄像头释放失败，请重新打开应用" }
             val owner = manager ?: client("local-preview-only", "cn")
-                .createRealtimeManager(RealtimeConfiguration(RealtimeModel.X2_0)).also { manager = it }
+                .createRealtimeManager(RealtimeConfiguration(RealtimeModel.X2_1_1_PREVIEW_CN)).also { manager = it }
             cameraSnapshot(owner)
         }
     }
@@ -236,7 +235,7 @@ internal class NativeXmaxController(
         val captureSize = captureSelection.resolve(selected)
         observeLocalFrames(owner, epoch.get())
         return owner.createLocalCameraStream(
-            videoFormat = RealtimeVideoFormat(width = 704, height = 1280, fps = 24),
+            videoFormat = RealtimeVideoFormat(width = 1024, height = 1920, fps = 24),
             position = when (selected.facing) {
                 NativeCameraFacing.FRONT -> CameraPosition.FRONT
                 NativeCameraFacing.BACK, NativeCameraFacing.EXTERNAL -> CameraPosition.BACK
@@ -245,53 +244,55 @@ internal class NativeXmaxController(
             useMicrophone = false,
             cameraDeviceId = selected.id,
             cameraRotationDegrees = cameraRotationDegrees,
-            captureFormat = RealtimeCameraCaptureFormat(captureSize.width, captureSize.height, 24),
+            captureFormat = RealtimeCameraCaptureFormat(captureSize.width, captureSize.height,
+                NativeCameraCaptureSelection.framesPerSecond(selected, captureSize)),
         )
     }
 
     private suspend fun observeLocalFrames(owner: XmaxRealtimeManaging, ownerEpoch: Long) {
-        if (onLocalFrame == null) { owner.setLocalVideoFrameListener(null); return }
+        if (acquireLocalFrameReceiver == null) { owner.setLocalVideoFrameListener(null); return }
         val inFlight = AtomicBoolean()
         val lastSample = AtomicLong(Long.MIN_VALUE)
         val pendingSampling = AtomicReference<NativeGestureSampling?>()
+        val pendingReceiver = AtomicReference<((NativeGestureFrame) -> Unit)?>()
         owner.setLocalVideoFrameListener(object : RealtimeLocalVideoFrameListener {
             override fun shouldCaptureFrame(timestampMs: Long): Boolean {
-                if (epoch.get() != ownerEpoch || onLocalFrame == null || shouldSampleLocalFrame?.invoke() == false) return false
+                if (epoch.get() != ownerEpoch) return false
                 val previous = lastSample.get()
                 val sampling = gestureSampling
                 if (previous != Long.MIN_VALUE && timestampMs - previous < sampling.intervalMs) return false
                 if (!inFlight.compareAndSet(false, true)) return false
+                val receiver = acquireLocalFrameReceiver?.invoke()
+                if (receiver == null) { inFlight.set(false); return false }
+                pendingReceiver.set(receiver)
                 pendingSampling.set(sampling)
                 lastSample.set(timestampMs)
                 return true
             }
-            override fun onFrameDropped() { pendingSampling.set(null); inFlight.set(false) }
+            override fun onFrameDropped() { pendingReceiver.set(null); pendingSampling.set(null); inFlight.set(false) }
             override fun onFrame(frame: RealtimeVideoFrame, timestampMs: Long) {
                 val sampling = pendingSampling.getAndSet(null)
-                CoroutineScope(Dispatchers.Default).launch {
-                    var sample: NativeCameraFrame? = null
-                    var transferred = false
-                    try {
-                        if (sampling == null || sampling !== gestureSampling || epoch.get() != ownerEpoch || onLocalFrame == null) return@launch
-                        val pixels = NativeCameraPixels.convert(frame.width, frame.height, frame.rotationDegrees,
-                            frame.yData, frame.uData, frame.vData, frame.yStride, frame.uStride, frame.vStride, sampling.inputLongEdge,
-                            unmirror = frame.isMirrored)
-                        val bitmap = Bitmap.createBitmap(pixels.argb, pixels.width, pixels.height, Bitmap.Config.ARGB_8888)
-                        val owned = NativeCameraFrame(bitmap, timestampMs, ownerEpoch,
-                            { epoch.get() == ownerEpoch && sampling === gestureSampling }) { inFlight.set(false) }
-                        sample = owned
-                        val receiver = onLocalFrame
-                        if (owned.isCurrent() && receiver != null) {
-                            receiver(owned)
-                            transferred = true
-                            sample = null // Ownership transferred; inference releases capture backpressure.
-                        }
-                    } catch (_: Exception) {
-                        // Analysis never interrupts the RTC camera or the XMAX session.
-                    } finally {
-                        if (sample != null) sample.close()
-                        else if (!transferred) inFlight.set(false)
+                val receiver = pendingReceiver.getAndSet(null)
+                var sample: NativeGestureFrame? = null
+                var transferred = false
+                try {
+                    if (sampling == null || sampling !== gestureSampling || epoch.get() != ownerEpoch || receiver == null) return
+                    val owned = NativeGestureFrame(frame.width, frame.height, frame.rotationDegrees, frame.isMirrored,
+                        frame.yData, frame.uData, frame.vData, frame.yStride, frame.uStride, frame.vStride,
+                        timestampMs, ownerEpoch, { epoch.get() == ownerEpoch && sampling === gestureSampling }) {
+                        inFlight.set(false)
                     }
+                    sample = owned
+                    if (owned.isCurrent()) {
+                        receiver(owned)
+                        transferred = true
+                        sample = null // The raw upload retains capture backpressure until it finishes.
+                    }
+                } catch (_: Exception) {
+                    // Invalid samples never interrupt camera preview or XMAX generation.
+                } finally {
+                    if (sample != null) sample.close()
+                    else if (!transferred) inFlight.set(false)
                 }
             }
         })

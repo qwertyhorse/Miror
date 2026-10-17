@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { ExhibitionMirrorGestureDetector } from '../src/exhibition/mirrorGestureDetector.ts';
 import { resolveExhibitionGestureSettings, type ExhibitionGestureSettings } from '../shared/exhibitionGestures.ts';
-import { REMOTE_GESTURE_MAX_FRAME_BYTES, REMOTE_GESTURE_SESSION_TTL_MS,
-  type RemoteGestureControl, type RemoteGestureFrameMetadata, type RemoteGestureSnapshot } from '../shared/remoteGestures.ts';
+import { REMOTE_GESTURE_MAX_FRAME_BYTES, REMOTE_GESTURE_SESSION_TTL_MS, remoteGestureI420ByteLength,
+  type RemoteGestureControl, type RemoteGestureFrameMetadata, type RemoteGestureSnapshot,
+  type RemoteGestureI420Metadata, type RemoteGestureOpenSnapshot } from '../shared/remoteGestures.ts';
 import type { GestureInference } from './gestureInference.ts';
 
 const RELEASE_MS = 500;
@@ -77,7 +78,7 @@ export class RemoteGestureCoordinator {
   }
 
   /** Called only after HTTP verifies a bound terminal. Credentials and images are never retained. */
-  async open(owner: RemoteGestureOpen, inputSettings?: ExhibitionGestureSettings): Promise<RemoteGestureSnapshot> {
+  async open(owner: RemoteGestureOpen, inputSettings?: ExhibitionGestureSettings): Promise<RemoteGestureOpenSnapshot> {
     if (!owner || typeof owner.terminalId !== 'string' || !owner.terminalId
       || typeof owner.mirrorId !== 'string' || !owner.mirrorId
       || (owner.epoch !== undefined && !integer(owner.epoch))
@@ -111,7 +112,7 @@ export class RemoteGestureCoordinator {
         session.inference = inference;
         if (session.closed || this.opening.get(owner.terminalId) !== ticket) throw this.stale();
         session.lastActivity = this.now();
-        return this.snapshot(session);
+        return { ...this.snapshot(session), frameFormat: 'i420-v1' };
       } catch (error) {
         const invalidated = session.closed;
         await this.dispose(session);
@@ -139,14 +140,15 @@ export class RemoteGestureCoordinator {
     return this.snapshot(session);
   }
 
-  async frame(sessionId: string, metadata: RemoteGestureFrameMetadata, jpeg: Buffer,
+  async frame(sessionId: string, metadata: RemoteGestureFrameMetadata, image: Buffer,
     inputSettings: ExhibitionGestureSettings, serverBlocked: boolean,
-    guard: () => boolean = () => true): Promise<RemoteGestureSnapshot> {
+    guard: () => boolean = () => true, rawFrame?: RemoteGestureI420Metadata): Promise<RemoteGestureSnapshot> {
     const session = this.get(sessionId);
     this.validateControl(metadata);
     if (!integer(metadata.seq) || !integer(metadata.timestamp)
-      || typeof serverBlocked !== 'boolean' || !Buffer.isBuffer(jpeg) || !jpeg.length
-      || jpeg.length > REMOTE_GESTURE_MAX_FRAME_BYTES) this.badRequest();
+      || typeof serverBlocked !== 'boolean' || !Buffer.isBuffer(image) || !image.length
+      || (rawFrame === undefined ? image.length > REMOTE_GESTURE_MAX_FRAME_BYTES
+        : remoteGestureI420ByteLength(rawFrame) !== image.length)) this.badRequest();
     if (metadata.epoch < session.epoch || metadata.seq <= session.seq
       || (session.acceptedTime !== null && metadata.timestamp <= session.acceptedTime)) throw this.stale();
     // New control is applied even if a previous frame is still finishing. That older frame is invalid now.
@@ -174,7 +176,7 @@ export class RemoteGestureCoordinator {
     try {
       let result: Awaited<ReturnType<GestureInference['infer']>>;
       try {
-        result = await session.inference.infer(jpeg, metadata.timestamp, settings);
+        result = await session.inference.infer(image, metadata.timestamp, settings, rawFrame);
       } catch {
         const invalidated = session.closed || session.revision !== revision;
         // The failed tracker may have lost its VIDEO context. Reopening starts behind the release fence.

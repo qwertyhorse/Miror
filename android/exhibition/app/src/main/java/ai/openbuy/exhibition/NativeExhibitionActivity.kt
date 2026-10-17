@@ -137,16 +137,17 @@ class NativeExhibitionActivity : Activity() {
             .putBoolean("native-camera-calibration-required", cameraCalibrationRequired).commit())
         cameraCaptureSelection = NativeCameraCaptureSelection.fromStored(prefs.getString("native-camera-capture-size", null))
         remoteCamera = NativeCameraRemote(prefs.getStringSet("native-camera-handled-requests", emptySet()).orEmpty())
-        gestureMode = prefs.getString("native-gesture-mode", "linux").takeIf { it == "local" } ?: "linux"
+        // Local recognition is suspended; preserve old local selections as off, never switch them to remote upload.
+        gestureMode = when (prefs.getString("native-gesture-mode", "linux")) {
+            "local", "off" -> "off"
+            else -> "linux"
+        }
         api = newApi()
         buildInterface()
         controller = NativeXmaxController(this, video)
         initializeGestures()
-        controller.shouldSampleLocalFrame = { gestureCaptureEnabled }
-        controller.onLocalFrame = { frame ->
-            if (!gestureCaptureEnabled) frame.close()
-            else if (gestureMode == "linux") remoteGestures?.submit(frame) ?: frame.close()
-            else handTracker?.submit(frame) ?: frame.close()
+        controller.acquireLocalFrameReceiver = {
+            if (gestureCaptureEnabled && gestureMode == "linux") remoteGestures?.frameReceiver() else null
         }
         controller.onCameraSnapshot = { snapshot ->
             cameraSnapshot = snapshot
@@ -191,7 +192,7 @@ class NativeExhibitionActivity : Activity() {
         gestureInstance++
         remoteGestures?.close()
         remoteGestures = null
-        controller.onLocalFrame = null
+        controller.acquireLocalFrameReceiver = null
         handTracker?.close()
         handTracker = null
         gestureBridge?.close()
@@ -217,6 +218,7 @@ class NativeExhibitionActivity : Activity() {
     /** One engine owns all SDK operations. A replacement waits for its predecessor's cleanup. */
     private fun restartWork() {
         gestureCaptureEnabled = false
+        controller.invalidateGestureSampling()
         remoteGestures?.close()
         remoteGestures = null
         remoteGestureBinding = ""
@@ -543,23 +545,24 @@ class NativeExhibitionActivity : Activity() {
 
     private fun startOrStop() {
         val current = state ?: return
+        if (current.string("phase") == "paused") {
+            if (!actionBusy && !stopBusy && round == null && current.optJSONObject("live") == null && !controller.hasReleaseFailure) command("resume")
+            return
+        }
         if (actionBusy) { command("end"); return }
         if (current.optJSONObject("live")?.optBoolean("localEnded") == true) { command("recover"); return }
         if (current.optJSONObject("live") != null && round == null) { command("end"); return }
         when (current.string("phase")) {
             "generating", "showcase", "positioning" -> command("end")
-            "paused" -> command("end")
             else -> command("begin")
         }
     }
 
     private fun step(direction: Int) {
         val snapshot = state ?: return
-        val all = enabledLooks(snapshot)
-        if (!NativeMaterialCatalog.hasAlternative(snapshot)) return
-        val index = all.indexOfFirst { it.string("id") == snapshot.string("selectedLookId") }
+        val next = NativeMaterialCatalog.next(snapshot, direction) ?: return
         command(if (snapshot.string("phase") in listOf("generating", "showcase")) "switch" else "select",
-            all[Math.floorMod(index + direction, all.size)].string("id"))
+            next.string("id"))
     }
 
     @Suppress("DEPRECATION")
@@ -609,25 +612,25 @@ class NativeExhibitionActivity : Activity() {
         val snapshot = state
         val bound = mirrorId != null
         val phase = snapshot?.string("phase").orEmpty()
+        val displayError = error.takeUnless { phase == "paused" && it == "本次换装已结束，请由工作人员继续体验。" }.orEmpty()
         val mode = snapshot?.string("experienceMode").orEmpty()
         val live = snapshot?.optJSONObject("live")
         val selected = selectedLook(snapshot)
         status.text = when {
-            (snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 -> "即将返回待机，点此继续体验"
-            error.isNotBlank() -> error
+            phase != "paused" && (snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 -> "即将返回待机，点此继续体验"
+            displayError.isNotBlank() -> displayError
             !healthy -> "连接后台…"
             !bound -> "待绑定"
             live?.optBoolean("localEnded") == true -> "云端状态待确认"
             live != null && round == null -> "等待会话释放"
-            generationStatus.isNotBlank() -> generationStatus
+            generationStatus.isNotBlank() && phase != "paused" -> generationStatus
             snapshot?.string("providerMode") == "demo" -> "演示模式"
             snapshot?.string("providerMode") == "xmax" && provider?.optBoolean("configured") == false -> "请在后台配置 XMAX"
-            phase == "paused" -> "已暂停"
             cameraReady -> "本地取景"
             !hasCameraPermission() -> "请允许摄像头权限"
             else -> "准备摄像头…"
         }
-        status.setTextColor(if (error.isBlank()) MUTED else Color.rgb(175, 60, 65))
+        status.setTextColor(if (displayError.isBlank()) MUTED else Color.rgb(175, 60, 65))
         pairing.visibility = if (bound) View.GONE else View.VISIBLE
         pairTitle.text = if (healthy) "设备绑定" else "连接后台"
         pairCode.text = bindingCode.ifBlank { "····" }
@@ -648,8 +651,8 @@ class NativeExhibitionActivity : Activity() {
         kiosk.empty.visibility = if (bound && selected == null) View.VISIBLE else View.GONE
         val missingCameraPermission = realtime && mode != "mox" && !hasCameraPermission()
         val missingCredential = realtime && provider?.optBoolean("configured") == false
-        kiosk.status.visibility = if ((snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0 ||
-            error.isNotBlank() || !healthy || live != null || generationStatus.isNotBlank() || missingCameraPermission || missingCredential) View.VISIBLE else View.GONE
+        kiosk.status.visibility = if ((phase != "paused" && (snapshot?.optJSONObject("lifecycle")?.optLong("idleEndsAt", 0) ?: 0) > 0) ||
+            displayError.isNotBlank() || !healthy || live != null || (generationStatus.isNotBlank() && phase != "paused") || missingCameraPermission || missingCredential) View.VISIBLE else View.GONE
         val busy = phase in listOf("generating", "showcase", "positioning") || round != null
         val blocked = live != null
         primary.text = presentation.primaryText
@@ -659,15 +662,17 @@ class NativeExhibitionActivity : Activity() {
         kiosk.setPrimaryIcon(presentation.stopIcon, presentation.recoverIcon)
         val canStart = !cameraCalibrationRequired && !cameraSettingsOpen && !controller.hasReleaseFailure && healthy && selected != null && (!realtime || mode == "mox" || cameraReady) &&
             (!realtime || provider?.optBoolean("configured") == true)
-        primary.isEnabled = !stopBusy && bound && snapshot != null && (actionBusy || busy || blocked || phase == "paused" || canStart)
+        primary.isEnabled = !stopBusy && bound && snapshot != null && if (phase == "paused")
+            !actionBusy && !busy && !blocked && canStart
+            else actionBusy || busy || blocked || canStart
         kiosk.stopButton.isEnabled = primary.isEnabled
         kiosk.continueButton.visibility = if (bound && presentation.showContinue) View.VISIBLE else View.GONE
         kiosk.continueButton.isEnabled = !actionBusy && !stopBusy && canStart
-        kiosk.home.visibility = if (bound && phase !in listOf("idle", "select", "")) View.VISIBLE else View.GONE
+        kiosk.home.visibility = if (bound && phase !in listOf("idle", "select", "paused", "")) View.VISIBLE else View.GONE
         kiosk.home.isEnabled = !stopBusy
         val canSelect = !actionBusy && healthy && phase in listOf("idle", "select", "generating", "showcase") && !blockedUnlessOwn(live)
         kiosk.drawer.visibility = if (bound && selected != null) View.VISIBLE else View.GONE
-        if (!bound || mode != lastUiMode) kiosk.drawer.setOpen(false)
+        if (!bound || mode != lastUiMode || phase == "paused") kiosk.drawer.setOpen(false)
         lastUiMode = mode
         kiosk.drawer.submit(enabledLooks(snapshot), snapshot?.string("selectedLookId").orEmpty(),
             settings?.optInt("materialDrawerColumns", 2) ?: 2, canSelect, if (mode == "clothx") "选择服装" else "选择素材")
@@ -678,6 +683,7 @@ class NativeExhibitionActivity : Activity() {
 
     private fun initializeGestures() {
         gestureCaptureEnabled = false
+        controller.invalidateGestureSampling()
         val instance = ++gestureInstance
         remoteGestures?.close()
         remoteGestures = null
@@ -765,7 +771,7 @@ class NativeExhibitionActivity : Activity() {
             settings.optInt("maxFps", 15), settings.optInt("inputLongEdge", 720))
     }
 
-    private fun gestureAvailable(): Boolean = started && !destroyed && mirrorId != null &&
+    private fun gestureAvailable(): Boolean = gestureMode == "linux" && started && !destroyed && mirrorId != null &&
         state?.string("providerMode") == "xmax" && state?.string("experienceMode") != "mox" &&
         provider?.string("providerId") != "decart" && !cameraSettingsOpen && hasCameraPermission() &&
         !blockedUnlessOwn(state?.optJSONObject("live"))
@@ -834,7 +840,9 @@ class NativeExhibitionActivity : Activity() {
     private fun renderGestureFeedback() {
         if (destroyed || !::kiosk.isInitialized) return
         kiosk.gestures.visibility = if (gestureAvailable()) View.VISIBLE else View.GONE
+        kiosk.gestures.contentDescription = gestureError.ifEmpty { "手势识别" }
         kiosk.gestures.text = when {
+            gestureError == NativeRemoteGestures.UPGRADE_REQUIRED -> "请更新电脑后台"
             gestureError.isNotEmpty() -> "重试手势"
             !gesturesOn -> "手势已关闭"
             actionBusy || state?.string("phase") == "generating" || round?.isBusy == true -> "切换中"
@@ -900,14 +908,23 @@ class NativeExhibitionActivity : Activity() {
         val content = NativeDeviceSettingsView(this, remoteRequest != null)
         val address = content.address.apply { setText(screenUrl) }
         val backendIp = content.backendIp.apply { setText(prefs.getString("backend-ip", "")) }
+        val sourceSelector = Spinner(this).apply {
+            contentDescription = "视频来源"
+            adapter = ArrayAdapter(this@NativeExhibitionActivity, android.R.layout.simple_spinner_item,
+                arrayOf("安卓摄像头", "局域网电脑")).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            minimumHeight = dp(48)
+            isEnabled = !cameraLocked
+        }
         val gestureSelector = Spinner(this).apply {
             contentDescription = "手势识别"
             adapter = ArrayAdapter(this@NativeExhibitionActivity, android.R.layout.simple_spinner_item,
-                arrayOf("安卓本机", "Linux电脑")).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-            setSelection(if (gestureMode == "local") 0 else 1)
+                arrayOf("关闭", "Linux电脑")).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            setSelection(if (gestureMode == "off") 0 else 1)
             minimumHeight = dp(48)
         }
         if (remoteRequest == null) {
+            content.cameraContainer.addView(MirrorSettingsStyle.label(this).apply { text = "视频来源" })
+            content.cameraContainer.addView(sourceSelector, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(18) })
             content.cameraContainer.addView(MirrorSettingsStyle.label(this).apply { text = "手势识别" })
             content.cameraContainer.addView(gestureSelector, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(18) })
         }
@@ -975,7 +992,8 @@ class NativeExhibitionActivity : Activity() {
                     cameraPanel.selection.cameraId != cameraDeviceId ||
                         cameraPanel.rotationDegrees != cameraRotationDegrees ||
                         cameraPanel.captureSelection != cameraCaptureSelection)
-                if ((cameraChanged || cameraCalibrationRequired) && cameraPanel?.hasVerifiedPreview != true) {
+                val switchingToComputer = remoteRequest == null && sourceSelector.selectedItemPosition == 1
+                if (!switchingToComputer && (cameraChanged || cameraCalibrationRequired) && cameraPanel?.hasVerifiedPreview != true) {
                     Toast.makeText(this, "摄像头预览正常后再保存", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
@@ -990,11 +1008,13 @@ class NativeExhibitionActivity : Activity() {
                     // Constructor validates the endpoint before a running terminal is interrupted.
                     ExhibitionApi(url, terminalId, terminalToken, Build.MODEL, LanBackendDns(applicationContext, url, fallbackIp))
                     val selectedGestureMode = if (remoteRequest == null) {
-                        if (gestureSelector.selectedItemPosition == 0) "local" else "linux"
+                        if (gestureSelector.selectedItemPosition == 0) "off" else "linux"
                     } else gestureMode
                     val preferences = prefs.edit().putString("screen-url", url).putString("backend-ip", fallbackIp)
                         .putString("native-gesture-mode", selectedGestureMode)
-                    if (cameraPanel != null) {
+                    if (remoteRequest == null) preferences.putString("native-video-source",
+                        if (sourceSelector.selectedItemPosition == 1) "computer" else "android")
+                    if (cameraPanel != null && !switchingToComputer) {
                         preferences.putString("native-camera-id", cameraPanel.selection.storedValue)
                         preferences.putInt("native-camera-rotation", cameraPanel.rotationDegrees)
                         preferences.putBoolean("native-camera-calibration-required", false)
@@ -1004,7 +1024,7 @@ class NativeExhibitionActivity : Activity() {
                     screenUrl = url
                     gestureMode = selectedGestureMode
                     initializeGestures()
-                    if (cameraPanel != null) {
+                    if (cameraPanel != null && !switchingToComputer) {
                         cameraDeviceId = cameraPanel.selection.cameraId
                         cameraRotationDegrees = cameraPanel.rotationDegrees
                         cameraCalibrationRequired = false
@@ -1019,6 +1039,10 @@ class NativeExhibitionActivity : Activity() {
                         imageCache.evictAll()
                     }
                     dialog.dismiss()
+                    if (remoteRequest == null && sourceSelector.selectedItemPosition == 1) {
+                        startActivity(Intent(this@NativeExhibitionActivity, MainActivity::class.java))
+                        finish()
+                    }
                 } catch (cause: IllegalArgumentException) { address.error = cause.message ?: "网址无效" }
                 catch (_: IllegalStateException) { Toast.makeText(this, "无法保存摄像头设置", Toast.LENGTH_SHORT).show() }
             }

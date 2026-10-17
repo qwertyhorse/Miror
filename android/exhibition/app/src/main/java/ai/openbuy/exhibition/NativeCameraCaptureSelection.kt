@@ -7,9 +7,16 @@ internal data class NativeCameraCaptureSelection(val size: NativeCameraSize? = n
     val storedValue: String get() = size?.let { "${it.width}x${it.height}" }.orEmpty()
     val label: String get() = size?.let(::label) ?: "自动"
 
+    /** Migrate only a proven driver-incompatible choice, including preferences saved by older builds. */
+    fun normalized(device: NativeCameraDevice): NativeCameraCaptureSelection {
+        if (size !in device.unavailableSizes) return this
+        val stable = NativeCameraSize(1920, 1080)
+        return if (stable in options(device)) NativeCameraCaptureSelection(stable) else Automatic
+    }
+
     fun resolve(device: NativeCameraDevice): NativeCameraSize {
         val available = options(device)
-        size?.let { requested ->
+        normalized(device).size?.let { requested ->
             require(requested in available) { "所选分辨率 ${requested.width}×${requested.height} 不可用，请重新选择" }
             return requested
         }
@@ -30,8 +37,23 @@ internal data class NativeCameraCaptureSelection(val size: NativeCameraSize? = n
         }
 
         fun options(device: NativeCameraDevice): List<NativeCameraSize> = device.sizes
-            .filter(::isSupportedSize).distinct()
+            .filter { isSupportedSize(it) && it !in device.unavailableSizes }.distinct()
             .sortedWith(compareByDescending<NativeCameraSize> { it.width.toLong() * it.height }.thenByDescending { it.width })
+
+        /** Capture only: model/encoding fps remain independent. Raise the compatible 24 fps
+         * request only when both AE and this exact output size report sufficient capacity. */
+        fun framesPerSecond(device: NativeCameraDevice, size: NativeCameraSize): Int {
+            val aeCeiling = device.fpsRanges.asSequence()
+                .filter { it.min in 1..30 && it.max >= it.min }
+                .maxOfOrNull { it.max }
+            val duration = device.minimumFrameDurationsNs[size]?.takeIf { it > 0 && size in options(device) }
+            val sizeCeiling = duration?.let { minimumNs ->
+                // Integer nanosecond rounding must not turn a nominal 30 fps period into 29.
+                (30 downTo 1).firstOrNull { fps -> minimumNs <= (1_000_000_000L + fps - 1) / fps } ?: 1
+            }
+            val preferred = if (aeCeiling != null && sizeCeiling != null) 30 else 24
+            return minOf(preferred, aeCeiling ?: preferred, sizeCeiling ?: preferred).coerceIn(1, 30)
+        }
 
         fun label(size: NativeCameraSize): String = "${size.width}×${size.height}" +
             if (maxOf(size.width, size.height) >= 3840 && minOf(size.width, size.height) >= 2160) " · 4K" else ""
